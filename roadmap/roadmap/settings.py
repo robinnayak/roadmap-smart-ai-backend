@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     
     
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'rest_framework',
     "corsheaders",
     
@@ -110,8 +111,13 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
-CORS_ALLOW_ALL_ORIGINS: bool
+# CORS_ALLOW_ALL_ORIGINS: True
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
 
+CORS_ALLOW_CREDENTIALS = True
 # REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
@@ -148,9 +154,9 @@ AUTH_USER_MODEL = 'authentication.CustomUser'
 
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
-    'ROTATE_REFRESH_TOKENS': True,
+    'ROTATE_REFRESH_TOKENS': False,
     'BLACKLIST_AFTER_ROTATION': True,
     'UPDATE_LAST_LOGIN': True,
     
