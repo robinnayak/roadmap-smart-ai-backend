@@ -2,7 +2,8 @@
 
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
-from .models import CustomUser
+from .models import CustomUser, Profile, NotificationSettings, UserPersonalDetails
+
 
 class UserRegisterSerializer(serializers.ModelSerializer):
     password2 = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
@@ -87,3 +88,40 @@ class UserLogoutSerializer(serializers.Serializer):
 
 class TokenRefreshSerializer(serializers.Serializer):
     refresh = serializers.CharField()   
+
+
+#Profile
+
+class ProfileSerializer(serializers.ModelSerializer):
+    # Make these fields read-only if you don't want them to be updated
+    username = serializers.CharField(source='user.username', read_only=True)
+    email = serializers.CharField(source='user.email', read_only=True)
+    
+    class Meta:
+        model = Profile
+        fields = [
+            'id', 'username', 'email', 'bio', 'avatar', 'timezone', 
+            'subscription_tier', 'total_points', 
+            'current_level', 'preferred_language', 'theme'
+        ]
+        
+class UserPersonalDetailsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserPersonalDetails
+        fields = '__all__'
+        read_only_fields = ('id', 'user', 'created_at', 'updated_at')
+
+class NotificationSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NotificationSettings
+        fields = (
+            'id',
+            'notifications_enabled',
+            'routine_remainders',
+            'streak_warnings',
+            'personalize_assistant',
+            'push_notifications',
+            'email_notifications',
+        )
+        
+

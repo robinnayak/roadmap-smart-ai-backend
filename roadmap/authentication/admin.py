@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import CustomUser
+from .models import CustomUser, Profile, NotificationSettings
 
 
 # Register your models here.
@@ -10,3 +10,6 @@ class CustomUserAdmin(admin.ModelAdmin):
     ordering = ('email',)
 
 admin.site.register(CustomUser, CustomUserAdmin)
+
+admin.site.register(Profile)
+admin.site.register(NotificationSettings)

@@ -13,9 +13,12 @@ from django.contrib.auth import authenticate
 from .serializers import (
     UserRegisterSerializer, UserLoginSerializer,
     UserLogoutSerializer, UserProfileSerializer,
-    TokenRefreshSerializer
+    TokenRefreshSerializer, ProfileSerializer, NotificationSettingsSerializer, UserPersonalDetailsSerializer
 )
-from .models import CustomUser
+from django.shortcuts import get_object_or_404
+
+from .models import CustomUser, Profile, NotificationSettings, UserPersonalDetails
+
 
 
 class UserRegistrationView(APIView):
@@ -136,12 +139,12 @@ class UserLogoutView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-class UserProfileView(APIView):
-    permission_classes = [IsAuthenticated]
+# class UserProfileView(APIView):
+#     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        serializer = UserProfileSerializer(request.user)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+#     def get(self, request):
+#         serializer = UserProfileSerializer(request.user)
+#         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class CustomTokenRefreshView(TokenRefreshView):
@@ -192,3 +195,158 @@ class CustomTokenRefreshView(TokenRefreshView):
 #             }
         
 #         return response
+
+
+#==========================================================
+#Profile functionality
+
+
+class ProfileDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        print("=="*70)
+        print("user", request.user)
+        
+        # Get or create profile
+        profile, created = Profile.objects.get_or_create(user=request.user)
+        print(f"profile: {profile}, created: {created}")
+        
+        # For GET requests, just serialize the instance
+        serializer = ProfileSerializer(profile)
+        print(f"serializer data: {serializer.data}")
+        print("=="*70)
+        
+        # Return the serialized data
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def put(self, request):
+        profile, created = Profile.objects.get_or_create(user = request.user)
+        serializer = ProfileSerializer(profile, data= request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+class UserPersonalDetailsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, user):
+        """
+        Helper method to get the user's personal details
+        """
+        return get_object_or_404(UserPersonalDetails, user=user)
+
+    # ✅ CREATE (POST)
+    def post(self, request):
+        """
+        Create personal details for the logged-in user
+        """
+        if UserPersonalDetails.objects.filter(user=request.user).exists():
+            return Response(
+                {"detail": "Personal details already exist."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = UserPersonalDetailsSerializer(
+            data=request.data
+        )
+        if serializer.is_valid():
+            serializer.save(user=request.user)
+            return Response(
+                serializer.data,
+                status=status.HTTP_201_CREATED
+            )
+
+        return Response(
+            serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # 👀 READ (GET)
+    def get(self, request):
+        """
+        Retrieve personal details of the logged-in user
+        """
+        details = self.get_object(request.user)
+        serializer = UserPersonalDetailsSerializer(details)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    # ✏️ UPDATE (PUT / PATCH)
+    def put(self, request):
+        """
+        Full update of personal details
+        """
+        details = self.get_object(request.user)
+        serializer = UserPersonalDetailsSerializer(
+            details,
+            data=request.data
+        )
+
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+
+        return Response(
+            serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # def patch(self, request):
+    #     """
+    #     Partial update of personal details
+    #     """
+    #     details = self.get_object(request.user)
+    #     serializer = UserPersonalDetailsSerializer(
+    #         details,
+    #         data=request.data,
+    #         partial=True
+    #     )
+
+    #     if serializer.is_valid():
+    #         serializer.save()
+    #         return Response(serializer.data)
+
+    #     return Response(
+    #         serializer.errors,
+    #         status=status.HTTP_400_BAD_REQUEST
+    #     )
+
+    # ❌ DELETE
+    def delete(self, request):
+        """
+        Delete personal details of the logged-in user
+        """
+        details = self.get_object(request.user)
+        details.delete()
+        return Response(
+            {"detail": "Personal details deleted successfully."},
+            status=status.HTTP_204_NO_CONTENT
+        )
+
+    
+class NotificationDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        print("=="*70)
+        print("user", request.user)
+        
+        # Get or create profile
+        notification, created = NotificationSettings.objects.get_or_create(user=request.user)
+        print(f"profile: {notification}, created: {created}")
+        
+        # For GET requests, just serialize the instance
+        serializer = NotificationSettingsSerializer(notification)
+        print(f"serializer data: {serializer.data}")
+        print("=="*70)
+        # Return the serialized data
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def put(self, request):
+        profile, created = NotificationSettings.objects.get_or_create(user = request.user)
+        serializer = NotificationSettingsSerializer(profile, data= request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
