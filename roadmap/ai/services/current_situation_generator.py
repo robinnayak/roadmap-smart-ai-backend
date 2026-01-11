@@ -10,7 +10,7 @@ class CurrentSituationGenerator(BaseAIService):
     def __init__(self):
         # Create provider instance with optimal settings for JSON output
         provider = OllamaProvider(
-            model='llama3.2',
+            model='gpt-oss:120b-cloud',
             temperature=0.3,  # Lower temperature for consistent structured output
             max_tokens=2000
         )
@@ -36,9 +36,10 @@ class CurrentSituationGenerator(BaseAIService):
             
             # Generate response from AI
             response = self.provider.generate_response(
-                prompt=self.user_context_prompt.get_user_context_prompt_template(
+                prompt=self.user_context_prompt.format(
                     raw_text=raw_data,
                     age=user_age,
+                    strict=False
                 ),
                 system_prompt=self.system_prompts.get_current_situation_prompt(),
             )
@@ -47,7 +48,7 @@ class CurrentSituationGenerator(BaseAIService):
             
             # Parse the response
             parsed_data = self.response_parser.parse_current_situation_response(response.content)
-            print(f"Parsed data: {parsed_data}")
+            print(f"Parsed data: {parsed_data}") 
             
             # Update job status
             job.status = "COMPLETED"

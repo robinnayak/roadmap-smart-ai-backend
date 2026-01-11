@@ -1,60 +1,38 @@
-# roadmap\ai\prompts\personalization\user_context_prompts.py
+# roadmap/ai/prompts/personalization/user_context_prompts.py
 
-# ============================================
-# FILE: roadmap/ai/prompts/personalization/user_context_prompts.py
-# User Context & Personalization Prompts
-# ============================================
-
-# ============================================
-# FILE: roadmap/ai/prompts/personalization/user_context_prompts.py
-# User Context & Personalization Prompts
-# ============================================
-
-from typing import Dict, Any
-from ..base_prompts import BasePrompt
+from ai.prompts.base_prompts import BasePrompt
 
 
 class UserContextPrompt(BasePrompt):
     """
-    Builds a context-aware prompt using structured user current_situation data.
-    This prompt is designed to work consistently across different user types
-    (students, unemployed, employed professionals, career switchers, etc.).
+    Context prompt for extracting and enriching user profile data.
     """
 
     def __init__(self):
         super().__init__()
-        self.age = None
-        self.raw_text = None
-        self.template = f"Age {self.age}" + f"Row Text {self.raw_text}" + """
+
+        self.template = """
 # USER CURRENT SITUATION CONTEXT
 
-## Raw Description (User-Provided)
+## Raw Description
 {raw_text}
 
----
-
-## Profile Snapshot
+## Profile
 - Age: {age}
 - Current Role: {current_role}
 - Profession: {profession}
 - Location: {location}
 - Life Stage: {life_stage}
 
----
-
 ## Skills & Experience
 - Technical Skills: {technical_skills}
 - Experience Level: {experience_level}
 - Other Skills: {other_skills}
 
----
-
-## Resources & Support
+## Resources
 - Monthly Income: {monthly_income} {currency}
 - Financial Status: {financial_status}
 - Support System: {support_system}
-
----
 
 ## Constraints
 - Time Availability: {time_availability}
@@ -62,67 +40,43 @@ class UserContextPrompt(BasePrompt):
 - Health Constraints: {health_constraints}
 - Other Constraints: {other_constraints}
 
----
-
-## Aspirations (User-Stated)
+## Aspirations
 - Education Goal: {education_goal}
 - Career Goal: {career_goal}
 - Preferred Country: {preferred_country}
 
----
-
 ## Metadata
-- Data Source: {data_source}
+- Source: {data_source}
 - Last Updated: {last_updated}
-- Confidence Level: {confidence_level}
-
----
-
-### Instructions for Response Generation
-Use the above user context strictly as provided.
-
-When generating your response:
-1. Respect the user's current role, life stage, and constraints.
-2. Align recommendations with available time and financial situation.
-3. Match difficulty and pacing to the user's experience level.
-4. Avoid assumptions beyond the given data.
-5. Keep suggestions realistic, practical, and achievable.
+- Confidence: {confidence_level}
 """
-        self.required_variables = [
-            # Raw
-            "raw_text",
-            # Profile snapshot
-            "age",
-            "current_role",
-            "profession",
-            "location",
-            "life_stage",
-            # Skills & experience
-            "technical_skills",
-            "experience_level",
-            "other_skills",
-            # Resources
-            "monthly_income",
-            "currency",
-            "financial_status",
-            "support_system",
-            # Constraints
-            "time_availability",
-            "financial_constraints",
-            "health_constraints",
-            "other_constraints",
-            # Aspirations
-            "education_goal",
-            "career_goal",
-            "preferred_country",
-            # Metadata
-            "data_source",
-            "last_updated",
-            "confidence_level",
-        ]
 
-    def get_user_context_prompt_template(self, raw_text, age) -> str:
-        """Return the prompt template string."""
-        self.raw_text = raw_text
-        self.age = age
-        return self.template
+        # Only truly mandatory
+        self.required_variables = ["raw_text"]
+
+        # Defaults for enrichment
+        self.default_variables = {
+            "age": None,
+            "current_role": None,
+            "profession": None,
+            "location": None,
+            "life_stage": None,
+            "technical_skills": [],
+            "experience_level": None,
+            "other_skills": [],
+            "monthly_income": None,
+            "currency": None,
+            "financial_status": None,
+            "non_changeable_job_time": None,
+            "support_system": None,
+            "time_availability": None,
+            "financial_constraints": [],
+            "health_constraints": [],
+            "other_constraints": [],
+            "education_goal": None,
+            "career_goal": None,
+            "preferred_country": None,
+            "data_source": "user_input",
+            "last_updated": None,
+            "confidence_level": "medium",
+        }

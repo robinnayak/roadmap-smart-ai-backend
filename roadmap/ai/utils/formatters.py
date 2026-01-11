@@ -17,7 +17,7 @@ class ResponseFormatter:
             "job_id": str(job.id),
             "job_status": job.status,
             "data": parsed_data,
-            "raw_response": raw_response[:500],  # Limit raw response length
+            # "raw_response": raw_response[:500],  # Limit raw response length
         }
     
     @staticmethod
