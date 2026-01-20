@@ -10,12 +10,28 @@ class BaseAIService:
         
     def create_job(self, user, job_type, row_data):
         """Create a new AI job."""
-        return AIProcessingJob.objects.create(
+        
+        existing_job = AIProcessingJob.objects.filter(
+            user=user,
+            job_type=job_type
+        ).first()
+        
+        print(f"Existing job: {existing_job}")  # Debug
+        if existing_job:
+            existing_job.row_data = row_data
+            existing_job.save()
+            return existing_job, False
+
+        
+        
+        job = AIProcessingJob.objects.create(
             user=user,
             job_type=job_type,
             row_data=row_data,
             status='PENDING'
         )
+        return job, True
+    
     
     
         

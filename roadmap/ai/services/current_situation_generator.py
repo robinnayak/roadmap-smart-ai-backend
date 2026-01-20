@@ -25,12 +25,13 @@ class CurrentSituationGenerator(BaseAIService):
         """
         Take raw user input and generate structured situation data
         """
-        job = self.create_job(
+        job, created = self.create_job(
             user=user,
             job_type="CURRENT_SITUATION_GENERATION",
             row_data={"raw_data": raw_data, "user_age": user_age},
         )
-
+        print(f"Job created: {created}, Job ID: {job}")  # Debug
+        print(f"Job: {job}")  # Debug
         try:
             print("Generating AI response...")
             
@@ -53,6 +54,7 @@ class CurrentSituationGenerator(BaseAIService):
             # Update job status
             job.status = "COMPLETED"
             job.row_data = parsed_data
+            job.user_raw_text = raw_data
             job.save()
             
             # Format and return success response

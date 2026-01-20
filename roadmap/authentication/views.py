@@ -235,8 +235,11 @@ class UserPersonalDetailsAPIView(APIView):
         """
         Helper method to get the user's personal details
         """
-        return get_object_or_404(UserPersonalDetails, user=user)
-
+        try:
+            return get_object_or_404(UserPersonalDetails, user=user)
+        except UserPersonalDetails.DoesNotExist:
+            return None
+        
     # ✅ CREATE (POST)
     def post(self, request):
         """

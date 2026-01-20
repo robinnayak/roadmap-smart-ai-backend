@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import CustomUser, Profile, NotificationSettings
+from .models import CustomUser, Profile, NotificationSettings, UserPersonalDetails
 
 
 # Register your models here.
@@ -13,3 +13,4 @@ admin.site.register(CustomUser, CustomUserAdmin)
 
 admin.site.register(Profile)
 admin.site.register(NotificationSettings)
+admin.site.register(UserPersonalDetails)

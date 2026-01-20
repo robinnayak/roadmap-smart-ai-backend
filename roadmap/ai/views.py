@@ -3,6 +3,12 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from goal.models import UserCurrentSituationGoal
+from authentication.models import UserPersonalDetails
+from .models import AIProcessingJob
+
+# from django.contrib.auth import get_user_model
+# User = get_user_model()
 
 # Create your views here.
 
@@ -14,37 +20,72 @@ class AIApiView(APIView):
     def get(self, request):
         return Response({"message": "AI endpoint is working!"})
 
-
 class AIProcessTextDataCurrentSituation(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         try:
-            print("Starting current situation generation...")  # Debug
             current_situation_generator = CurrentSituationGenerator()
-            
+
             raw_data = request.data.get('raw_data')
             user_age = request.data.get('user_age')
             
             if not raw_data:
-                return Response({"error": "raw_data is required"}, status=400)
-            
-            print(f"Raw data: {raw_data}")  # Debug
-            print(f"User age: {user_age}")  # Debug
-            
+                try:
+                    personal_details = UserPersonalDetails.objects.get(user=request.user)
+                    raw_data = personal_details.current_situation
+                    user_age = personal_details.current_age
+                except UserPersonalDetails.DoesNotExist:
+                    return Response(
+                        {"error": "raw_data is required and no personal details found."},
+                        status=400
+                    )
+
+            if not raw_data:
+                return Response(
+                    {"error": "raw_data is required"},
+                    status=400
+                )
+
             user = request.user
             result = current_situation_generator.generate(raw_data, user_age, user)
-            print(f"Result: {result}")  # Debug
+
+            # ✅ Always extract from result payload
+            structured_data = result.get("data")
+            job_id = result.get("job_id")
+            print(f"Structured Data: {structured_data}")  # Debug
+            print(f"Job ID: {job_id}")  # Debug
+
+            job = AIProcessingJob.objects.get(id=job_id)
+            situation_goal, created = UserCurrentSituationGoal.objects.get_or_create(
+                ai_processing_job=job,
+                defaults={
+                    "current_situation": structured_data,
+                    "current_role": structured_data.get("current_role"),
+                    "age": structured_data.get("age"),
+                    "key_skills": structured_data.get("key_skills"),
+                    "main_goals": structured_data.get("main_goals"),
+                    "time_availability": structured_data.get("time_availability"),
+                    "constraints": structured_data.get("constraints"),
+                    "priority_areas": structured_data.get("priority_areas"),
+                }
+            )
+            print(f"Situation & Goals saved for User {user.id}")  # Debug
+            print(f"Situation & Goals created: {created}")  # Debug
+            print(f"Situation & Goals instance: {situation_goal}")  # Debug
 
             return Response(result, status=200)
 
         except ValueError as ve:
-            print(f"ValueError: {str(ve)}")  # Debug
             return Response({"error": str(ve)}, status=400)
+
         except Exception as e:
-            print(f"General error: {str(e)}")  # Debug
-            return Response({"error": str(e)}, status=500)
-        
+            return Response(
+                {"error": "Internal server error", "details": str(e)},
+                status=500
+            )
+
+  
 class AIHealthCheckView(APIView):
     def get(self, request):
         try:

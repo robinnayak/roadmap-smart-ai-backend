@@ -5,7 +5,7 @@ from ai.providers.base import BaseAIProvider, AIResponse, AIMessage
 
 
 class OllamaProvider(BaseAIProvider):
-    def __init__(self, host='http://localhost:11434', model='ollama run gpt-oss:20b-cloud', temperature=0.7, max_tokens=None, stream=False):        
+    def __init__(self, host='http://localhost:11434', model='gpt-oss:20b-cloud', temperature=0.7, max_tokens=None, stream=False):        
         super().__init__(model, temperature, max_tokens, stream)
         self.host = host
         self.client = Client(host=self.host)

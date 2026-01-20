@@ -12,10 +12,11 @@ class AIProcessingJob(models.Model):
         ('COMPLETED', 'Completed'),
         ('FAILED', 'Failed'),
     ]
-    
+
     user = models.ForeignKey('authentication.CustomUser', on_delete=models.CASCADE)
     job_type = models.CharField(max_length=100)
-    row_data = models.JSONField()
+    row_data = models.JSONField(null=True, blank=True)
+    user_raw_text = models.TextField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=JOB_STATUS_CHOICES, default='PENDING')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

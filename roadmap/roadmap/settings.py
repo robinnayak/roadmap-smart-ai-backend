@@ -48,7 +48,9 @@ INSTALLED_APPS = [
     "corsheaders",
     
     'authentication.apps.AuthenticationConfig',
+    'goal.apps.GoalConfig',
     'ai.apps.AiConfig',
+    
 ]
 
 MIDDLEWARE = [

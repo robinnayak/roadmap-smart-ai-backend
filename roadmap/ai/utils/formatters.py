@@ -7,6 +7,8 @@ from typing import Dict, Any
 import re
 
 
+#formatters are the final AI response processors that structure and clean the output data.
+
 class ResponseFormatter:
     
     @staticmethod
@@ -16,8 +18,8 @@ class ResponseFormatter:
             "status": "success",
             "job_id": str(job.id),
             "job_status": job.status,
-            "data": parsed_data,
-            # "raw_response": raw_response[:500],  # Limit raw response length
+            "data": parsed_data, # Structured parsed data
+            "raw_response": raw_response,  # Limit raw response length
         }
     
     @staticmethod
