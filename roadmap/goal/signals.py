@@ -5,7 +5,7 @@ from authentication.models import UserPersonalDetails
 import threading
 from ai.services.current_situation_generator import CurrentSituationGenerator
 from ai.models import AIProcessingJob
-from goal.models import UserCurrentSituationGoal
+from goal.models import UserCurrentSituationGoal, Goal, GoalAttributes
 
 
 @receiver(post_save, sender=UserPersonalDetails)
@@ -90,3 +90,11 @@ def _process_and_create_situation_goal(user, current_situation, current_age):
     except Exception as e:
         print(f"Background AI processing failed for user {user.id}: {e}")
         return None
+    
+    
+@receiver(post_save, sender=Goal)
+def create_goal_attributes(sender, instance, created, **kwargs):
+    print("Starting goal attributes creation...")
+    
+
+

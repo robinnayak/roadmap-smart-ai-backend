@@ -2,6 +2,8 @@ from rest_framework import serializers
 from .models import UserCurrentSituationGoal, GoalAttributes, Goal
 from django.utils import timezone
 from datetime import datetime
+from ai.services.text_extraction import GoalAttributeExtractor
+
 
 
 
@@ -73,6 +75,11 @@ class UserCurrentSituationGoalSerializer(serializers.ModelSerializer):
 
 
 class GoalAttributesSerializer(serializers.ModelSerializer):
+    ai_processing_job = serializers.PrimaryKeyRelatedField(
+        read_only=True,
+        allow_null=True
+    )
+    
     class Meta:
         model = GoalAttributes
         fields = "__all__"
@@ -142,14 +149,23 @@ class GoalListSerializer(serializers.ModelSerializer):
 
 
 class GoalSerializer(serializers.ModelSerializer):
-    attributes = GoalAttributesSerializer(required=False)
+    """
+    Serializer for Goal model with extracted attributes support.
+    """
+    
+    # Computed fields
     days_remaining = serializers.SerializerMethodField()
     is_overdue = serializers.SerializerMethodField()
-    target_date = serializers.DateField()
     
-    
-    # No need to explicitly define date fields unless you want custom format
-    # DRF will automatically handle the conversion
+    # Include GoalAttributes in the response (read-only)
+    attributes = GoalAttributesSerializer(read_only=True)
+    # Write-only field for extracting attributes from natural language
+    goal_attributes_input = serializers.CharField(
+        write_only=True, 
+        required=False, 
+        allow_blank=True,
+        help_text="Natural language description to extract goal attributes from"
+    )
 
     class Meta:
         model = Goal
@@ -162,39 +178,44 @@ class GoalSerializer(serializers.ModelSerializer):
             "ai_generation_context",
             "actual_completion_date",
             "user",
+            "attributes"
         ]
-        
-    
 
-    def get_days_remaining(self, obj):
-        """Calculate days remaining for the goal"""
+    def get_days_remaining(self, obj) -> int:
+        """Calculate days remaining until target date."""
         return obj.days_remaining
 
-    def get_is_overdue(self, obj):
-        """Check if goal is overdue"""
+    def get_is_overdue(self, obj) -> bool:
+        """Check if goal is past its target date."""
         return obj.is_overdue
 
     def validate_impact_dimensions(self, value):
-        """Validate impact_dimensions is a JSON object"""
+        """Validate impact_dimensions is a JSON object."""
         if value is not None and not isinstance(value, dict):
-            raise serializers.ValidationError("impact_dimensions must be a JSON object")
+            raise serializers.ValidationError(
+                "impact_dimensions must be a JSON object"
+            )
         return value
 
     def validate_tags(self, value):
-        """Validate tags is a list"""
+        """Validate tags is a list of strings."""
         if value is not None and not isinstance(value, list):
             raise serializers.ValidationError("tags must be a list")
+        
+        # Ensure all tags are strings
+        if value and any(not isinstance(tag, str) for tag in value):
+            raise serializers.ValidationError("All tags must be strings")
+            
         return value
 
     def validate_target_date(self, value):
-        """Validate target_date is not in the past"""
-        # 'value' is already a date object here (DRF handles conversion)
+        """Validate target_date is not in the past."""
         if value < timezone.now().date():
             raise serializers.ValidationError("Target date cannot be in the past")
         return value
 
     def validate_progress_percentage(self, value):
-        """Validate progress percentage is between 0 and 100"""
+        """Validate progress percentage is between 0 and 100."""
         if not 0 <= value <= 100:
             raise serializers.ValidationError(
                 "Progress percentage must be between 0 and 100"
@@ -202,76 +223,150 @@ class GoalSerializer(serializers.ModelSerializer):
         return value
 
     def validate_ai_feasibility_score(self, value):
-        """Validate feasibility score is between 0.0 and 1.0"""
+        """Validate AI feasibility score is between 0.0 and 1.0."""
         if value is not None and not 0.0 <= value <= 1.0:
             raise serializers.ValidationError(
-                "Feasibility score must be between 0.0 and 1.0"
+                "AI feasibility score must be between 0.0 and 1.0"
             )
         return value
-    
 
+    def get_fields(self):
+        """Override to add the extra write-only field."""
+        fields = super().get_fields()
+        fields['goal_attributes_input'] = serializers.CharField(
+            write_only=True, 
+            required=False, 
+            allow_blank=True
+        )
+        return fields
+
+    def _extract_and_create_attributes(self, goal, user_input, user, goal_id):
+        """Extract attributes from user input and create/update GoalAttributes."""
+        try:
+            extractor = GoalAttributeExtractor()
+            result = extractor.extract_goal_attributes(user_input, user, goal_id)
+            
+            if result.get("status") == "success" and "data" in result:
+                extracted_data = result["data"]
+                
+                # Determine which category-specific field to use
+                category = extracted_data.get("goal_category", "").lower()
+                category_fields = {
+                    "financial": "financial_data",
+                    "career": "career_data",
+                    "health": "health_data",
+                    "personal": "personal_data"
+                }
+                
+                # Check if GoalAttributes already exists for this goal
+                try:
+                    goal_attributes = GoalAttributes.objects.get(goal=goal)
+                    
+                    # Update existing GoalAttributes
+                    goal_attributes.custom_data = extracted_data
+                    
+                    # Clear all category-specific fields first
+                    goal_attributes.financial_data = None
+                    goal_attributes.career_data = None
+                    goal_attributes.health_data = None
+                    goal_attributes.personal_data = None
+                    goal_attributes.skill_data = None
+                    
+                    # Set the appropriate category field
+                    if category in category_fields:
+                        setattr(goal_attributes, category_fields[category], extracted_data)
+                    
+                    # Update AI processing job reference if available
+                    if "job_id" in result:
+                        goal_attributes.ai_processing_job_id = result["job_id"]
+                    
+                    goal_attributes.save()
+                    print(f"✓ Updated existing GoalAttributes ID: {goal_attributes.id} for goal {goal.id}")
+                    
+                    return True
+                    
+                except GoalAttributes.DoesNotExist:
+                    # Create new GoalAttributes
+                    goal_attrs_data = {
+                        "goal": goal,
+                        "custom_data": extracted_data,
+                    }
+                    
+                    # Set the appropriate category field
+                    if category in category_fields:
+                        goal_attrs_data[category_fields[category]] = extracted_data
+                    
+                    # Add AI processing job reference if available
+                    if "job_id" in result:
+                        goal_attrs_data["ai_processing_job_id"] = result["job_id"]
+                    
+                    # Create GoalAttributes
+                    goal_attributes = GoalAttributes.objects.create(**goal_attrs_data)
+                    print(f"✓ Created new GoalAttributes ID: {goal_attributes.id} for goal {goal.id}")
+                    
+                    return True
+                    
+        except Exception as e:
+            print(f"✗ Error extracting or creating goal attributes: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+        return False
+    
     def create(self, validated_data):
         """
-        Create a new goal
-        - Automatically sets user (handled in view)
-        - Marks as user_modified if not AI-generated
-        - Handles nested attributes if provided
+        Create a new goal with optional extracted attributes.
         """
-        # DEBUG: Print what we're creating
-        print(f"Creating goal with data: {validated_data}")
+        # Extract user input for attribute extraction
+        goal_attributes_input = validated_data.pop("goal_attributes_input", None)
         
-        # DON'T call .date() on target_date - it's already a date object
-        # Remove this line: print("Validating goal target date:", validated_data["target_date"].date())
-        
-        # Handle nested attributes creation
-        attributes_data = validated_data.pop("attributes", None)
-
-        # If goal is being created by user (not AI), set is_user_modified to True
+        # Mark as user-modified if not AI-generated
         if not validated_data.get("is_ai_generated", False):
             validated_data["is_user_modified"] = True
-
-        # Create the goal
-        goal = Goal.objects.create(**validated_data)
+        try:
+            # Create the goal
+            goal = Goal.objects.create(**validated_data)
+            goal_id = goal.id
+            
+            print(f"Created goal ID: {goal.id} | Title: {goal.title}")
+            
+            # Extract and create attributes if user input provided
+            if goal_attributes_input:
+                user = self.context.get('request').user
+                success = self._extract_and_create_attributes(goal, goal_attributes_input, user, goal_id)
+                if success:
+                    print(f"✓ Extracted and created attributes for goal ID: {goal.id}")
+                else:
+                    print(f"✗ Failed to extract and create attributes for goal ID: {goal.id}")
+            
+            return goal
+        except Exception as e:
+            print(f"✗ Error creating goal: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
+            
         
-        print("=======================================")
-        print(f"Created goal with ID: {goal.id}")
-        print("=======================================")
 
-        # Create attributes if provided
-        if attributes_data:
-            GoalAttributes.objects.create(goal=goal, **attributes_data)
-
-        return goal
 
     def update(self, instance, validated_data):
         """
-        Update an existing goal
-        - Handles nested attributes update
-        - Marks as user_modified if editing AI-generated goal
+        Update an existing goal.
+        
+        Note: Attribute extraction only happens during creation.
+        Updates to existing goals should modify GoalAttributes directly.
         """
-        # Handle nested attributes update
-        attributes_data = validated_data.pop("attributes", None)
-
-        # If goal was AI generated and user is modifying it, mark as user modified
+        # Remove the extraction field if present (only used during creation)
+        validated_data.pop("goal_attributes_input", None)
+        
+        # Mark as user-modified if editing AI-generated goal
         if instance.is_ai_generated and not validated_data.get("is_ai_generated", True):
             validated_data["is_user_modified"] = True
-
+        
         # Update main goal fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-
+        
         instance.save()
-
-        # Update attributes if provided
-        if attributes_data is not None:
-            if hasattr(instance, "attributes"):
-                attr_serializer = GoalAttributesSerializer(
-                    instance.attributes, data=attributes_data, partial=True
-                )
-                if attr_serializer.is_valid():
-                    attr_serializer.save()
-            else:
-                GoalAttributes.objects.create(goal=instance, **attributes_data)
-
+        
         return instance
-

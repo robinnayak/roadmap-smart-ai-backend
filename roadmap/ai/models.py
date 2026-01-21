@@ -23,3 +23,11 @@ class AIProcessingJob(models.Model):
     
     def __str__(self):
         return f"Job {self.id} - {self.job_type} - {self.status}"
+    
+    def update_job_status(self, status, row_data, user_raw_text):
+        
+        self.row_data = row_data
+        self.user_raw_text = user_raw_text
+        self.status = status
+        
+        self.save()

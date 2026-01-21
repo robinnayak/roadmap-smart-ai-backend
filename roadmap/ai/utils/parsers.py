@@ -20,10 +20,10 @@ class ResponseParser:
             data = json.loads(cleaned)
             
             # Validate required fields
-            required_fields = ['current_role', 'main_goals', 'key_skills']
-            for field in required_fields:
-                if field not in data:
-                    raise ValueError(f"Missing required field: {field}")
+            # required_fields = ['current_role', 'main_goals', 'key_skills']
+            # for field in required_fields:
+            #     if field not in data:
+            #         raise ValueError(f"Missing required field: {field}")
             
             return data
             

@@ -32,6 +32,8 @@ class OllamaProvider(BaseAIProvider):
             }
     
     def generate_response(self, prompt, system_prompt=None, context=None):
+        print("Generating response...")
+        print("====="*10)
         try:
             # Build messages
             messages = self.build_messages(prompt, system_prompt, context)

@@ -202,7 +202,7 @@ class GoalAttributes(models.Model):
     
     
     
-    # ai_processing_job = models.OneToOneField('ai.AIProcessingJob', on_delete=models.CASCADE, related_name='goal_attributes', null=True, blank=True)
+    ai_processing_job = models.OneToOneField('ai.AIProcessingJob', on_delete=models.CASCADE, related_name='goal_attributes', null=True, blank=True)
     # =====
     # response in JSON Format which we will use to auto save after or before user input
     # =====

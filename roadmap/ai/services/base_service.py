@@ -10,6 +10,10 @@ class BaseAIService:
         
     def create_job(self, user, job_type, row_data):
         """Create a new AI job."""
+        print("creating job...")
+        print(f"User: {user}")  # Debug
+        print(f"Job type: {job_type}")  # Debug
+        
         
         existing_job = AIProcessingJob.objects.filter(
             user=user,

@@ -46,10 +46,54 @@ Output ONLY JSON in this exact format:
 """
 
     # ========================================
+    # GOALATTRIBUTE / [FINANCIAL, CAREER, HEALTH, PERSONAL] THAT SPECIFIC GOALATTRIBUTES OR SOME INFORMATION
+    # ========================================
+
+    GOALATTRIBUTE_CONTEXT_EXTRACTION_PROMPT = """
+You are an AI assistant that extracts structured information from user-written goals.
+
+Instructions:
+1. The user describes their goal in natural language, including current status, habits, numbers, timelines, or challenges.
+2. Extract only what is explicitly mentioned. Missing details are acceptable.
+3. Identify the goal category if implied: "financial", "career", "health", "personal".
+4. Do NOT invent goals, numbers, or timelines not present in the text.
+5. Keep output realistic and grounded in the user's input.
+
+Output:
+Respond ONLY with valid JSON in this exact format:
+
+{
+  "goal_category": "string",
+  "current_state": {
+    "identity": "string",
+    "skills_or_habits": ["string"],
+    "ongoing_work": ["string"],
+    "progress": {"key_metric": number},
+    "confidence_level": {"value": number, "scale": "1-10"},
+    "constraints": ["string"]
+  },
+  "target_state": {
+    "desired_identity": "string",
+    "skills_to_acquire": ["string"],
+    "key_targets": {"key_metric": number},
+    "confidence_level": {"value": number, "scale": "1-10"}
+  },
+  "measurable_elements": {
+    "numbers_mentioned": ["string"],
+    "time_constraints": "string"
+  },
+  "clarity_level": "low | medium | high",
+  "notes": "string"
+}
+
+Do not include explanations or extra text. Only output JSON.
+"""
+
+    # ========================================
     # GOAL / ROADMAP GENERATION
     # ========================================
 
-    GOAL_GENERATION = """
+    GOAL_GENERATION_PROMPT = """
 You are an expert goal planner.
 
 Your task:
@@ -69,7 +113,7 @@ Rules:
     # ROUTINE GENERATION
     # ========================================
 
-    ROUTINE_GENERATION = """
+    ROUTINE_GENERATION_PROMPT = """
 You design simple, effective daily routines.
 
 Your task:
@@ -88,7 +132,7 @@ Rules:
     # ANALYSIS & INSIGHTS
     # ========================================
 
-    SENTIMENT_ANALYSIS = """
+    SENTIMENT_ANALYSIS_PROMPT = """
 Analyze the user's text for emotional tone and mindset.
 
 Return:
@@ -100,7 +144,7 @@ Return:
 Be objective and concise.
 """
 
-    FEASIBILITY_ANALYSIS = """
+    FEASIBILITY_ANALYSIS_PROMPT = """
 Evaluate how realistic the user's goals are.
 
 Analyze:
@@ -118,7 +162,7 @@ Return:
     # ADAPTIVE PERSONALIZATION
     # ========================================
 
-    ADAPTIVE_LEARNING = """
+    ADAPTIVE_LEARNING_PROMPT = """
 Learn from the user's past behavior to improve recommendations.
 
 Analyze:
@@ -142,11 +186,12 @@ Use this to:
         """Return the system prompt for a given task type"""
         prompts = {
             "user_context_personalization": cls.USER_CONTEXT_PERSONALIZATION,
-            "goal_generation": cls.GOAL_GENERATION,
-            "routine_generation": cls.ROUTINE_GENERATION,
-            "sentiment_analysis": cls.SENTIMENT_ANALYSIS,
-            "feasibility_analysis": cls.FEASIBILITY_ANALYSIS,
-            "adaptive_learning": cls.ADAPTIVE_LEARNING,
+            "goal_attribute_context_extraction": cls.GOALATTRIBUTE_CONTEXT_EXTRACTION_PROMPT,
+            "goal_generation": cls.GOAL_GENERATION_PROMPT,
+            "routine_generation": cls.ROUTINE_GENERATION_PROMPT,
+            "sentiment_analysis": cls.SENTIMENT_ANALYSIS_PROMPT,
+            "feasibility_analysis": cls.FEASIBILITY_ANALYSIS_PROMPT,
+            "adaptive_learning": cls.ADAPTIVE_LEARNING_PROMPT,
         }
 
         return prompts.get(task_type, "You are a helpful AI assistant.")
