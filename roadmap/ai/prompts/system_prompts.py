@@ -1,7 +1,8 @@
 # roadmap\ai\prompts\system_prompts.py
 
+from ai.prompts.base_prompts import BasePrompt
 
-class SystemPrompts:
+class SystemPrompts(BasePrompt):
     """Central repository for all system prompts"""
 
     @staticmethod
