@@ -47,6 +47,7 @@ class Goal(models.Model):
         Example: "Build Trading Bot SaaS" affects career, finance, and personal
     growth
     """
+    
 
     CATEGORY_CHOICES = [
         ("financial", "Financial"),
@@ -69,6 +70,7 @@ class Goal(models.Model):
         ("cancelled", "Cancelled"),
     ]
 
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
         "authentication.CustomUser", on_delete=models.CASCADE, related_name="goals"
     )
