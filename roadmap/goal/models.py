@@ -6,6 +6,8 @@ import uuid
 
 class UserCurrentSituationGoal(models.Model):
     """Structured output extracted from AI for user situation & goals"""
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     user_personal_details = models.OneToOneField(
         "authentication.UserPersonalDetails",
@@ -21,6 +23,7 @@ class UserCurrentSituationGoal(models.Model):
         on_delete=models.CASCADE,
         related_name="current_situation_goal",
     )
+    
 
     # Full AI output (source of truth)
     current_situation = models.JSONField()

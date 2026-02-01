@@ -106,6 +106,7 @@ class ProfileSerializer(serializers.ModelSerializer):
         ]
         
 class UserPersonalDetailsSerializer(serializers.ModelSerializer):
+    
     class Meta:
         model = UserPersonalDetails
         fields = '__all__'

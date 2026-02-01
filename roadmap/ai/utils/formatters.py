@@ -118,4 +118,39 @@ class GoalFormatter:
         return formatted
     
     
+
+class MileStoneFormatter:
+    """Format milestone-related data"""
+    
+    @staticmethod
+    def format_success(data, message, **kwargs):
+        """Format successful goal hierarchy response"""
+        response = {
+            "status": "success",
+            "message": message,
+            "data": data
+        }
+        
+        # Add any additional kwargs
+        response.update(kwargs)
+        return response
+    
+    @staticmethod
+    def format_error(error_message, error_code=None, **kwargs):
+        """Format error response for goal hierarchy"""
+        response = {
+            "status": "error",
+            "error": error_message
+        }
+        
+        if error_code:
+            response["error_code"] = error_code
+        
+        # Add any additional kwargs
+        response.update(kwargs)
+        return response
+
+    
+    
+    
     

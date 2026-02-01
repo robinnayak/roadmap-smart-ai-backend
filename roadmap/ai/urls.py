@@ -21,5 +21,5 @@ urlpatterns = [
         GoalAttributeExtractorAPIView.as_view(),
         name="goal-attribute-extractor",
     ),
-    path("generate-milestones/", GenerateMileStonesAPIView.as_view(), name="generate-milestones"),
+    path("generate-milestones/<uuid:goal_id>/", GenerateMileStonesAPIView.as_view(), name="generate-milestones"),
 ]

@@ -172,9 +172,11 @@ class GoalEnhancementAPIView(APIView):
 class GenerateMileStonesAPIView(APIView):
     permission_classes =  [IsAuthenticated]
     
-    def get(self, request):
+    def get(self, request, goal_id):
         try:
-            return Response({"message": "Generate Milestones endpoint is working!"})
+            print(type(goal_id))
+            print(goal_id)
+            return Response({"message": f"Generate Milestones endpoint is working! with goal id {goal_id}"})
         except Exception as e:
             return Response({"message": str(e)}, status= status.HTTP_400_BAD_REQUEST)
     
@@ -183,12 +185,18 @@ class GenerateMileStonesAPIView(APIView):
             if not goal_id:
                 return Response({"message": "goal_id is required"}, status= status.HTTP_400_BAD_REQUEST)
             
-            goal = get_object_or_404(Goal, id=goal_id, user=request.user)
+            goal = get_object_or_404(Goal, id=goal_id)
+            print("=="*20)
+            print("goal")
+            print(goal)
+            print("=="*20)
+            
             if goal.milestones.exists():
                 return Response({
                     "message": "Goal already has milestones. Use regenerate endpoint."
                 }, status= status.HTTP_202_ACCEPTED)
-                    
+            
+            print("till here working...")       
             generator = GoalHierarchyGenerator()
             result = generator.generate_milestones(goal)
             print("=="*20)

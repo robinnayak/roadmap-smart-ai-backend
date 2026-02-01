@@ -1,14 +1,20 @@
 from rest_framework import serializers
-from .models import UserCurrentSituationGoal, GoalAttributes, Goal
+from .models import UserCurrentSituationGoal, GoalAttributes, Goal, Milestone, SubGoal, Task
 from django.utils import timezone
 from datetime import datetime
 from ai.services.text_extraction import GoalAttributeExtractor
+from authentication.serializers import UserPersonalDetailsSerializer
+
+
 
 
 
 
 
 class UserCurrentSituationGoalSerializer(serializers.ModelSerializer):
+    user_personal_details = UserPersonalDetailsSerializer(read_only=True, allow_null=True)
+    
+
     class Meta:
         model = UserCurrentSituationGoal
         fields = "__all__"
@@ -180,6 +186,7 @@ class GoalSerializer(serializers.ModelSerializer):
             "user",
             "attributes"
         ]
+        extra_fields = ['goal_attributes_input'] 
 
     def get_days_remaining(self, obj) -> int:
         """Calculate days remaining until target date."""
@@ -230,21 +237,13 @@ class GoalSerializer(serializers.ModelSerializer):
             )
         return value
 
-    def get_fields(self):
-        """Override to add the extra write-only field."""
-        fields = super().get_fields()
-        fields['goal_attributes_input'] = serializers.CharField(
-            write_only=True, 
-            required=False, 
-            allow_blank=True
-        )
-        return fields
+    
 
     def _extract_and_create_attributes(self, goal, user_input, user, goal_id):
         """Extract attributes from user input and create/update GoalAttributes."""
         try:
             extractor = GoalAttributeExtractor()
-            result = extractor.extract_goal_attributes(user_input, user, goal_id)
+            result = extractor.extract_goal_attributes(user_input=user_input, user=user, goal_id = str(goal_id))
             
             if result.get("status") == "success" and "data" in result:
                 extracted_data = result["data"]
@@ -370,3 +369,25 @@ class GoalSerializer(serializers.ModelSerializer):
         instance.save()
         
         return instance
+    
+
+
+class MilestoneSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Milestone
+        fields = "__all__"
+        read_only_fields = ["id", "created_at", "updated_at", "goal"]
+        
+
+class SubGoalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SubGoal
+        fields = "__all__"
+        read_only_fields = ["id", "created_at", "updated_at","milestone"]
+        
+
+class TaskSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Task
+        fields = "__all__"
+        read_only_fields = ["id", "created_at", "updated_at","subgoal"]
