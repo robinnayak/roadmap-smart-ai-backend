@@ -7,10 +7,6 @@ from authentication.serializers import UserPersonalDetailsSerializer
 
 
 
-
-
-
-
 class UserCurrentSituationGoalSerializer(serializers.ModelSerializer):
     user_personal_details = UserPersonalDetailsSerializer(read_only=True, allow_null=True)
     
@@ -80,46 +76,6 @@ class UserCurrentSituationGoalSerializer(serializers.ModelSerializer):
         return value
 
 
-class GoalAttributesSerializer(serializers.ModelSerializer):
-    ai_processing_job = serializers.PrimaryKeyRelatedField(
-        read_only=True,
-        allow_null=True
-    )
-    
-    class Meta:
-        model = GoalAttributes
-        fields = "__all__"
-        read_only_fields = ["id", "created_at", "updated_at", "goal"]
-
-    def validate_financial_data(self, value):
-        if value is not None and not isinstance(value, dict):
-            raise serializers.ValidationError("financial_data must be a JSON object")
-        return value
-
-    def validate_health_data(self, value):
-        if value is not None and not isinstance(value, dict):
-            raise serializers.ValidationError("health_data must be a JSON object")
-        return value
-
-    def validate_personal_data(self, value):
-        if value is not None and not isinstance(value, dict):
-            raise serializers.ValidationError("personal_data must be a JSON object")
-        return value
-
-    def validate_skill_data(self, value):
-        if value is not None and not isinstance(value, dict):
-            raise serializers.ValidationError("skill_data must be a JSON object")
-        return value
-
-    def validate_career_data(self, value):
-        if value is not None and not isinstance(value, dict):
-            raise serializers.ValidationError("career_data must be a JSON object")
-        return value
-
-    def validate_custom_data(self, value):
-        if value is not None and not isinstance(value, dict):
-            raise serializers.ValidationError("custom_data must be a JSON object")
-        return value
 
 
 
@@ -152,6 +108,157 @@ class GoalListSerializer(serializers.ModelSerializer):
     def get_is_overdue(self, obj):
         return obj.is_overdue
 
+
+
+
+
+
+
+          
+
+class TaskSerializer(serializers.ModelSerializer):
+    """Serializer for Task model"""
+    
+    class Meta:
+        model = Task
+        fields = [
+            'id', 'title', 'description', 'instructions',
+            'task_type', 'resources', 'priority', 'status',
+            'scheduled_date', 'scheduled_time',
+            'estimated_duration_minutes', 'actual_duration_minutes',
+            'completed_at', 'display_order', 'is_required',
+            'completion_notes', 'difficulty_rating',
+            'is_ai_generated', 'ai_reasoning', 'is_user_modified',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+        
+
+class TaskListSerializer(serializers.ModelSerializer):
+    """Lightweight Task serializer for lists"""
+    
+    class Meta:
+        model = Task
+        fields = [
+            'id', 'title', 'status', 'priority',
+            'scheduled_date', 'estimated_duration_minutes',
+            'display_order'
+        ]
+        
+
+
+class SubGoalSerializer(serializers.ModelSerializer):
+    """Serializer for SubGoal with nested tasks"""
+    
+    tasks = TaskSerializer(many=True, read_only=True)
+    task_count = serializers.SerializerMethodField()
+    completed_task_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = SubGoal
+        fields = [
+            'id', 'title', 'description', 'learning_objectives',
+            'priority', 'status', 'progress_percentage',
+            'week_number', 'start_date', 'target_date', 'completed_date',
+            'estimated_duration_days', 'display_order', 'is_required',
+            'is_ai_generated', 'ai_reasoning', 'is_user_modified',
+            'tasks', 'task_count', 'completed_task_count',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'progress_percentage']
+    
+    def get_task_count(self, obj):
+        return obj.tasks.count()
+    
+    def get_completed_task_count(self, obj):
+        return obj.tasks.filter(status='completed').count()
+  
+
+class SubGoalListSerializer(serializers.ModelSerializer):
+    """Lightweight SubGoal serializer without tasks"""
+    
+    task_count = serializers.SerializerMethodField()
+    completed_task_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = SubGoal
+        fields = [
+            'id', 'title', 'status', 'progress_percentage',
+            'week_number', 'display_order',
+            'task_count', 'completed_task_count'
+        ]
+    
+    def get_task_count(self, obj):
+        return obj.tasks.count()
+    
+    def get_completed_task_count(self, obj):
+        return obj.tasks.filter(status='completed').count()
+
+
+class MilestoneSerializer(serializers.ModelSerializer):
+    """Serializer for Milestone with nested subgoals and tasks"""
+    
+    subgoals = SubGoalSerializer(many=True, read_only=True)
+    subgoal_count = serializers.SerializerMethodField()
+    completed_subgoal_count = serializers.SerializerMethodField()
+    total_task_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Milestone
+        fields = [
+            'id', 'title', 'description', 'success_criteria',
+            'priority', 'status', 'progress_percentage',
+            'month_year', 'start_date', 'target_date', 'completed_date',
+            'estimated_duration_days', 'display_order', 'is_required',
+            'is_ai_generated', 'ai_reasoning', 'is_user_modified',
+            'subgoals', 'subgoal_count', 'completed_subgoal_count',
+            'total_task_count',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'progress_percentage']
+    
+    def get_subgoal_count(self, obj):
+        return obj.subgoals.count()
+    
+    def get_completed_subgoal_count(self, obj):
+        return obj.subgoals.filter(status='completed').count()
+    
+    def get_total_task_count(self, obj):
+        return Task.objects.filter(subgoal__milestone=obj).count()
+
+
+class MilestoneListSerializer(serializers.ModelSerializer):
+    """Lightweight Milestone serializer without nested data"""
+    
+    subgoal_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Milestone
+        fields = [
+            'id', 'title', 'status', 'progress_percentage',
+            'month_year', 'display_order', 'subgoal_count'
+        ]
+    
+    def get_subgoal_count(self, obj):
+        return obj.subgoals.count()
+     
+
+
+# ==============================================================================
+# GOAL ATTRIBUTES SERIALIZER
+# ==============================================================================
+
+class GoalAttributesSerializer(serializers.ModelSerializer):
+    """Serializer for GoalAttributes"""
+    
+    class Meta:
+        model = GoalAttributes
+        fields = [
+            'id', 'financial_data', 'career_data', 'health_data',
+            'personal_data', 'skill_data', 'custom_data',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
 
 class GoalSerializer(serializers.ModelSerializer):
@@ -370,24 +477,110 @@ class GoalSerializer(serializers.ModelSerializer):
         
         return instance
     
+# ==============================================================================
+# GOAL SERIALIZERS
+# ==============================================================================
 
-
-class MilestoneSerializer(serializers.ModelSerializer):
+class GoalDetailSerializer(serializers.ModelSerializer):
+    """Complete Goal serializer with full hierarchy"""
+    
+    attributes = GoalAttributesSerializer(read_only=True)
+    milestones = MilestoneSerializer(many=True, read_only=True)
+    
+    # Computed fields
+    days_remaining = serializers.ReadOnlyField()
+    is_overdue = serializers.ReadOnlyField()
+    
+    # Statistics
+    milestone_count = serializers.SerializerMethodField()
+    completed_milestone_count = serializers.SerializerMethodField()
+    total_subgoal_count = serializers.SerializerMethodField()
+    total_task_count = serializers.SerializerMethodField()
+    completed_task_count = serializers.SerializerMethodField()
+    
     class Meta:
-        model = Milestone
-        fields = "__all__"
-        read_only_fields = ["id", "created_at", "updated_at", "goal"]
-        
+        model = Goal
+        fields = [
+            'id', 'title', 'description', 'why_it_matters', 'key_skills',
+            'primary_category', 'categories', 'impact_dimensions', 'tags',
+            'priority', 'status', 'progress_percentage',
+            'start_date', 'target_date', 'actual_completion_date',
+            'days_remaining', 'is_overdue',
+            'is_ai_generated', 'ai_feasibility_score', 'ai_generation_context',
+            'is_user_modified',
+            'attributes', 'milestones',
+            'milestone_count', 'completed_milestone_count',
+            'total_subgoal_count', 'total_task_count', 'completed_task_count',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'days_remaining', 'is_overdue']
+    
+    def get_milestone_count(self, obj):
+        return obj.milestones.count()
+    
+    def get_completed_milestone_count(self, obj):
+        return obj.milestones.filter(status='completed').count()
+    
+    def get_total_subgoal_count(self, obj):
+        return SubGoal.objects.filter(milestone__goal=obj).count()
+    
+    def get_total_task_count(self, obj):
+        return Task.objects.filter(subgoal__milestone__goal=obj).count()
+    
+    def get_completed_task_count(self, obj):
+        return Task.objects.filter(
+            subgoal__milestone__goal=obj,
+            status='completed'
+        ).count()
 
-class SubGoalSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SubGoal
-        fields = "__all__"
-        read_only_fields = ["id", "created_at", "updated_at","milestone"]
-        
 
-class TaskSerializer(serializers.ModelSerializer):
+class GoalListSerializer(serializers.ModelSerializer):
+    """Lightweight Goal serializer for lists"""
+    
+    days_remaining = serializers.ReadOnlyField()
+    is_overdue = serializers.ReadOnlyField()
+    milestone_count = serializers.SerializerMethodField()
+    completed_milestones = serializers.SerializerMethodField()
+    total_tasks = serializers.SerializerMethodField()
+    completed_tasks = serializers.SerializerMethodField()
+    
     class Meta:
-        model = Task
-        fields = "__all__"
-        read_only_fields = ["id", "created_at", "updated_at","subgoal"]
+        model = Goal
+        fields = [
+            'id', 'title', 'description', 'status', 'progress_percentage',
+            'priority', 'primary_category', 'categories',
+            'target_date', 'days_remaining', 'is_overdue',
+            'milestone_count', 'completed_milestones',
+            'total_tasks', 'completed_tasks'
+        ]
+    
+    def get_milestone_count(self, obj):
+        return obj.milestones.count()
+    
+    def get_completed_milestones(self, obj):
+        return obj.milestones.filter(status='completed').count()
+    
+    def get_total_tasks(self, obj):
+        return Task.objects.filter(subgoal__milestone__goal=obj).count()
+    
+    def get_completed_tasks(self, obj):
+        return Task.objects.filter(
+            subgoal__milestone__goal=obj,
+            status='completed'
+        ).count()
+
+
+class GoalCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating goals"""
+    
+    class Meta:
+        model = Goal
+        fields = [
+            'title', 'description', 'why_it_matters', 'key_skills',
+            'primary_category', 'categories', 'tags', 'priority',
+            'start_date', 'target_date'
+        ]
+    
+    def create(self, validated_data):
+        # User will be added in the view
+        return super().create(validated_data)

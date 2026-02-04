@@ -1,14 +1,12 @@
 from ai.prompts.base_prompts import BasePrompt
 
-
-
-
 class GoalHierarchyGeneratorPrompts(BasePrompt):
 
     def get_subgoal_generating_prompt(self, milestone_context):
         prompt = f"""
 Milestone: {milestone_context.get('title', 'Unknown')}
-Description: {milestone_context.get('description', '')}
+Description: {milestone_context.
+get('description', '')}
 
 Create 4 weekly subgoals for this monthly milestone:
 

@@ -241,104 +241,151 @@ class GoalHierarchyGenerator(BaseAIService):
                 error_message=str(e),
                 error_code="TASK_GENERATION_FAILED"
             )
-
+    
     def generate_complete_hierarchy(self, goal_data, user_context=None):
         """
-        Generate complete hierarchy: Goal → Milestones → SubGoals → Tasks
+        FIXED: Generate complete hierarchy with ALL subgoals and tasks
+        
+        Structure:
+        - 2-3 monthly milestones
+        - 4 weekly subgoals per milestone (Total: 8-12 subgoals)
+        - 7 daily tasks per subgoal (Total: 56-84 tasks)
+        
+        Returns:
+        {
+            'status': 'success',
+            'data': {
+                'milestones': [
+                    {
+                        'milestone_data': {...},
+                        'subgoals': [
+                            {
+                                'subgoal_data': {...},
+                                'tasks': [...]  # 7 tasks
+                            }
+                            # ... 4 subgoals total
+                        ]
+                    }
+                    # ... 2-3 milestones total
+                ]
+            }
+        }
         """
         try:
-            print("=== Starting Complete Hierarchy Generation ===")
+            print("\n" + "="*80)
+            print("STARTING COMPLETE HIERARCHY GENERATION")
+            print("="*80)
             
-            # 1. Generate Milestones
-            print("1. Generating milestones...")
+            # 1. Generate 2-3 Milestones
+            print("\n📅 STEP 1: Generating Milestones...")
             milestones_result = self.generate_milestones(goal_data)
             
             if milestones_result.get('status') != 'success':
                 return milestones_result
             
             milestones_list = milestones_result.get('data', {}).get('milestones', [])
-            print(f"   Generated {len(milestones_list)} milestones")
+            
+            # Limit to 2-3 milestones for production
+            milestones_list = milestones_list[:3]
+            print(f"✓ Generated {len(milestones_list)} milestones")
             
             all_milestones_data = []
             total_subgoals = 0
             total_tasks = 0
             
-            # 2. Generate SubGoals for first 2 milestones (for speed)
-            for i, milestone_dict in enumerate(milestones_list[:2]):
-                print(f"\n2.{i+1}. Processing milestone: {milestone_dict.get('title', 'Unknown')}")
+            # 2. Generate Subgoals and Tasks for EACH Milestone
+            for milestone_idx, milestone_dict in enumerate(milestones_list, 1):
+                print(f"\n{'─'*80}")
+                print(f"📊 PROCESSING MILESTONE {milestone_idx}/{len(milestones_list)}")
+                print(f"Title: {milestone_dict.get('title', 'Unknown')}")
+                print(f"{'─'*80}")
                 
-                # Generate subgoals for this milestone
-                print(f"   Generating subgoals...")
-                subgoals_result = self.generate_subgoals(milestone_dict)
-                
-                # DEBUG: Print subgoals result
-                print(f"   Subgoals result status: {subgoals_result.get('status')}")
-                print(f"   Subgoals result data keys: {subgoals_result.get('data', {}).keys() if isinstance(subgoals_result.get('data'), dict) else 'Not a dict'}")
-                
-                milestone_with_subgoals = {
+                milestone_with_hierarchy = {
                     'milestone_data': milestone_dict,
                     'subgoals': []
                 }
                 
-                if subgoals_result.get('status') == 'success':
-                    subgoals_list = subgoals_result.get('data', {}).get('subgoals', [])
-                    print(f"   Generated {len(subgoals_list)} subgoals")
-                    print(f"   Subgoals list: {subgoals_list}")
+                # 2a. Generate 4 Subgoals for this Milestone
+                print(f"\n  📋 STEP 2a: Generating subgoals for milestone {milestone_idx}...")
+                subgoals_result = self.generate_subgoals(milestone_dict)
+                
+                if subgoals_result.get('status') != 'success':
+                    print(f"  ⚠️  Failed to generate subgoals for milestone {milestone_idx}")
+                    continue
+                
+                subgoals_list = subgoals_result.get('data', {}).get('subgoals', [])
+                
+                # Ensure we have 4 subgoals
+                subgoals_list = subgoals_list[:4]
+                print(f"  ✓ Generated {len(subgoals_list)} subgoals")
+                
+                # 2b. Generate Tasks for EACH Subgoal
+                for subgoal_idx, subgoal_dict in enumerate(subgoals_list, 1):
+                    print(f"\n    📝 STEP 2b.{subgoal_idx}: Generating tasks for subgoal {subgoal_idx}/4")
+                    print(f"    Title: {subgoal_dict.get('title', 'Unknown')}")
                     
-                    # 3. Generate Tasks for first subgoal only (for speed)
-                    if subgoals_list:
-                        first_subgoal = subgoals_list[0]
-                        print(f"   2.{i+1}.1. Generating tasks for first subgoal: {first_subgoal.get('title', 'Unknown')}")
-                        
-                        tasks_result = self.generate_tasks(first_subgoal)
-                        
-                        # DEBUG: Print tasks result
-                        print(f"      Tasks result status: {tasks_result.get('status')}")
-                        
-                        if tasks_result.get('status') == 'success':
-                            tasks_list = tasks_result.get('data', {}).get('tasks', [])
-                            print(f"      Generated {len(tasks_list)} tasks")
-                            print(f"      Tasks list sample: {tasks_list[:2] if tasks_list else 'Empty'}")
-                            
-                            # Add subgoal with its tasks
-                            milestone_with_subgoals['subgoals'].append({
-                                'subgoal_data': first_subgoal,
-                                'tasks': tasks_list
-                            })
-                            
-                            total_tasks += len(tasks_list)
+                    tasks_result = self.generate_tasks(subgoal_dict)
+                    
+                    if tasks_result.get('status') != 'success':
+                        print(f"    ⚠️  Failed to generate tasks for subgoal {subgoal_idx}")
+                        # Add subgoal without tasks
+                        milestone_with_hierarchy['subgoals'].append({
+                            'subgoal_data': subgoal_dict,
+                            'tasks': []
+                        })
+                        continue
+                    
+                    tasks_list = tasks_result.get('data', {}).get('tasks', [])
+                    
+                    # Ensure we have 7 tasks (one per day)
+                    tasks_list = tasks_list[:7]
+                    print(f"    ✓ Generated {len(tasks_list)} tasks")
+                    
+                    # Add subgoal with its tasks
+                    milestone_with_hierarchy['subgoals'].append({
+                        'subgoal_data': subgoal_dict,
+                        'tasks': tasks_list
+                    })
                     
                     total_subgoals += 1
+                    total_tasks += len(tasks_list)
                 
-                all_milestones_data.append(milestone_with_subgoals)
+                all_milestones_data.append(milestone_with_hierarchy)
             
-            print(f"\n=== Generation Complete ===")
-            print(f"Final data structure:")
-            print(f"  Milestones: {len(all_milestones_data)}")
-            for i, milestone in enumerate(all_milestones_data):
-                print(f"  Milestone {i+1}: {milestone.get('milestone_data', {}).get('title')}")
-                print(f"    Subgoals: {len(milestone.get('subgoals', []))}")
-                if milestone.get('subgoals'):
-                    for j, subgoal in enumerate(milestone.get('subgoals', [])):
-                        print(f"    Subgoal {j+1}: {subgoal.get('subgoal_data', {}).get('title')}")
-                        print(f"      Tasks: {len(subgoal.get('tasks', []))}")
+            # 3. Final Summary
+            print(f"\n{'='*80}")
+            print(f"HIERARCHY GENERATION COMPLETE ✅")
+            print(f"{'='*80}")
+            print(f"Milestones:      {len(all_milestones_data)}")
+            print(f"Total Subgoals:  {total_subgoals}")
+            print(f"Total Tasks:     {total_tasks}")
+            print(f"{'='*80}\n")
+            
+            # Detailed breakdown
+            for idx, milestone in enumerate(all_milestones_data, 1):
+                print(f"Milestone {idx}: {milestone.get('milestone_data', {}).get('title')}")
+                for subgoal_idx, subgoal_entry in enumerate(milestone.get('subgoals', []), 1):
+                    subgoal_title = subgoal_entry.get('subgoal_data', {}).get('title')
+                    task_count = len(subgoal_entry.get('tasks', []))
+                    print(f"  Subgoal {subgoal_idx}: {subgoal_title} ({task_count} tasks)")
             
             return {
                 'status': 'success',
                 'data': {
                     'milestones': all_milestones_data,
                     'stats': {
-                        'milestones_total': len(milestones_list),
-                        'milestones_processed': len(all_milestones_data),
+                        'milestones_total': len(all_milestones_data),
                         'subgoals_total': total_subgoals,
-                        'tasks_total': total_tasks
+                        'tasks_total': total_tasks,
+                        'expected_subgoals': len(all_milestones_data) * 4,
+                        'expected_tasks': total_subgoals * 7
                     }
                 },
-                'message': f'Generated hierarchy with {len(all_milestones_data)} milestones'
+                'message': f'Generated complete hierarchy: {len(all_milestones_data)} milestones, {total_subgoals} subgoals, {total_tasks} tasks'
             }
             
         except Exception as e:
-            print(f"Hierarchy generation failed: {str(e)}")
+            print(f"\n❌ Hierarchy generation failed: {str(e)}")
             import traceback
             traceback.print_exc()
             
@@ -346,7 +393,7 @@ class GoalHierarchyGenerator(BaseAIService):
                 'status': 'error',
                 'message': f'Failed to generate hierarchy: {str(e)}'
             }
-        
+   
     def validate_hierarchy(self, goal_data, milestones_data, subgoals_data=None, tasks_data=None):
         """
         Validate the complete hierarchy makes sense.
