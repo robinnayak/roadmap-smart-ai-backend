@@ -1,23 +1,41 @@
-# authentication/views.py
-
-from rest_framework import status
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+"""
+    authentication/views.py
+    -----------------------
+    Views for user registration, authentication, profile management, and token operations. 
+    
+"""
+import logging
+from django.utils import timezone
 from django.contrib.auth import authenticate
-
-from .serializers import (
-    UserRegisterSerializer, UserLoginSerializer,
-    UserLogoutSerializer, UserProfileSerializer,
-    TokenRefreshSerializer, ProfileSerializer, NotificationSettingsSerializer, UserPersonalDetailsSerializer
-)
 from django.shortcuts import get_object_or_404
 
-from .models import CustomUser, Profile, NotificationSettings, UserPersonalDetails
+
+# Django REST Framework imports
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import AllowAny, IsAuthenticated
+
+#DRF Simple JWT imports
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
+from rest_framework_simplejwt.views import TokenRefreshView
+
+# Local imports
+from .serializers import (
+    UserRegisterSerializer,
+    UserLoginSerializer,
+    UserLogoutSerializer,
+    UserProfileSerializer,
+    ProfileSerializer,
+    UserPersonalDetailsSerializer,
+    NotificationSettingsSerializer
+)
+from .models import Profile, NotificationSettings, UserPersonalDetails
+
+logger = logging.getLogger(__name__)
+
+
 
 
 
@@ -139,14 +157,6 @@ class UserLogoutView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-# class UserProfileView(APIView):
-#     permission_classes = [IsAuthenticated]
-
-#     def get(self, request):
-#         serializer = UserProfileSerializer(request.user)
-#         return Response(serializer.data, status=status.HTTP_200_OK)
-
-
 class CustomTokenRefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
     
@@ -170,47 +180,13 @@ class CustomTokenRefreshView(TokenRefreshView):
             )
 
 
-# Optional: Keep this if you want both login methods
-# class CustomTokenObtainPairView(TokenObtainPairView):
-#     """
-#     Alternative login using SimpleJWT's built-in logic with email
-#     """
-#     permission_classes = [AllowAny]
-#     serializer_class = CustomTokenObtainPairSerializer
-    
-#     def post(self, request, *args, **kwargs):
-#         response = super().post(request, *args, **kwargs)
-        
-#         if response.status_code == 200:
-#             # Customize the response format
-#             response.data = {
-#                 "message": "Login successful",
-#                 "tokens": {
-#                     "access": response.data.get("access"),
-#                     "refresh": response.data.get("refresh"),
-#                 },
-#                 "user": UserProfileSerializer(
-#                     CustomUser.objects.get(email=request.data.get('email'))
-#                 ).data,
-#             }
-        
-#         return response
-
-
-#==========================================================
-#Profile functionality
-
-
 class ProfileDetailView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-        print("=="*70)
-        print("user", request.user)
-        
         # Get or create profile
         profile, created = Profile.objects.get_or_create(user=request.user)
-        print(f"profile: {profile}, created: {created}")
+        print(f"profile created: {created}")
         
         # For GET requests, just serialize the instance
         serializer = ProfileSerializer(profile)

@@ -90,8 +90,7 @@ class TokenRefreshSerializer(serializers.Serializer):
     refresh = serializers.CharField()   
 
 
-#Profile
-
+#Profile Prefer Email and Username as read-only fields since they are tied to the user model and should not be changed through the profile endpoint. If you want to allow updates, you can remove the read_only=True and handle the updates in the view.
 class ProfileSerializer(serializers.ModelSerializer):
     # Make these fields read-only if you don't want them to be updated
     username = serializers.CharField(source='user.username', read_only=True)
