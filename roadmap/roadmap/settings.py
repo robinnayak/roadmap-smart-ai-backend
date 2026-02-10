@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'authentication.apps.AuthenticationConfig',
     'goal.apps.GoalConfig',
     'ai.apps.AiConfig',
+    'routine.apps.RoutineConfig'
     
 ]
 
