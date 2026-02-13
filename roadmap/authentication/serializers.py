@@ -3,58 +3,82 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from .models import CustomUser, Profile, NotificationSettings, UserPersonalDetails
+from django.contrib.auth import get_user_model
+from django.db import transaction
 
+User = get_user_model()
 
 class UserRegisterSerializer(serializers.ModelSerializer):
-    password2 = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
+    password = serializers.CharField(
+        write_only=True,
+        required=True,
+        style={'input_type': 'password'},
+        validators=[validate_password],
+    )
+    password2 = serializers.CharField(
+        write_only=True,
+        required=True,
+        style={'input_type': 'password'},
+    )
 
     class Meta:
-        model = CustomUser
+        model = User
         fields = ('email', 'username', 'password', 'password2')
         extra_kwargs = {
-            'password': {'write_only': True},
-            'username': {'required': False, 'allow_blank': True},  # Allow optional
+            'username': {'required': False, 'allow_blank': True},
+            'email': {'required': True},
         }
 
     def validate_email(self, value):
-        if CustomUser.objects.filter(email__iexact=value).exists():
-            raise serializers.ValidationError("Email already exists")
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError(
+                "A user with this email already exists.",
+                code="email_taken"
+            )
         return value
 
     def validate(self, attrs):
-        if attrs['password'] != attrs['password2']:
-            raise serializers.ValidationError({"password": "Password fields didn't match."})
-
-        validate_password(attrs['password'])
+        if attrs.get('password') != attrs.get('password2'):
+            raise serializers.ValidationError(
+                {"password": "The two password fields didn't match."},
+                code="password_mismatch"
+            )
         return attrs
 
+    @transaction.atomic
     def create(self, validated_data):
-        print("="*40)
-        print(validated_data)
-        print("="*40)   
-        # Remove password2 before creating
-        validated_data.pop('password2', None)
+        # Remove non-model fields
+        password = validated_data.pop('password')
+        validated_data.pop('password2', None)  # safe, in case it's still there
 
-        # Handle username (optional)
-        username = validated_data['email'].split('@')[0]
-        # Ensure unique username
-        base = username
-        counter = 1
-        while CustomUser.objects.filter(username=username).exists():
-            username = f"{base}{counter}"
-            counter += 1
+        email = validated_data.pop('email')     # required field → must exist
+        username = validated_data.pop('username', None)
 
-        # Create user
-        user = CustomUser.objects.create(
-            email=validated_data['email'],
-            username=username
-            # **validated_data  # in case you add more fields later
+        # Auto-generate username if not provided
+        if not username:
+            # Make base more username-friendly
+            base = email.split('@')[0].lower()
+            base = ''.join(c for c in base if c.isalnum() or c in '_-')  # safer
+            username = base
+            counter = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{base}{counter}"
+                counter += 1
+
+        # Create the user using the proper manager method
+        user = User.objects.create_user(
+            email=email,
+            username=username,
+            password=password,           # create_user calls set_password internally
+            **validated_data             # forward any extra validated fields
         )
-        user.set_password(validated_data['password'])
-        user.save()
 
-        return user  # ← DO NOT call super().create() — we already created it!
-    
+        # Optional: create related models here or via signals
+        # Profile.objects.create(user=user)
+
+        return user
+
+
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
@@ -72,12 +96,21 @@ class UserLoginSerializer(serializers.Serializer):
             user = CustomUser.objects.filter(email=email).first()   
             if user:
                 if not user.check_password(password):
-                    raise serializers.ValidationError('Invalid password')
+                    raise serializers.ValidationError(
+                        {'password': 'The password you entered is incorrect. Please try again.'},
+                        code='invalid_password'
+                    )
             else:
-                raise serializers.ValidationError('User not found')
+                raise serializers.ValidationError(
+                    {'email': 'No account was found with this email address. Please sign up first.'},
+                    code='user_not_found'
+                )
                 
         else:
-            raise serializers.ValidationError('Email and password are required')
+            raise serializers.ValidationError(
+                'Both "email" and "password" are required.',
+                code='missing_fields'
+            )
         
         data['user'] = user
         return data
