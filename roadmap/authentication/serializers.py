@@ -8,57 +8,57 @@ from django.db import transaction
 
 User = get_user_model()
 
+
 class UserRegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(
         write_only=True,
         required=True,
-        style={'input_type': 'password'},
+        style={"input_type": "password"},
         validators=[validate_password],
     )
     password2 = serializers.CharField(
         write_only=True,
         required=True,
-        style={'input_type': 'password'},
+        style={"input_type": "password"},
     )
 
     class Meta:
         model = User
-        fields = ('email', 'username', 'password', 'password2')
+        fields = ("email", "username", "password", "password2")
         extra_kwargs = {
-            'username': {'required': False, 'allow_blank': True},
-            'email': {'required': True},
+            "username": {"required": False, "allow_blank": True},
+            "email": {"required": True},
         }
 
     def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError(
-                "A user with this email already exists.",
-                code="email_taken"
+                "A user with this email already exists.", code="email_taken"
             )
         return value
 
     def validate(self, attrs):
-        if attrs.get('password') != attrs.get('password2'):
+        if attrs.get("password") != attrs.get("password2"):
             raise serializers.ValidationError(
                 {"password": "The two password fields didn't match."},
-                code="password_mismatch"
+                code="password_mismatch",
             )
         return attrs
 
     @transaction.atomic
     def create(self, validated_data):
         # Remove non-model fields
-        password = validated_data.pop('password')
-        validated_data.pop('password2', None)  # safe, in case it's still there
+        password = validated_data.pop("password")
+        validated_data.pop("password2", None)  # safe, in case it's still there
 
-        email = validated_data.pop('email')     # required field → must exist
-        username = validated_data.pop('username', None)
+        email = validated_data.pop("email")  # required field → must exist
+        username = validated_data.pop("username", None)
 
         # Auto-generate username if not provided
         if not username:
             # Make base more username-friendly
-            base = email.split('@')[0].lower()
-            base = ''.join(c for c in base if c.isalnum() or c in '_-')  # safer
+            base = email.split("@")[0].lower()
+            base = "".join(c for c in base if c.isalnum() or c in "_-")  # safer
             username = base
             counter = 1
             while User.objects.filter(username=username).exists():
@@ -69,8 +69,8 @@ class UserRegisterSerializer(serializers.ModelSerializer):
         user = User.objects.create_user(
             email=email,
             username=username,
-            password=password,           # create_user calls set_password internally
-            **validated_data             # forward any extra validated fields
+            password=password,  # create_user calls set_password internally
+            **validated_data,  # forward any extra validated fields
         )
 
         # Optional: create related models here or via signals
@@ -80,81 +80,158 @@ class UserRegisterSerializer(serializers.ModelSerializer):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
+    is_active = serializers.BooleanField(read_only=True, help_text="Whether the account is active")
+    date_joined = serializers.DateTimeField(
+        read_only=True,
+        format="%Y-%m-%d %H:%M:%S",
+        help_text="Account creation date"
+    )
+    last_login = serializers.DateTimeField(
+        read_only=True,
+        format="%Y-%m-%d %H:%M:%S",
+        help_text="Last login timestamp"
+    )
     class Meta:
         model = CustomUser
-        fields = ('email', 'username')
+        fields = ("id","email", "username", "is_active", "date_joined", "last_login")
+        read_only_fields = ("id", "email", "is_active", "date_joined", "last_login")
+
 
 class UserLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
-    
+
     def validate(self, data):
-        email = data.get('email')
-        password = data.get('password') 
-        
+        email = data.get("email")
+        password = data.get("password")
+
         if email and password:
-            user = CustomUser.objects.filter(email=email).first()   
+            user = CustomUser.objects.filter(email=email).first()
             if user:
                 if not user.check_password(password):
                     raise serializers.ValidationError(
-                        {'password': 'The password you entered is incorrect. Please try again.'},
-                        code='invalid_password'
+                        {
+                            "password": "The password you entered is incorrect. Please try again."
+                        },
+                        code="invalid_password",
                     )
             else:
                 raise serializers.ValidationError(
-                    {'email': 'No account was found with this email address. Please sign up first.'},
-                    code='user_not_found'
+                    {
+                        "email": "No account was found with this email address. Please sign up first."
+                    },
+                    code="user_not_found",
                 )
-                
+
         else:
             raise serializers.ValidationError(
-                'Both "email" and "password" are required.',
-                code='missing_fields'
+                'Both "email" and "password" are required.', code="missing_fields"
             )
-        
-        data['user'] = user
+
+        data["user"] = user
         return data
+
 
 class UserLogoutSerializer(serializers.Serializer):
     refresh_token = serializers.CharField(required=True)
 
 
 class TokenRefreshSerializer(serializers.Serializer):
-    refresh = serializers.CharField()   
+    refresh = serializers.CharField()
 
 
-#Profile Prefer Email and Username as read-only fields since they are tied to the user model and should not be changed through the profile endpoint. If you want to allow updates, you can remove the read_only=True and handle the updates in the view.
+# Profile Prefer Email and Username as read-only fields since they are tied to the user model and should not be changed through the profile endpoint. If you want to allow updates, you can remove the read_only=True and handle the updates in the view.
+
+
 class ProfileSerializer(serializers.ModelSerializer):
-    # Make these fields read-only if you don't want them to be updated
-    username = serializers.CharField(source='user.username', read_only=True)
-    email = serializers.CharField(source='user.email', read_only=True)
-    
+    username = serializers.CharField(
+        source="user.username", read_only=True, help_text="User's username"
+    )
+    email = serializers.CharField(
+        source="user.email", read_only=True, help_text="User's email address"
+    )
+
     class Meta:
         model = Profile
         fields = [
-            'id', 'username', 'email', 'bio', 'avatar', 'timezone', 
-            'subscription_tier', 'total_points', 
-            'current_level', 'preferred_language', 'theme'
+            "id",
+            "username",
+            "email",
+            "bio",
+            "avatar",
+            "timezone",
+            "subscription_tier",
+            "total_points",
+            "current_level",
+            "preferred_language",
+            "theme",
         ]
+        read_only_fields = ["id", "username", "email", "total_points", "current_level"]
+
+        extra_kwargs = {
+            "bio": {
+                "allow_blank": True,
+                "max_length": 300,
+                "help_text": "A brief biography of the user (max 300 characters).",
+                "error_messages": {
+                    "max_length": "Bio cannot exceed 300 characters.",
+                },
+            },
+            "avatar": {
+                "allow_null": True,
+                "help_text": "The user's avatar image URL (can be null).",
+            },
+            "timezone": {
+                "help_text": "The user's preferred timezone (default is UTC)."
+            },
+            "subscription_tier": {
+                "help_text": "The user's subscription tier (free, pro_monthly, lifetime)."
+            },
+            "preferred_language": {
+                "help_text": "The user's preferred language (en, hi, nep)."
+            },
+            "theme": {"help_text": "The user's preferred theme (light, dark)."},
+        }
         
+        # def validate_bio(self, value):
+        #     if len(value) > 300:
+        #         raise serializers.ValidationError(
+        #             "Bio cannot exceed 300 characters."
+        #         )
+        #     return value
+
+
+# class ProfileSerializer(serializers.ModelSerializer):
+#     # Make these fields read-only if you don't want them to be updated
+#     username = serializers.CharField(source='user.username', read_only=True)
+#     email = serializers.CharField(source='user.email', read_only=True)
+
+#     class Meta:
+#         model = Profile
+#         fields = [
+#             'id', 'username', 'email', 'bio', 'avatar', 'timezone',
+#             'subscription_tier', 'total_points',
+#             'current_level', 'preferred_language', 'theme'
+#         ]
+
+
 class UserPersonalDetailsSerializer(serializers.ModelSerializer):
-    
+
     class Meta:
         model = UserPersonalDetails
-        fields = '__all__'
-        read_only_fields = ('id', 'user', 'created_at', 'updated_at')
+        fields = "__all__"
+        read_only_fields = ("id", "user", "created_at", "updated_at")
+
 
 class NotificationSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = NotificationSettings
         fields = (
-            'id',
-            'notifications_enabled',
-            'routine_remainders',
-            'streak_warnings',
-            'personalize_assistant',
-            'push_notifications',
-            'email_notifications',
+            "id",
+            "notifications_enabled",
+            "routine_remainders",
+            "streak_warnings",
+            "personalize_assistant",
+            "push_notifications",
+            "email_notifications",
         )
-        
-

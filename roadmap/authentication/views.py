@@ -42,7 +42,6 @@ from .core.response import success_response, error_response, created_response
 logger = logging.getLogger(__name__)
 
 
-
 class ProductionApiView(APIView):
     """
     Base API view for production environment with enhanced logging and error handling.
@@ -85,7 +84,7 @@ class UserRegistrationView(ProductionApiView):
     throttle_classes = [
         AnonRateThrottle
     ]  # Only apply rate limiting to unauthenticated users (registration attempts)
-    
+
     def get(self, request):
         return success_response(
             data={
@@ -94,9 +93,7 @@ class UserRegistrationView(ProductionApiView):
                 "version": "1.0.0",
             },
             status=status.HTTP_200_OK,
-            
         )
-        
 
     def post(self, request):
         """
@@ -125,23 +122,25 @@ class UserRegistrationView(ProductionApiView):
                 code="invalid_data",
                 status=status.HTTP_400_BAD_REQUEST,
             )
-            
+
         try:
             user = serializer.save()
             refresh = RefreshToken.for_user(user)
-            
+
             logger.info(f"User registered successfully: {user.email}")
-            
+
             response_data = {
-                "tokens":{
+                "tokens": {
                     "access": str(refresh.access_token),
                     "refresh": str(refresh),
                 },
                 "user": UserProfileSerializer(user).data,
                 "timestamp": timezone.now().isoformat(),
             }
-            return created_response(data=response_data, message="User registered successfully")
-        
+            return created_response(
+                data=response_data, message="User registered successfully"
+            )
+
         except Exception as e:
             logger.error(f"Registration failed: {str(e)}", exc_info=True)
             return error_response(
@@ -150,15 +149,15 @@ class UserRegistrationView(ProductionApiView):
                 status=status.HTTP_400_BAD_REQUEST,
                 errors=[str(e)],
             )
-            
 
 
-class UserLoginView(APIView):
+class UserLoginView(ProductionApiView):
     """
     Custom login view that uses UserLoginSerializer
     """
 
     permission_classes = [AllowAny]
+    throttle_classes = [AnonRateThrottle]  # Apply rate limiting to login attempts
 
     def post(self, request):
         serializer = UserLoginSerializer(data=request.data)
@@ -198,8 +197,10 @@ class UserLoginView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class UserLogoutView(APIView):
+class UserLogoutView(ProductionApiView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [AnonRateThrottle]
+
 
     def post(self, request):
         serializer = UserLogoutSerializer(data=request.data)
@@ -230,8 +231,8 @@ class UserLogoutView(APIView):
             print("==" * 70)
             print(f"Token user ID: {token_user_id}, Current user ID: {current_user_id}")
             print("==" * 70)
-            
-            if (str(token_user_id) != str(current_user_id)):
+
+            if str(token_user_id) != str(current_user_id):
                 return error_response(
                     message="Token does not belong to the authenticated user",
                     code="invalid_token_user",
@@ -246,8 +247,6 @@ class UserLogoutView(APIView):
                 code="logout_error",
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-
 
 
 class CustomTokenRefreshView(TokenRefreshView):
@@ -275,30 +274,123 @@ class CustomTokenRefreshView(TokenRefreshView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
+#User Details such as username, email, is_active, ...etc
 
-class ProfileDetailView(APIView):
+class UserView(ProductionApiView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [AnonRateThrottle]
+    def get(self, request):
+        serializer = UserProfileSerializer(request.user)
+        return success_response(data=serializer.data, message="User profile retrieved successfully")
+    
+
+class UserDeactivateView(ProductionApiView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [AnonRateThrottle]
+    def post(self, request):
+        
+        """
+        Delete (deactivate) the user's account. This is a soft delete that sets is_active to False.
+        Returns:
+            - 200: Account deactivated successfully
+            - 400: Invalid data
+        """
+        deactivate = request.data.get("deactivate", True)
+        try:
+            user = request.user
+            user.is_active = deactivate
+            user.save()
+            logger.info(f"Account {'activated' if not deactivate else 'deactivated'} successfully for user: {user.email}")
+            return success_response(message=f"Account {'activated' if not deactivate else 'deactivated'} successfully")
+        except Exception as e:
+            logger.error(f"Error updating account status: {str(e)}", exc_info=True)
+
+            return error_response(
+                message="An error occurred while updating the account status. Please try again.",
+                code="account_status_update_error",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors=[str(e)],
+            )
+        
+class ProfileDetailView(ProductionApiView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [AnonRateThrottle]
 
     def get(self, request):
-        # Get or create profile
-        profile, created = Profile.objects.get_or_create(user=request.user)
-        print(f"profile created: {created}")
+        """
+        Retrieve user profile information
 
-        # For GET requests, just serialize the instance
-        serializer = ProfileSerializer(profile)
-        print(f"serializer data: {serializer.data}")
-        print("==" * 70)
+        Returns:
+            - 200: Profile retrieved successfully
+            - 404: Profile not found (though we create if missing)
+        """
 
-        # Return the serialized data
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        try:
+            profile, created = Profile.objects.get_or_create(user=request.user)
+            if created:
+                logger.info(f"Create New Profile for user: {request.user.email}")
+
+            serializer = ProfileSerializer(profile)
+            return success_response(
+                data=serializer.data,
+                message="Profile retrieved successfully",
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error retrieving profile: {str(e)}", exc_info=True)
+            return error_response(
+                message="An error occurred while retrieving the profile.",
+                code="profile_retrieval_error",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors=[str(e)],
+            )
 
     def put(self, request):
-        profile, created = Profile.objects.get_or_create(user=request.user)
+        """
+        Update user profile (full update)
+
+        Returns:
+            - 200: Profile updated successfully
+            - 400: Invalid update data
+            - 404: Profile not found
+        """
+
+        try:
+            profile = Profile.objects.get(user=request.user)
+        except Profile.DoesNotExist:
+            return error_response(
+                message="Profile not found.",
+                code="profile_not_found",
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        
         serializer = ProfileSerializer(profile, data=request.data)
-        if serializer.is_valid():
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid profile data.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
             serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            logger.info(f"Profile updated successfully for user: {request.user.email}")
+            return success_response(
+                data=serializer.data,
+                message="Profile updated successfully",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:  
+            logger.error(f"Error updating profile: {str(e)}", exc_info=True)
+            return error_response(
+                message="An error occurred while updating the profile.",
+                code="profile_update_error",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors=[str(e)],
+            )
+            
+            
 
 
 class UserPersonalDetailsAPIView(APIView):
