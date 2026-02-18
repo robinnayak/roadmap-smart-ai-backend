@@ -2,6 +2,7 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager, PermissionsMixin
 import uuid
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 # Create your models here.
@@ -103,11 +104,10 @@ class UserPersonalDetails(models.Model):
         default=0
     )
     
-    target_age = models.IntegerField(
-        validators=[MinValueValidator(14), MaxValueValidator(120)],
-        help_text="Age by which you want to achieve your goals",
-        default=0
+    date_of_birth = models.DateField(
+        help_text="Your date of birth (used to calculate current age)"
     )
+    
     roadmap_start_date = models.DateField(
         default=timezone.now,
         help_text="When to start the roadmap (usually today)"
@@ -133,10 +133,25 @@ class UserPersonalDetails(models.Model):
     def save(self, *args, **kwargs):
         if not self.is_created:
             self.is_created = True
+        if self.date_of_birth:
+            today = timezone.now().date()
+            dob = self.date_of_birth
+            calculated_age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+            self.current_age = calculated_age
         super().save(*args, **kwargs)
+        
+    def clean(self):
+        today = timezone.now().date()
+        if self.date_of_birth >= today:
+            raise ValidationError({"date_of_birth": "Date of borth must be in the past."})
+        
+        if self.roadmap_start_date and self.roadmap_start_date < today:
+            raise ValidationError({"roadmap_start_date": "Roadmap start date cannot be in the past. "})
+        
+        return super().clean()
 
     def __str__(self):
-        return f"{self.user.email}'s will be successful at the age of (v{self.target_age})"
+        return f"{self.user.email} - Personal details"
 
 class NotificationSettings(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

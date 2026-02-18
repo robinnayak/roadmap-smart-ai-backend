@@ -23,6 +23,8 @@ from rest_framework.throttling import UserRateThrottle, AnonRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
 from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework.exceptions import NotFound, ValidationError
+
 
 # Local imports
 from .serializers import (
@@ -68,6 +70,27 @@ class ProductionApiView(APIView):
                     "code": "token_not_valid",
                 },
                 status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # Handle specific exceptions
+
+        if isinstance(exc, NotFound):
+            return Response(
+                {
+                    "error": "Resource not found",
+                    "code": "not_found",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if isinstance(exc, ValidationError):
+            return Response(
+                {
+                    "error": "Validation error",
+                    "details": exc.detail if hasattr(exc, "detail") else str(exc),
+                    "code": "validation_error",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         return super().handle_exception(exc)
@@ -201,7 +224,6 @@ class UserLogoutView(ProductionApiView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [AnonRateThrottle]
 
-
     def post(self, request):
         serializer = UserLogoutSerializer(data=request.data)
         if not serializer.is_valid():
@@ -274,21 +296,26 @@ class CustomTokenRefreshView(TokenRefreshView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-#User Details such as username, email, is_active, ...etc
+
+# User Details such as username, email, is_active, ...etc
+
 
 class UserView(ProductionApiView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [AnonRateThrottle]
+
     def get(self, request):
         serializer = UserProfileSerializer(request.user)
-        return success_response(data=serializer.data, message="User profile retrieved successfully")
-    
+        return success_response(
+            data=serializer.data, message="User profile retrieved successfully"
+        )
+
 
 class UserDeactivateView(ProductionApiView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [AnonRateThrottle]
+
     def post(self, request):
-        
         """
         Delete (deactivate) the user's account. This is a soft delete that sets is_active to False.
         Returns:
@@ -300,8 +327,12 @@ class UserDeactivateView(ProductionApiView):
             user = request.user
             user.is_active = deactivate
             user.save()
-            logger.info(f"Account {'activated' if not deactivate else 'deactivated'} successfully for user: {user.email}")
-            return success_response(message=f"Account {'activated' if not deactivate else 'deactivated'} successfully")
+            logger.info(
+                f"Account {'activated' if not deactivate else 'deactivated'} successfully for user: {user.email}"
+            )
+            return success_response(
+                message=f"Account {'activated' if not deactivate else 'deactivated'} successfully"
+            )
         except Exception as e:
             logger.error(f"Error updating account status: {str(e)}", exc_info=True)
 
@@ -311,7 +342,8 @@ class UserDeactivateView(ProductionApiView):
                 status=status.HTTP_400_BAD_REQUEST,
                 errors=[str(e)],
             )
-        
+
+
 class ProfileDetailView(ProductionApiView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [AnonRateThrottle]
@@ -364,7 +396,7 @@ class ProfileDetailView(ProductionApiView):
                 code="profile_not_found",
                 status=status.HTTP_404_NOT_FOUND,
             )
-        
+
         serializer = ProfileSerializer(profile, data=request.data)
         if not serializer.is_valid():
             return error_response(
@@ -381,7 +413,7 @@ class ProfileDetailView(ProductionApiView):
                 message="Profile updated successfully",
                 status=status.HTTP_200_OK,
             )
-        except Exception as e:  
+        except Exception as e:
             logger.error(f"Error updating profile: {str(e)}", exc_info=True)
             return error_response(
                 message="An error occurred while updating the profile.",
@@ -389,94 +421,145 @@ class ProfileDetailView(ProductionApiView):
                 status=status.HTTP_400_BAD_REQUEST,
                 errors=[str(e)],
             )
-            
-            
 
 
-class UserPersonalDetailsAPIView(APIView):
+class UserPersonalDetailsAPIView(ProductionApiView):
     permission_classes = [IsAuthenticated]
 
     def get_object(self, user):
-        """
-        Helper method to get the user's personal details
-        """
         try:
-            return get_object_or_404(UserPersonalDetails, user=user)
+            return UserPersonalDetails.objects.get(user=user)
         except UserPersonalDetails.DoesNotExist:
             return None
 
-    # ✅ CREATE (POST)
+    def get_queryset(self):
+        return UserPersonalDetails.objects.filter(user=self.request.user)   
+
+    def get(self, request):
+        details = self.get_queryset().first()
+
+        if details is None:
+            return success_response(
+                data={},   # or {} if frontend prefers
+                message="Personal details not created yet.",
+                status=status.HTTP_200_OK,
+            )
+
+        serializer = UserPersonalDetailsSerializer(details)
+
+        return success_response(
+            data=serializer.data,
+            message="Personal details retrieved successfully",
+            status=status.HTTP_200_OK,
+        )
+
+
+
     def post(self, request):
         """
         Create personal details for the logged-in user
         """
-        if UserPersonalDetails.objects.filter(user=request.user).exists():
-            return Response(
-                {"detail": "Personal details already exist."},
+
+        exsiting_user = self.get_object(request.user)
+
+        if exsiting_user:
+            logger.warning(
+                f"Personal details already exist for user: {request.user.email}"
+            )
+
+            return error_response(
+                message="Personal details already exist.",
+                code="details_already_exist",
                 status=status.HTTP_400_BAD_REQUEST,
+                errors=[str("Personal details already exist.")],
             )
 
         serializer = UserPersonalDetailsSerializer(data=request.data)
-        if serializer.is_valid():
+
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid personal details data.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
             serializer.save(user=request.user)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            logger.info(
+                f"Personal details created successfully for user: {request.user.email}"
+            )
+            return success_response(
+                data=serializer.data,
+                message="Personal details created successfully",
+                status=status.HTTP_201_CREATED,
+            )
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Error creating personal details: {str(e)}", exc_info=True)
 
-    # 👀 READ (GET)
-    def get(self, request):
-        """
-        Retrieve personal details of the logged-in user
-        """
-        details = self.get_object(request.user)
-        serializer = UserPersonalDetailsSerializer(details)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+            return error_response(
+                message="An error occurred while creating personal details.",
+                code="details_creation_error",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors=[str(e)],
+            )
 
-    # ✏️ UPDATE (PUT / PATCH)
     def put(self, request):
         """
         Full update of personal details
         """
-        details = self.get_object(request.user)
-        serializer = UserPersonalDetailsSerializer(details, data=request.data)
 
-        if serializer.is_valid():
+        try:
+            details = self.get_object(request.user)
+            serializer = UserPersonalDetailsSerializer(details, data=request.data)
+            if not serializer.is_valid():
+                return error_response(
+                    message="Invalid personal details data.",
+                    errors=serializer.errors,
+                    code="invalid_data",
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             serializer.save()
-            return Response(serializer.data)
+            logger.info(
+                f"Personal details updated successfully for user: {request.user.email}"
+            )
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return success_response(
+                data=serializer.data,
+                message="Personal details updated successfully",
+                status=status.HTTP_200_OK,
+            )
 
-    # def patch(self, request):
-    #     """
-    #     Partial update of personal details
-    #     """
-    #     details = self.get_object(request.user)
-    #     serializer = UserPersonalDetailsSerializer(
-    #         details,
-    #         data=request.data,
-    #         partial=True
-    #     )
+        except UserPersonalDetails.DoesNotExist:
+            return error_response(
+                message="Personal details not found.",
+                code="details_not_found",
+                status=status.HTTP_404_NOT_FOUND,
+                errors=[str("Personal details not found.")],
+            )
 
-    #     if serializer.is_valid():
-    #         serializer.save()
-    #         return Response(serializer.data)
-
-    #     return Response(
-    #         serializer.errors,
-    #         status=status.HTTP_400_BAD_REQUEST
-    #     )
-
-    # ❌ DELETE
     def delete(self, request):
         """
         Delete personal details of the logged-in user
         """
-        details = self.get_object(request.user)
-        details.delete()
-        return Response(
-            {"detail": "Personal details deleted successfully."},
-            status=status.HTTP_204_NO_CONTENT,
-        )
+        try:
+            details = self.get_object(request.user)
+            user_email = request.user.email
+            details.delete()
+            logger.info(f"Personal details deleted successfully for user: {user_email}")
+            return success_response(
+                message="Personal details deleted successfully",
+                status=status.HTTP_204_NO_CONTENT,
+            )
+        except UserPersonalDetails.DoesNotExist:
+            return error_response(
+                message="Personal details not found.",
+                code="details_not_found",
+                status=status.HTTP_404_NOT_FOUND,
+                errors=[str("Personal details not found.")],
+            )
 
 
 class NotificationDetailView(APIView):

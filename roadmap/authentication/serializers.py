@@ -5,6 +5,8 @@ from django.contrib.auth.password_validation import validate_password
 from .models import CustomUser, Profile, NotificationSettings, UserPersonalDetails
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.utils import timezone
+
 
 User = get_user_model()
 
@@ -193,34 +195,39 @@ class ProfileSerializer(serializers.ModelSerializer):
             "theme": {"help_text": "The user's preferred theme (light, dark)."},
         }
         
-        # def validate_bio(self, value):
-        #     if len(value) > 300:
-        #         raise serializers.ValidationError(
-        #             "Bio cannot exceed 300 characters."
-        #         )
-        #     return value
-
-
-# class ProfileSerializer(serializers.ModelSerializer):
-#     # Make these fields read-only if you don't want them to be updated
-#     username = serializers.CharField(source='user.username', read_only=True)
-#     email = serializers.CharField(source='user.email', read_only=True)
-
-#     class Meta:
-#         model = Profile
-#         fields = [
-#             'id', 'username', 'email', 'bio', 'avatar', 'timezone',
-#             'subscription_tier', 'total_points',
-#             'current_level', 'preferred_language', 'theme'
-#         ]
-
 
 class UserPersonalDetailsSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = UserPersonalDetails
-        fields = "__all__"
-        read_only_fields = ("id", "user", "created_at", "updated_at")
+        fields = (
+            "id",
+            "date_of_birth",
+            "current_age",       # computed, read-only
+            "current_situation",
+            "roadmap_start_date",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "created_at", "updated_at", "current_age")
+        
+    def validate_date_of_birth(self, value):
+        today = timezone.now().date()
+        if value >= today:
+            raise serializers.ValidationError("Date of birth must be in the past.")
+        
+        age = today.year - value.year - ((today.month, today.day) < (value.month, value.day))
+        if age < 13 or age > 100:
+            raise serializers.ValidationError("Age must be between 13 and 100.")
+        
+        return value
+
+    def validate_roadmap_start_date(self, value):
+        today = timezone.now().date()
+        if value < today:
+            raise serializers.ValidationError("Roadmap start date cannot be in the past.")
+        return value
+
 
 
 class NotificationSettingsSerializer(serializers.ModelSerializer):
