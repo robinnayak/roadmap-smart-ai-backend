@@ -2,11 +2,10 @@ from ai.prompts.base_prompts import BasePrompt
 
 class GoalHierarchyGeneratorPrompts(BasePrompt):
 
-    def get_subgoal_generating_prompt(self, milestone_context):
+    def get_subgoal_generating_prompt(self, milestone_data, goal_data):
         prompt = f"""
-Milestone: {milestone_context.get('title', 'Unknown')}
-Description: {milestone_context.
-get('description', '')}
+Milestone: {milestone_data.get('title', 'Unknown')}
+Description: {milestone_data.get('description', '')}
 
 Create 4 weekly subgoals for this monthly milestone:
 
@@ -39,11 +38,11 @@ IMPORTANT: Return JSON in this EXACT format:
 """
         return prompt
 
-    def get_task_generating_prompt(self, subgoal_context):
+    def get_task_generating_prompt(self, subgoal_data, milestone_data):
         prompt = f"""
-Weekly Subgoal: {subgoal_context.get('title', 'Unknown')}
-Description: {subgoal_context.get('description', '')}
-Learning Objectives: {subgoal_context.get('learning_objectives', [])}
+Weekly Subgoal: {subgoal_data.get('title', 'Unknown')}
+Description: {subgoal_data.get('description', '')}
+Learning Objectives: {subgoal_data.get('learning_objectives', [])}
 
 Create 5 daily tasks (Monday-Friday) for this weekly subgoal:
 

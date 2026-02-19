@@ -5,20 +5,46 @@ from ai.utils.formatters import MileStoneFormatter
 from datetime import timedelta
 from ai.prompts.GoalHierarchyGeneratorPrompts import GoalHierarchyGeneratorPrompts
 import json
+import logging
+from typing import Any
+from datetime import datetime
+
+
+logger = logging.getLogger(__name__)
+
+#Must match JOB_TYPE_CHOICES in AIProcessingJob
+HIERARCHY_JOB_TYPE = "milestone_generation"
+
+# Generation limits — change here, nowhere else
+MIN_MONTHS = 1
+MAX_MONTHS = 24                 # Raised from 12; supports 23-month trading plan
+DEFAULT_MONTHS = 6
+MAX_MILESTONES = 12
+MAX_SUBGOALS_PER_MILESTONE = 4
+MAX_TASKS_PER_SUBGOAL = 7
 
 
 class GoalHierarchyGenerator(BaseAIService):
     """
-    Generates complete goal hierarchy from user input.
-    
-    Flow: Goal → Milestones (Monthly) → SubGoals (Weekly) → Tasks (Daily)
+    Generates a complete goal hierarchy from a goal_data dict.
+
+    Flow: goal_data → Milestones (monthly) → SubGoals (weekly) → Tasks (daily)
+
+    FIX: Now creates an AIProcessingJob for every hierarchy run so progress
+         and failures are visible in the admin / logs. Uses the model's own
+         start_processing(), update_progress(), mark_completed(), mark_failed()
+         methods rather than manually setting status strings.
+
+    All public methods accept and return plain dicts.
+    The view layer (CreateGoalWithHierarchyAPIView) is responsible for
+    persisting the result to Milestone / SubGoal / Task models.
     """
 
     def __init__(self):
         provider = OllamaProvider(
-            model="gpt-oss:120b-cloud", 
-            temperature=0.2, 
-            max_tokens=4000
+            model="gpt-oss:120b-cloud",
+            temperature=0.2,
+            max_tokens=4000,
         )
         super().__init__(provider)
         self.milestone_parser = MilestoneParser()
@@ -26,453 +52,329 @@ class GoalHierarchyGenerator(BaseAIService):
         self.formatter = MileStoneFormatter()
         self.prompts = GoalHierarchyGeneratorPrompts()
 
-    def enhance_goal_input(self, goal_inputs, user_context):
-        """
-        Enhance user's goal description and suggest GoalAttributes.
-        """
-        try:
-            response = self.provider.generate_response(
-                prompt=self.prompts.get_goal_enhancement_prompt(
-                    goal_inputs=goal_inputs,
-                    user_context=user_context
-                ),
-                system_prompt="You are a goal enhancement expert."
-            )
-            
-            parsed_data = self.parser.parse_json(response.content)
-            return self.formatter.format_success(
-                data=parsed_data,
-                message="Goal enhanced successfully"
-            )
-            
-        except Exception as e:
-            return self.formatter.format_error(
-                error_message=str(e),
-                error_code="ENHANCEMENT_FAILED"
-            )
+    # -------------------------------------------------------------------------
+    # Public entry point
+    # -------------------------------------------------------------------------
 
-    def generate_milestones(self, goal):
+    def generate_complete_hierarchy(
+        self,
+        goal_data: dict,
+        user,
+        user_context: dict | None = None,
+    ) -> dict[str, Any]:
         """
-        Generate monthly milestones for a goal.
-        
+        Generate a complete hierarchy for a goal and track it as a job.
+
         Args:
-            goal: Can be either:
-                - Goal model instance
-                - Dictionary with goal data
-        
+            goal_data:     Dict — title, description, why_it_matters,
+                           primary_category, start_date, target_date,
+                           impact_dimensions.
+            user:          CustomUser instance (for job ownership).
+            user_context:  Optional — current_role, key_skills, constraints,
+                           etc. from UserCurrentSituationGoal. Personalises output.
+
         Returns:
             {
                 'status': 'success' | 'error',
                 'data': {
-                    'milestones': [list of milestone dicts]
-                },
-                'message': 'Success message'
-            }
-        """
-        try:
-            # Calculate months based on target date
-            months = 6  # Default
-            
-            # Determine start and end dates
-            if hasattr(goal, 'start_date') and hasattr(goal, 'target_date'):
-                # It's a Goal object
-                if goal.start_date and goal.target_date:
-                    delta = goal.target_date - goal.start_date
-                    months = max(3, min(12, delta.days // 30))
-            elif isinstance(goal, dict):
-                # It's a dictionary
-                start_date = goal.get('start_date')
-                target_date = goal.get('target_date')
-                if start_date and target_date:
-                    from datetime import datetime
-                    if isinstance(start_date, str):
-                        start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-                    if isinstance(target_date, str):
-                        target_date = datetime.strptime(target_date, '%Y-%m-%d').date()
-                    delta = target_date - start_date
-                    months = max(3, min(12, delta.days // 30))
-            
-            # Generate prompt
-            prompt = self.prompts.get_milestone_generating_prompt(goal, months)
-            
-            system_prompt = """You are an AI planning expert. Break down the goal into monthly milestones.
-
-            Each milestone should:
-            - Be achievable in ~30 days
-            - Build on previous milestones
-            - Have clear success criteria
-            - Be specific and measurable
-
-            Respond with valid JSON only."""
-            
-            # Generate response
-            response = self.provider.generate_response(
-                prompt=prompt,
-                system_prompt=system_prompt,
-            )
-            print(f"DEBUG: Response type: {type(response)}")
-            print(f"DEBUG: Response content type: {type(response.content)}")
-            
-            # Parse response
-            parsed_data = self.milestone_parser.parse_milestones(response.content)
-            
-            # Ensure we return consistent format
-            if isinstance(parsed_data, dict):
-                if 'milestones' in parsed_data:
-                    milestones_data = parsed_data['milestones']
-                else:
-                    milestones_data = [parsed_data]
-            elif isinstance(parsed_data, list):
-                milestones_data = parsed_data
-            else:
-                milestones_data = []
-            
-            print(f"DEBUG: Parsed {len(milestones_data)} milestones")
-            
-            return self.formatter.format_success(
-                data={'milestones': milestones_data},
-                message=f"Generated {len(milestones_data)} milestones successfully"
-            )
-            
-        except Exception as e:
-            print(f"Error generating milestones: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            
-            return self.formatter.format_error(
-                error_message=str(e),
-                error_code="MILESTONE_GENERATION_FAILED"
-            )
-
-    def generate_subgoals(self, milestone_data):
-        """
-        Generate weekly subgoals for a milestone.
-        
-        Args:
-            milestone_data: Dictionary with milestone data or Milestone model instance
-        
-        Returns:
-            {
-                'status': 'success' | 'error',
-                'data': {
-                    'subgoals': [list of subgoal dicts]
-                },
-                'message': 'Success message'
-            }
-        """
-        try:
-            response = self.provider.generate_response(
-                prompt=self.prompts.get_subgoal_generating_prompt(milestone_data),
-                system_prompt="""You are a weekly planning expert.
-                Break monthly milestones into weekly subgoals.
-                
-                Respond with valid JSON containing 'subgoals' array."""
-            )
-            
-            parsed_data = self.parser.parse_json(response.content)
-            
-            # Ensure consistent format
-            if isinstance(parsed_data, dict) and 'subgoals' in parsed_data:
-                subgoals_data = parsed_data['subgoals']
-            elif isinstance(parsed_data, list):
-                subgoals_data = parsed_data
-            else:
-                subgoals_data = []
-            
-            print(f"DEBUG: Generated {len(subgoals_data)} subgoals")
-            
-            return self.formatter.format_success(
-                data={'subgoals': subgoals_data},
-                message=f"Generated {len(subgoals_data)} subgoals successfully"
-            )
-            
-        except Exception as e:
-            print(f"Error generating subgoals: {str(e)}")
-            return self.formatter.format_error(
-                error_message=str(e),
-                error_code="SUBGOAL_GENERATION_FAILED"
-            )
-
-    def generate_tasks(self, subgoal_data):
-        """
-        Generate daily tasks for a weekly subgoal.
-        
-        Args:
-            subgoal_data: Dictionary with subgoal data or SubGoal model instance
-        
-        Returns:
-            {
-                'status': 'success' | 'error',
-                'data': {
-                    'tasks': [list of task dicts]
-                },
-                'message': 'Success message'
-            }
-        """
-        try:
-            response = self.provider.generate_response(
-                prompt=self.prompts.get_task_generating_prompt(subgoal_data),
-                system_prompt="""You are a daily task planner.
-                Create specific, actionable daily tasks.
-                
-                Respond with valid JSON containing 'tasks' array."""
-            )
-            
-            parsed_data = self.parser.parse_json(response.content)
-            
-            # Ensure consistent format
-            if isinstance(parsed_data, dict) and 'tasks' in parsed_data:
-                tasks_data = parsed_data['tasks']
-            elif isinstance(parsed_data, list):
-                tasks_data = parsed_data
-            else:
-                tasks_data = []
-            
-            print(f"DEBUG: Generated {len(tasks_data)} tasks")
-            
-            return self.formatter.format_success(
-                data={'tasks': tasks_data},
-                message=f"Generated {len(tasks_data)} tasks successfully"
-            )
-            
-        except Exception as e:
-            print(f"Error generating tasks: {str(e)}")
-            return self.formatter.format_error(
-                error_message=str(e),
-                error_code="TASK_GENERATION_FAILED"
-            )
-    
-    def generate_complete_hierarchy(self, goal_data, user_context=None):
-        """
-        FIXED: Generate complete hierarchy with ALL subgoals and tasks
-        
-        Structure:
-        - 2-3 monthly milestones
-        - 4 weekly subgoals per milestone (Total: 8-12 subgoals)
-        - 7 daily tasks per subgoal (Total: 56-84 tasks)
-        
-        Returns:
-        {
-            'status': 'success',
-            'data': {
-                'milestones': [
-                    {
-                        'milestone_data': {...},
-                        'subgoals': [
-                            {
-                                'subgoal_data': {...},
-                                'tasks': [...]  # 7 tasks
-                            }
-                            # ... 4 subgoals total
-                        ]
+                    'milestones': [
+                        {
+                            'milestone_data': { ... },
+                            'subgoals': [
+                                {
+                                    'subgoal_data': { ... },
+                                    'tasks': [ { ... }, ... ]
+                                },
+                                ...                          # up to 4
+                            ]
+                        },
+                        ...                                  # up to MAX_MILESTONES
+                    ],
+                    'stats': {
+                        'milestones_total': int,
+                        'subgoals_total':   int,
+                        'tasks_total':      int,
                     }
-                    # ... 2-3 milestones total
-                ]
+                },
+                'job_id': '<uuid>',
+                'message': '...'
             }
-        }
         """
+        logger.info("Starting hierarchy generation for goal: %s", goal_data.get("title"))
+
+        # FIX: Create a tracking job for the full hierarchy run.
+        #      job_type='milestone_generation' matches JOB_TYPE_CHOICES.
+        job, _ = self.create_or_update_job(
+            user=user,
+            job_type=HIERARCHY_JOB_TYPE,
+            input_data={
+                "goal_title":       goal_data.get("title"),
+                "primary_category": goal_data.get("primary_category"),
+                "target_date":      str(goal_data.get("target_date", "")),
+                "user_context":     user_context or {},
+            },
+        )
+        job.start_processing()
+
         try:
-            print("\n" + "="*80)
-            print("STARTING COMPLETE HIERARCHY GENERATION")
-            print("="*80)
-            
-            # 1. Generate 2-3 Milestones
-            print("\n📅 STEP 1: Generating Milestones...")
-            milestones_result = self.generate_milestones(goal_data)
-            
-            if milestones_result.get('status') != 'success':
-                return milestones_result
-            
-            milestones_list = milestones_result.get('data', {}).get('milestones', [])
-            
-            # Limit to 2-3 milestones for production
-            milestones_list = milestones_list[:3]
-            print(f"✓ Generated {len(milestones_list)} milestones")
-            
+            # Step 1 — Milestones (10% progress marker)
+            milestones_result = self._generate_milestones(goal_data, user_context)
+            if milestones_result.get("status") != "success":
+                job.mark_failed(
+                    f"Milestone generation failed: {milestones_result.get('message')}"
+                )
+                return {**milestones_result, "job_id": str(job.id)}
+
+            milestones_list = milestones_result["data"]["milestones"][:MAX_MILESTONES]
+            logger.info("Generated %d milestones", len(milestones_list))
+            job.update_progress(10, f"Generated {len(milestones_list)} milestones")
+
+            # Step 2 — SubGoals + Tasks for each milestone
             all_milestones_data = []
             total_subgoals = 0
             total_tasks = 0
-            
-            # 2. Generate Subgoals and Tasks for EACH Milestone
-            for milestone_idx, milestone_dict in enumerate(milestones_list, 1):
-                print(f"\n{'─'*80}")
-                print(f"📊 PROCESSING MILESTONE {milestone_idx}/{len(milestones_list)}")
-                print(f"Title: {milestone_dict.get('title', 'Unknown')}")
-                print(f"{'─'*80}")
-                
-                milestone_with_hierarchy = {
-                    'milestone_data': milestone_dict,
-                    'subgoals': []
-                }
-                
-                # 2a. Generate 4 Subgoals for this Milestone
-                print(f"\n  📋 STEP 2a: Generating subgoals for milestone {milestone_idx}...")
-                subgoals_result = self.generate_subgoals(milestone_dict)
-                
-                if subgoals_result.get('status') != 'success':
-                    print(f"  ⚠️  Failed to generate subgoals for milestone {milestone_idx}")
-                    continue
-                
-                subgoals_list = subgoals_result.get('data', {}).get('subgoals', [])
-                
-                # Ensure we have 4 subgoals
-                subgoals_list = subgoals_list[:4]
-                print(f"  ✓ Generated {len(subgoals_list)} subgoals")
-                
-                # 2b. Generate Tasks for EACH Subgoal
-                for subgoal_idx, subgoal_dict in enumerate(subgoals_list, 1):
-                    print(f"\n    📝 STEP 2b.{subgoal_idx}: Generating tasks for subgoal {subgoal_idx}/4")
-                    print(f"    Title: {subgoal_dict.get('title', 'Unknown')}")
-                    
-                    tasks_result = self.generate_tasks(subgoal_dict)
-                    
-                    if tasks_result.get('status') != 'success':
-                        print(f"    ⚠️  Failed to generate tasks for subgoal {subgoal_idx}")
-                        # Add subgoal without tasks
-                        milestone_with_hierarchy['subgoals'].append({
-                            'subgoal_data': subgoal_dict,
-                            'tasks': []
-                        })
-                        continue
-                    
-                    tasks_list = tasks_result.get('data', {}).get('tasks', [])
-                    
-                    # Ensure we have 7 tasks (one per day)
-                    tasks_list = tasks_list[:7]
-                    print(f"    ✓ Generated {len(tasks_list)} tasks")
-                    
-                    # Add subgoal with its tasks
-                    milestone_with_hierarchy['subgoals'].append({
-                        'subgoal_data': subgoal_dict,
-                        'tasks': tasks_list
+
+            for m_idx, milestone_dict in enumerate(milestones_list, 1):
+                logger.info(
+                    "Processing milestone %d/%d: %s",
+                    m_idx, len(milestones_list), milestone_dict.get("title", "?"),
+                )
+
+                # Generate subgoals for this milestone
+                subgoals_result = self._generate_subgoals(milestone_dict, goal_data)
+                if subgoals_result.get("status") != "success":
+                    logger.warning(
+                        "Milestone %d — subgoal generation failed, keeping milestone with no subgoals",
+                        m_idx,
+                    )
+                    all_milestones_data.append({
+                        "milestone_data": milestone_dict,
+                        "subgoals": [],
                     })
-                    
+                    continue
+
+                subgoals_list = subgoals_result["data"]["subgoals"][:MAX_SUBGOALS_PER_MILESTONE]
+                milestone_entry = {"milestone_data": milestone_dict, "subgoals": []}
+
+                # Generate tasks for each subgoal
+                for sg_idx, subgoal_dict in enumerate(subgoals_list, 1):
+                    logger.info(
+                        "  Subgoal %d/%d: %s",
+                        sg_idx, len(subgoals_list), subgoal_dict.get("title", "?"),
+                    )
+
+                    tasks_result = self._generate_tasks(subgoal_dict, milestone_dict)
+                    tasks_list = []
+
+                    if tasks_result.get("status") == "success":
+                        tasks_list = tasks_result["data"]["tasks"][:MAX_TASKS_PER_SUBGOAL]
+                    else:
+                        logger.warning(
+                            "  Subgoal %d — task generation failed, keeping subgoal with no tasks",
+                            sg_idx,
+                        )
+
+                    milestone_entry["subgoals"].append({
+                        "subgoal_data": subgoal_dict,
+                        "tasks": tasks_list,
+                    })
                     total_subgoals += 1
                     total_tasks += len(tasks_list)
-                
-                all_milestones_data.append(milestone_with_hierarchy)
-            
-            # 3. Final Summary
-            print(f"\n{'='*80}")
-            print(f"HIERARCHY GENERATION COMPLETE ✅")
-            print(f"{'='*80}")
-            print(f"Milestones:      {len(all_milestones_data)}")
-            print(f"Total Subgoals:  {total_subgoals}")
-            print(f"Total Tasks:     {total_tasks}")
-            print(f"{'='*80}\n")
-            
-            # Detailed breakdown
-            for idx, milestone in enumerate(all_milestones_data, 1):
-                print(f"Milestone {idx}: {milestone.get('milestone_data', {}).get('title')}")
-                for subgoal_idx, subgoal_entry in enumerate(milestone.get('subgoals', []), 1):
-                    subgoal_title = subgoal_entry.get('subgoal_data', {}).get('title')
-                    task_count = len(subgoal_entry.get('tasks', []))
-                    print(f"  Subgoal {subgoal_idx}: {subgoal_title} ({task_count} tasks)")
-            
-            return {
-                'status': 'success',
-                'data': {
-                    'milestones': all_milestones_data,
-                    'stats': {
-                        'milestones_total': len(all_milestones_data),
-                        'subgoals_total': total_subgoals,
-                        'tasks_total': total_tasks,
-                        'expected_subgoals': len(all_milestones_data) * 4,
-                        'expected_tasks': total_subgoals * 7
-                    }
-                },
-                'message': f'Generated complete hierarchy: {len(all_milestones_data)} milestones, {total_subgoals} subgoals, {total_tasks} tasks'
+
+                all_milestones_data.append(milestone_entry)
+
+                # Update progress proportionally as milestones complete
+                progress = 10 + int((m_idx / len(milestones_list)) * 85)
+                job.update_progress(
+                    progress,
+                    f"Milestone {m_idx}/{len(milestones_list)} complete",
+                )
+
+            stats = {
+                "milestones_total": len(all_milestones_data),
+                "subgoals_total":   total_subgoals,
+                "tasks_total":      total_tasks,
             }
-            
-        except Exception as e:
-            print(f"\n❌ Hierarchy generation failed: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            
+            output_data = {"milestones": all_milestones_data, "stats": stats}
+
+            # FIX: Use mark_completed() — sets status, output_data, timestamps atomically
+            job.mark_completed(
+                output_data=output_data,
+                model_used=self.provider.model,
+            )
+
+            logger.info(
+                "Hierarchy complete — milestones: %d, subgoals: %d, tasks: %d",
+                stats["milestones_total"], stats["subgoals_total"], stats["tasks_total"],
+            )
+
             return {
-                'status': 'error',
-                'message': f'Failed to generate hierarchy: {str(e)}'
+                "status": "success",
+                "data": output_data,
+                "job_id": str(job.id),
+                "message": (
+                    f"Generated {stats['milestones_total']} milestones, "
+                    f"{stats['subgoals_total']} subgoals, "
+                    f"{stats['tasks_total']} tasks."
+                ),
             }
-   
-    def validate_hierarchy(self, goal_data, milestones_data, subgoals_data=None, tasks_data=None):
+
+        except Exception as exc:
+            logger.exception(
+                "Hierarchy generation failed for goal '%s': %s",
+                goal_data.get("title"), exc,
+            )
+            # FIX: mark_failed() handles status + retry_count atomically
+            job.mark_failed(error_message=str(exc))
+            return {
+                "status": "error",
+                "message": str(exc),
+                "job_id": str(job.id),
+            }
+
+    # -------------------------------------------------------------------------
+    # Private generation methods
+    # -------------------------------------------------------------------------
+
+    def _generate_milestones(
+        self, goal_data: dict, user_context: dict | None
+    ) -> dict:
+        """Generate monthly milestones from a goal_data dict."""
+        try:
+            months = self._calculate_months(goal_data)
+            logger.info("Generating milestones for %d months", months)
+
+            response = self.provider.generate_response(
+                prompt=self.prompts.get_milestone_generating_prompt(goal_data, months),
+                system_prompt=(
+                    "You are an expert life coach and planning specialist. "
+                    "Break down the goal into clear monthly milestones. "
+                    "Each milestone must be achievable in ~30 days, build on the previous, "
+                    "and have specific, measurable success criteria. "
+                    "Respond with valid JSON only — no prose, no markdown fences."
+                ),
+            )
+
+            parsed = self.milestone_parser.parse_milestones(response.content)
+            milestones = (
+                parsed.get("milestones", [parsed]) if isinstance(parsed, dict)
+                else parsed if isinstance(parsed, list)
+                else []
+            )
+
+            logger.info("Parsed %d milestones", len(milestones))
+            return self.formatter.format_success(
+                data={"milestones": milestones},
+                message=f"Generated {len(milestones)} milestones",
+            )
+
+        except Exception as exc:
+            logger.exception("Milestone generation failed: %s", exc)
+            return self.formatter.format_error(
+                error_message=str(exc),
+                error_code="MILESTONE_GENERATION_FAILED",
+            )
+
+    def _generate_subgoals(self, milestone_data: dict, goal_data: dict) -> dict:
         """
-        Validate the complete hierarchy makes sense.
+        Generate weekly subgoals for one milestone.
+        goal_data is passed so the AI has the full goal context, not just
+        the milestone title.
         """
         try:
             response = self.provider.generate_response(
-                prompt=self.prompts.get_hierarchy_validation_prompt(
-                    goal_data, milestones_data, subgoals_data, tasks_data
+                prompt=self.prompts.get_subgoal_generating_prompt(milestone_data, goal_data),
+                system_prompt=(
+                    "You are a weekly planning expert. "
+                    "Break this monthly milestone into exactly 4 focused weekly subgoals. "
+                    "Each subgoal must be specific, actionable, and completable in 7 days. "
+                    "Respond with valid JSON containing a 'subgoals' array. No prose."
                 ),
-                system_prompt="You are a hierarchy validation expert."
             )
-            
-            parsed_data = self.parser.parse_json(response.content)
+
+            parsed = self.parser.parse_json(response.content)
+            subgoals = (
+                parsed["subgoals"] if isinstance(parsed, dict) and "subgoals" in parsed
+                else parsed if isinstance(parsed, list)
+                else []
+            )
+
+            logger.info("Parsed %d subgoals", len(subgoals))
             return self.formatter.format_success(
-                data=parsed_data,
-                message="Hierarchy validated"
-            )
-            
-        except Exception as e:
-            return self.formatter.format_error(
-                error_message=str(e),
-                error_code="VALIDATION_FAILED"
+                data={"subgoals": subgoals},
+                message=f"Generated {len(subgoals)} subgoals",
             )
 
-    def generate_on_demand(self, parent_data, level):
-        """
-        Generate more content on-demand.
-        
-        Args:
-            parent_data: Data of parent item (goal, milestone, or subgoal)
-            level: 'milestones', 'subgoals', or 'tasks'
-        
-        Returns:
-            Formatted response with generated data
-        """
-        try:
-            if level == 'milestones':
-                result = self.generate_milestones(parent_data)
-            elif level == 'subgoals':
-                result = self.generate_subgoals(parent_data)
-            elif level == 'tasks':
-                result = self.generate_tasks(parent_data)
-            else:
-                return self.formatter.format_error(
-                    error_message="Invalid level. Must be 'milestones', 'subgoals', or 'tasks'",
-                    error_code="INVALID_LEVEL"
-                )
-            
-            return result
-            
-        except Exception as e:
+        except Exception as exc:
+            logger.exception("Subgoal generation failed: %s", exc)
             return self.formatter.format_error(
-                error_message=str(e),
-                error_code="ON_DEMAND_GENERATION_FAILED"
+                error_message=str(exc),
+                error_code="SUBGOAL_GENERATION_FAILED",
             )
 
-    def generate_milestones_simple(self, goal_data):
+    def _generate_tasks(self, subgoal_data: dict, milestone_data: dict) -> dict:
         """
-        Simplified version that just generates milestones.
-        Use this for testing or when you only need milestones.
+        Generate daily tasks for one subgoal.
+        milestone_data is passed so the AI knows the broader monthly theme.
         """
         try:
-            result = self.generate_milestones(goal_data)
-            
-            if result.get('status') == 'success':
-                milestones = result.get('data', {}).get('milestones', [])
-                return {
-                    'status': 'success',
-                    'data': {
-                        'milestones': milestones,
-                        'count': len(milestones)
-                    },
-                    'message': f'Generated {len(milestones)} milestones'
-                }
-            else:
-                return result
-                
-        except Exception as e:
-            return {
-                'status': 'error',
-                'message': str(e)
-            }
+            response = self.provider.generate_response(
+                prompt=self.prompts.get_task_generating_prompt(subgoal_data, milestone_data),
+                system_prompt=(
+                    "You are a daily task planner. "
+                    "Create exactly 7 specific, actionable tasks (one per day of the week). "
+                    "Each task must include: title, description (what exactly to do), "
+                    "task_type (learning/practice/project/review/assessment), "
+                    "and estimated_duration_minutes. "
+                    "Respond with valid JSON containing a 'tasks' array. No prose."
+                ),
+            )
+
+            parsed = self.parser.parse_json(response.content)
+            tasks = (
+                parsed["tasks"] if isinstance(parsed, dict) and "tasks" in parsed
+                else parsed if isinstance(parsed, list)
+                else []
+            )
+
+            logger.info("Parsed %d tasks", len(tasks))
+            return self.formatter.format_success(
+                data={"tasks": tasks},
+                message=f"Generated {len(tasks)} tasks",
+            )
+
+        except Exception as exc:
+            logger.exception("Task generation failed: %s", exc)
+            return self.formatter.format_error(
+                error_message=str(exc),
+                error_code="TASK_GENERATION_FAILED",
+            )
+
+    # -------------------------------------------------------------------------
+    # Utility
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _calculate_months(goal_data: dict) -> int:
+        """
+        Derive planned months from start_date and target_date.
+        Accepts both date objects and ISO strings.
+        Falls back to DEFAULT_MONTHS if dates are missing or invalid.
+        """
+        try:
+            start  = goal_data.get("start_date")
+            target = goal_data.get("target_date")
+            if not start or not target:
+                return DEFAULT_MONTHS
+
+            if isinstance(start, str):
+                start  = datetime.strptime(start,  "%Y-%m-%d").date()
+            if isinstance(target, str):
+                target = datetime.strptime(target, "%Y-%m-%d").date()
+
+            months = (target - start).days // 30
+            return max(MIN_MONTHS, min(MAX_MONTHS, months))
+
+        except Exception as exc:
+            logger.warning("Could not calculate months from dates: %s — using default.", exc)
+            return DEFAULT_MONTHS

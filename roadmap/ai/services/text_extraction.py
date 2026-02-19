@@ -16,108 +16,136 @@ from ai.prompts.base_prompts import BasePrompt
 
 logger = logging.getLogger(__name__)
 
+# Must match JOB_TYPE_CHOICES in AIProcessingJob
+GOAL_ATTRIBUTES_JOB_TYPE = "goal_attributes"
+
+# Maps primary_category → GoalAttributes field name
+CATEGORY_TO_FIELD = {
+    "financial": "financial_data",
+    "career":    "career_data",
+    "health":    "health_data",
+    "personal":  "personal_data",
+}
+
 
 class GoalAttributeExtractor(BaseAIService):
     """
-    Extracts structured information from user-written goals.
+    Extracts structured GoalAttributes from user free-text via AI.
+
+    Uses AIProcessingJob to track every extraction — start, success, failure.
+    Uses the model's own mark_completed() / mark_failed() methods instead of
+    manually setting status strings to avoid the uppercase/lowercase bug.
     """
 
     def __init__(self):
-        """Initialize the GoalAttributeExtractor."""
         provider = OllamaProvider(
             model="gpt-oss:120b-cloud",
-            temperature=0.3,  # Lower temperature for consistent structured output
+            temperature=0.3,   # Low temperature → consistent structured JSON
             max_tokens=2000,
         )
         super().__init__(provider)
+        self.parser = ResponseParser()
+        self.formatter = ResponseFormatter()
 
-        self.response_parser = ResponseParser()
-        self.response_formatter = ResponseFormatter()
-
-    def extract_goal_attributes(self, user_input: str, user, goal_id: int) -> Dict[str, Any]:
+    def extract_goal_attributes(
+        self,
+        user_input: str,
+        user,
+        goal_id: str,
+        primary_category: str = "",
+    ) -> dict[str, Any]:
         """
-        Processes raw user text to extract goal attributes.
+        Extract structured attributes from a free-text goal description.
 
         Args:
-            user_input: The raw text input from the user describing their goal.
-            user: The user model instance.
+            user_input:        Raw text the user wrote about their goal.
+            user:              CustomUser instance (for job ownership).
+            goal_id:           Goal UUID string (stored in job metadata).
+            primary_category:  Goal's primary_category value (financial/career/
+                               health/personal). Used to determine which
+                               GoalAttributes field to populate.
 
         Returns:
-            A dictionary containing the structured goal attributes.
+            {
+                'status': 'success' | 'error',
+                'data': {
+                    'financial_data': { ... }   # or career_data / health_data / personal_data
+                },
+                'job_id': '<uuid>'
+            }
         """
-        # Create processing job - unpack the tuple to get just the job object
+        # FIX 1: Use create_or_update_job (correct method name) with input_data
+        #         (correct field name). job_type matches JOB_TYPE_CHOICES exactly.
+        job, _ = self.create_or_update_job(
+            user=user,
+            job_type=GOAL_ATTRIBUTES_JOB_TYPE,
+            input_data={
+                "user_input": user_input,
+                "goal_id": goal_id,
+                "primary_category": primary_category,
+            },
+        )
+
+        # FIX 2: Use the model method — sets status='processing' + started_at atomically
+        job.start_processing()
+
         try:
-            job_result = self.create_job(
-                user=user,
-                job_type=f"goal_attribute_extraction_{goal_id}",
-                row_data={"user_input": user_input},
-            )
-            print(f"Job result type: {type(job_result)}, value: {job_result}")
+            system_prompt = SystemPrompts.get_prompt("goal_attribute_context_extraction")
 
-            # Extract just the job object from the tuple
-            if isinstance(job_result, tuple) and len(job_result) > 0:
-                job = job_result[0]  # Get the job object from the tuple
-            else:
-                job = job_result  # If it's not a tuple, use as is
-
-            print(f"Job created: {job}")  # Debug
-
-            # Get the system prompt for goal attribute extraction
-            goal_attribute_context_extraction_prompt = SystemPrompts.get_prompt(
-                "goal_attribute_context_extraction"
+            logger.info(
+                "Extracting goal attributes for user %s, goal %s, category '%s'",
+                user.id, goal_id, primary_category,
             )
 
-            # print(f"System prompt: {goal_attribute_context_extraction_prompt}")
-            print(f"User input: {user_input}")
-            # Generate response from AI
-            logger.info(f"Extracting goal attributes for user {user.email}")
             response = self.provider.generate_response(
                 prompt=user_input,
-                system_prompt=goal_attribute_context_extraction_prompt,
+                system_prompt=system_prompt,
             )
 
-            print(
-                f"AI Response Content: {response.content[:500]}..."
-            )  # Show first 200 chars
+            # FIX 3: Use parse_json, NOT parse_current_situation_response.
+            #         Goal attributes have a completely different JSON shape
+            #         from the situation analysis response.
+            parsed_data = self.parser.parse_json(response.content)
 
-            # Parse the JSON response
-            print("==" * 10)
-            parsed_data = ResponseParser.parse_current_situation_response(
-                response.content
-            )
-            print(f"Parsed data: {parsed_data}")
+            if not parsed_data:
+                raise ValueError("AI returned empty or unparseable JSON for goal attributes.")
 
-            # Update job status - only if job has the expected attributes
-            if hasattr(job, "status"):
-                job.status = "COMPLETED"
-            if hasattr(job, "user_raw_text"):
-                job.user_raw_text = user_input
-            if hasattr(job, "save"):
-                job.save()
+            # Wrap the raw extracted data under the correct GoalAttributes field name
+            # so the serializer / view can call GoalAttributes.objects.update_or_create
+            # directly with the returned dict.
+            category = primary_category.lower()
+            field_name = CATEGORY_TO_FIELD.get(category, "personal_data")
+            structured_output = {field_name: parsed_data}
 
-            # Format and return success response
-
-            return ResponseFormatter.format_success(
-                parsed_data=parsed_data,
-                job=job,
+            # FIX 4: Use mark_completed() — handles status, timestamps, output_data,
+            #         and processing_time_seconds in one atomic save.
+            job.mark_completed(
+                output_data=structured_output,
                 raw_response=response.content,
+                model_used=self.provider.model,
             )
 
-        except ValueError as ve:
-            logger.error(f"ValueError in goal attribute extraction: {str(ve)}")
-            return ResponseFormatter.format_error(
-                str(ve), "VALUE_ERROR", data={"user_input": user_input}
+            logger.info("Goal attribute extraction completed for goal %s", goal_id)
+
+            return {
+                "status": "success",
+                "data": structured_output,
+                "job_id": str(job.id),
+            }
+
+        except Exception as exc:
+            logger.exception(
+                "Goal attribute extraction failed for user %s, goal %s: %s",
+                user.id, goal_id, exc,
             )
+            # FIX 5: Use mark_failed() — handles status, error_message, retry_count,
+            #         and processing_time_seconds in one atomic save.
+            #         No more 'if "job" in locals()' — job is always defined here
+            #         because create_or_update_job runs before start_processing.
+            job.mark_failed(error_message=str(exc))
 
-        except Exception as e:
-            logger.error(f"Goal attribute extraction failed: {str(e)}", exc_info=True)
-
-            # Try to update job status if job exists
-            if "job" in locals() and hasattr(job, "status"):
-                job.status = "FAILED"
-                if hasattr(job, "save"):
-                    job.save()
-
-            return ResponseFormatter.format_error(
-                str(e), "EXTRACTION_FAILED", data={"user_input": user_input}
-            )
+            return {
+                "status": "error",
+                "message": str(exc),
+                "job_id": str(job.id),
+            }
