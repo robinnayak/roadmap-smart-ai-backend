@@ -425,6 +425,7 @@ class ProfileDetailView(ProductionApiView):
 
 class UserPersonalDetailsAPIView(ProductionApiView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
 
     def get_object(self, user):
         try:

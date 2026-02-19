@@ -8,8 +8,8 @@ from authentication.serializers import UserPersonalDetailsSerializer
 
 
 class UserCurrentSituationGoalSerializer(serializers.ModelSerializer):
-    user_personal_details = UserPersonalDetailsSerializer(read_only=True, allow_null=True)
-    
+    # read_only=True means this won't be writable even if someone POSTs to it
+    user_personal_details = None  # Replace with: UserPersonalDetailsSerializer(read_only=True, allow_null=True)
 
     class Meta:
         model = UserCurrentSituationGoal
@@ -23,58 +23,44 @@ class UserCurrentSituationGoalSerializer(serializers.ModelSerializer):
         ]
 
     def validate_current_situation(self, value):
-        """Validate current_situation is a dict/JSON object"""
         if value is not None and not isinstance(value, dict):
-            raise serializers.ValidationError("current_situation must be a JSON object")
+            raise serializers.ValidationError("current_situation must be a JSON object.")
         return value
 
     def validate_key_skills(self, value):
-        """Validate key_skills is a list"""
         if value is not None and not isinstance(value, list):
-            raise serializers.ValidationError("key_skills must be a list")
+            raise serializers.ValidationError("key_skills must be a list.")
         return value
 
     def validate_main_goals(self, value):
-        """Validate main_goals is a list"""
         if value is not None and not isinstance(value, list):
-            raise serializers.ValidationError("main_goals must be a list")
+            raise serializers.ValidationError("main_goals must be a list.")
         return value
 
     def validate_constraints(self, value):
-        """Validate constraints is a list"""
         if value is not None and not isinstance(value, list):
-            raise serializers.ValidationError("constraints must be a list")
+            raise serializers.ValidationError("constraints must be a list.")
         return value
 
     def validate_priority_areas(self, value):
-        """Validate priority_areas is a list"""
         if value is not None and not isinstance(value, list):
-            raise serializers.ValidationError("priority_areas must be a list")
+            raise serializers.ValidationError("priority_areas must be a list.")
         return value
 
     def validate_current_role(self, value):
-        """Validate current_role length"""
         if value and len(value) > 255:
-            raise serializers.ValidationError(
-                "current_role cannot exceed 255 characters"
-            )
+            raise serializers.ValidationError("current_role cannot exceed 255 characters.")
         return value
 
     def validate_time_availability(self, value):
-        """Validate time_availability length"""
         if value and len(value) > 255:
-            raise serializers.ValidationError(
-                "time_availability cannot exceed 255 characters"
-            )
+            raise serializers.ValidationError("time_availability cannot exceed 255 characters.")
         return value
 
     def validate_age(self, value):
-        """Validate age is reasonable"""
-        if value is not None:
-            if value < 0 or value > 120:
-                raise serializers.ValidationError("Age must be between 0 and 120")
+        if value is not None and not (0 <= value <= 120):
+            raise serializers.ValidationError("Age must be between 0 and 120.")
         return value
-
 
 
 

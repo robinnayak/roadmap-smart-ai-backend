@@ -14,76 +14,173 @@ from rest_framework import status
 import json
 from authentication.models import UserPersonalDetails
 from django.db.models import Prefetch, Count, Avg, Q, Sum
+from rest_framework.throttling import UserRateThrottle
+import logging
 
+from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
+from rest_framework.exceptions import NotFound, ValidationError
+from goal.core.response import success_response, error_response, created_response
+
+
+logger = logging.getLogger(__name__)
 
 
 # Create your views here.
 
+class GoalProductionApiView(APIView):
+    """
+    Base API view for production environment with enhanced logging and error handling.
+    """
 
-class UserCurrentSituationGoalAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
 
-    def get_object(self):
-        """Get the user's current situation goal object"""
-        ai_job = AIProcessingJob.objects.filter(
-            user=self.request.user, job_type="CURRENT_SITUATION_GENERATION"
-        ).first()
+    def handle_exception(self, exc):
+        """
+        Global exception handler for consistent error responses and logging in production.
+        """
 
-        if not ai_job:
-            return None
+        logger.error(
+            f"Exception occurred in {self.__class__.__name__}: {str(exc)}",
+            exc_info=True,
+        )
 
-        return get_object_or_404(UserCurrentSituationGoal, ai_processing_job=ai_job)
-
-    def get(self, request):
-        """Retrieve the user's current situation goal"""
-        instance = self.get_object()
-
-        if not instance:
+        # You can add custom exception handling here
+        # For production, avoid exposing internal errors to clients. Instead, return a generic error message.
+        if isinstance(exc, (TokenError, InvalidToken)):
             return Response(
-                {"detail": "No current situation goal found."},
+                {
+                    "error": "Token is invalid or expired",
+                    "code": "token_not_valid",
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # Handle specific exceptions
+
+        if isinstance(exc, NotFound):
+            return Response(
+                {
+                    "error": "Resource not found",
+                    "code": "not_found",
+                },
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        serializer = UserCurrentSituationGoalSerializer(instance)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        if isinstance(exc, ValidationError):
+            return Response(
+                {
+                    "error": "Validation error",
+                    "details": exc.detail if hasattr(exc, "detail") else str(exc),
+                    "code": "validation_error",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-    def put(self, request):
-        """Update the user's current situation goal"""
-        instance = self.get_object()
+        return super().handle_exception(exc)
+
+
+
+class UserCurrentSituationGoalAPIView(GoalProductionApiView):
+    
+    
+    permission_classes = [IsAuthenticated]
+    SITUATION_JOB_TYPE = "situation_analysis"
+    throttle_classes = [UserRateThrottle]
+    
+    def _get_instance(self, user):
+        """
+        Fetch UserCurrentSituationGoal that belongs to this user.
+
+        FIX: Filter by user on AIProcessingJob so one user cannot access
+             another user's data even if they know the job ID.
+        """
+        job = (
+            AIProcessingJob.objects.filter(
+                user=user,
+                job_type=self.SITUATION_JOB_TYPE,
+                status="completed",          # Only return successfully processed results
+            )
+            .order_by("-created_at")         # Most recent first if there are multiple
+            .first()
+        )
+
+        if not job:
+            return None
+
+        # get_object_or_404 ensures we never return a situation linked to someone else's job
+        return get_object_or_404(UserCurrentSituationGoal, ai_processing_job=job)
+
+
+    def get(self, request):
+        """Retrieve the authenticated user's current situation goal."""
+        instance = self._get_instance(request.user)
 
         if not instance:
-            return Response(
-                {"detail": "No current situation goal found to update."},
+            return error_response(
+                message="No current situation goal found. Please complete your profile setup first.",
+                code="No current situation found",
+                errors="No current situation goal found. Please complete your profile setup first.",
+                status=status.HTTP_404_NOT_FOUND,
+            )
+            
+
+        serializer = UserCurrentSituationGoalSerializer(instance)
+        return success_response(
+            data=serializer.data,
+            message="User current situation goal retrieved successfully.",
+            status=status.HTTP_200_OK
+        )
+        # return Response(serializer.data, status=status.HTTP_200_OK)
+    
+
+    def put(self, request):
+        """Partially update the authenticated user's current situation goal."""
+        instance = self._get_instance(request.user)
+
+        if not instance:
+            return error_response(
+                message="No current situation goal found to update.",
+                code="No current situation goal found",
+                errors="No current situation goal found to update.",
                 status=status.HTTP_404_NOT_FOUND,
             )
 
         serializer = UserCurrentSituationGoalSerializer(
             instance, data=request.data, partial=True
         )
-
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    def delete(self, request):
-        """Delete the user's current situation goal"""
-        instance = self.get_object()
-
-        if not instance:
-            return Response(
-                {"detail": "No current situation goal found to delete."},
-                status=status.HTTP_404_NOT_FOUND,
+            return success_response(
+                data=serializer.data,
+                message="User current situation goal updated successfully.",
+                status=status.HTTP_200_OK
             )
 
+        return error_response(
+            message="User current situation goal update failed.",
+            code="Update failed",
+            errors=serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    
+    def delete(self, request):
+        """Delete the authenticated user's current situation goal."""
+        instance = self._get_instance(request.user)
+
+        if not instance:
+            return error_response(
+                message="No current situation goal found to delete.",
+                code= "No current",
+                errors="No current situation goal found to delete.",
+                status=status.HTTP_404_NOT_FOUND,
+            )
         instance.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-# =========== ============
+# =======================
 # # Create Goal API View Here GET and POST
-# =========== ============
+# =======================
 
 class GoalAPIView(APIView):
     permission_classes = [IsAuthenticated]

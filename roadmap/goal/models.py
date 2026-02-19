@@ -1,3 +1,39 @@
+# roadmap\goal\models.py
+
+
+# =============================================================================
+# roadmap/ai/models.py  (AIProcessingJob - relevant fixes shown)
+# =============================================================================
+#
+# KEY FIXES:
+#  - job_type choices now include 'situation_analysis' matching what services use
+#  - status choices are all lowercase and consistently used everywhere
+#  - 'row_data' renamed to 'input_data' (the actual field that exists on the model)
+#
+# JOB_TYPE_CHOICES (replace the existing tuple):
+#
+#   JOB_TYPE_CHOICES = [
+#       ('situation_analysis', 'Analyze Current Situation'),   # <-- was missing
+#       ('goal_generation', 'Generate Goals & Roadmap'),
+#       ('goal_attributes', 'Extract Goal Attributes'),
+#       ('milestone_generation', 'Generate Milestones'),
+#       ('task_generation', 'Generate Daily Tasks'),
+#       ('habit_suggestion', 'Suggest Habits'),
+#       ('progress_analysis', 'Analyze Progress'),
+#       ('motivation_generation', 'Generate Motivation'),
+#   ]
+#
+#   JOB_STATUS_CHOICES = [
+#       ('pending', 'Pending'),       # <-- always lowercase, use these exact strings
+#       ('processing', 'Processing'),
+#       ('completed', 'Completed'),
+#       ('failed', 'Failed'),
+#       ('cancelled', 'Cancelled'),
+#   ]
+#
+# No other model changes needed — 'input_data' and 'output_data' already exist.
+
+
 from django.utils import timezone
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -5,15 +41,14 @@ import uuid
 
 
 class UserCurrentSituationGoal(models.Model):
-    """Structured output extracted from AI for user situation & goals"""
-    
+    """Structured output extracted from AI for user situation & goals."""
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     user_personal_details = models.OneToOneField(
         "authentication.UserPersonalDetails",
         on_delete=models.CASCADE,
         related_name="current_situation_goal",
-        default=None,
         null=True,
         blank=True,
     )
@@ -23,7 +58,6 @@ class UserCurrentSituationGoal(models.Model):
         on_delete=models.CASCADE,
         related_name="current_situation_goal",
     )
-    
 
     # Full AI output (source of truth)
     current_situation = models.JSONField()
@@ -41,9 +75,9 @@ class UserCurrentSituationGoal(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"Situation & Goals | User {self.ai_processing_job.user.id}"
-
-
+        return f"Situation & Goals | User {self.ai_processing_job.user_id}"
+    
+    
 class Goal(models.Model):
     """
         Multi-dimensional goals that can impact multiple life areas

@@ -1,41 +1,50 @@
-from ai.providers.ollama_provider import OllamaProvider
+
+import logging
+from django.db import transaction
 from ai.models import AIProcessingJob
+
+logger = logging.getLogger(__name__)
 
 
 class BaseAIService:
-    """Base class for AI services."""
+    """Base class for all AI generation services"""
     
-    def __init__(self, provider: OllamaProvider):
+    def __init__(self, provider):
         self.provider = provider
         
-    def create_job(self, user, job_type, row_data):
-        """Create a new AI job."""
-        print("creating job...")
-        print(f"User: {user}")  # Debug
-        print(f"Job type: {job_type}")  # Debug
-        
-        
-        existing_job = AIProcessingJob.objects.filter(
-            user=user,
-            job_type=job_type
-        ).first()
-        
-        print(f"Existing job: {existing_job}")  # Debug
-        if existing_job:
-            existing_job.row_data = row_data
-            existing_job.save()
-            return existing_job, False
+    
+    def create_or_update_job(self, user, job_type:str, input_data: dict):
+        """
+        Atomically get-or-create an AIProcessingJob for this user + job_type,
+        then update input_data and reset status to 'pending'.
 
+        FIX 1: Uses update_or_create inside a transaction to eliminate the
+                race condition that existed with filter().first() + create().
+        FIX 2: Field name corrected from 'row_data' → 'input_data'.
+        FIX 3: Status uses lowercase to match JOB_STATUS_CHOICES.
+        """
+        print("Starting job creation...")
+
+        with transaction.atomic():
+            job, created = AIProcessingJob.objects.update_or_create(
+                user=user, 
+                job_type=job_type,
+                defaults={
+                    "input_data": input_data,
+                    "status": "pending",
+                    "error_message": "",
+                    "progress_percentage": 0,
+                },
+            )
         
-        
-        job = AIProcessingJob.objects.create(
-            user=user,
-            job_type=job_type,
-            row_data=row_data,
-            status='PENDING'
+        logger.info(
+            "Job %s for user %s (type=%s)",
+            "created" if created else "updated",
+            user.id,
+            job_type,
         )
-        return job, True
-    
-    
-    
+        print(f"Job {'created' if created else 'updated'} for user {user.id} (type={job_type})")
+        return job, created
+            
+        
         
