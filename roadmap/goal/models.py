@@ -849,3 +849,5 @@ class Task(models.Model):
         self.save()
         # Cascade: Task → SubGoal → Milestone → Goal
         self.subgoal.update_progress()
+
+

@@ -1029,3 +1029,48 @@ class GoalDetailAPIView(APIView):
 
         goal.delete()  # CASCADE deletes Milestones → SubGoals → Tasks automatically
         return Response(status=status.HTTP_204_NO_CONTENT)
+    
+
+
+class TaskDetailApiView(GoalProductionApiView):
+    permission_classes = [IsAuthenticated]
+    def _get_task(self, task_id):
+        try:
+            return get_object_or_404(Task, id=task_id)
+        except Task.DoesNotExist:
+            return None
+
+    
+    def get(self, request, task_id):
+        task = self._get_task(task_id)
+        if not task:
+            return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = TaskSerializer(task)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def put(self, request, task_id):
+        task = self._get_task(task_id)
+        
+        if not task:
+            return Response({"error": "Task not found."})
+        
+        serializer = TaskSerializer(task, data=request.data, partial=True)
+        try:
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as err:
+            return Response({"error": str(err)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+    
+    def delete(self, request, task_id):
+        task = self._get_task(task_id)
+        if not task:
+            return Response({"error": "Task not found."})
+        task.delete()
+        return Response({"message": "Task deleted successfully."},status=status.HTTP_204_NO_CONTENT)
+
+
+    

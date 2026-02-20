@@ -117,7 +117,7 @@ class TaskSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "completed_at", "created_at", "updated_at"]
+        read_only_fields = ["id", "completed_at", "created_at", "updated_at", "status"]
 
     def validate_scheduled_date(self, value):
         """Warn (but don't block) if scheduling a task in the past."""
