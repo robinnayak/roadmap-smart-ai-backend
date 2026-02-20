@@ -201,7 +201,7 @@ class MilestoneParser:
         parsed = ResponseParser.parse_json(response_content)
         
         print(f"DEBUG PARSER: Parsed type: {type(parsed)}")
-        print(f"DEBUG PARSER: Parsed content: {parsed}")
+        # print(f"DEBUG PARSER: Parsed content: {parsed}")
         
         # Extract milestones from parsed data
         milestones = []

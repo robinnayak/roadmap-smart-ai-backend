@@ -16,13 +16,36 @@ logger = logging.getLogger(__name__)
 HIERARCHY_JOB_TYPE = "milestone_generation"
 
 # Generation limits — change here, nowhere else
-MIN_MONTHS = 1
-MAX_MONTHS = 24                 # Raised from 12; supports 23-month trading plan
-DEFAULT_MONTHS = 6
-MAX_MILESTONES = 12
-MAX_SUBGOALS_PER_MILESTONE = 4
-MAX_TASKS_PER_SUBGOAL = 7
+# MIN_MONTHS = 1
+# MAX_MONTHS = 24                 # Raised from 12; supports 23-month trading plan
+# DEFAULT_MONTHS = 6
+# MAX_MILESTONES = 12
+# MAX_SUBGOALS_PER_MILESTONE = 4
+# MAX_TASKS_PER_SUBGOAL = 7
 
+# ================================================
+# GOAL HIERARCHY GENERATION LIMITS
+# ================================================
+
+# ---------- MONTH SETTINGS (Controls timeline) ----------
+MIN_MONTHS = 1        # Minimum months allowed
+MAX_MONTHS = 2        # 🔧 TESTING: 2 months | PRODUCTION: Set higher (12-36)
+DEFAULT_MONTHS = 1    # Fallback if dates missing
+
+# ---------- MILESTONE SETTINGS (1 per month) ----------
+MAX_MILESTONES = 6    # Safety cap - keeps first X milestones
+
+# ---------- SUBGOAL SETTINGS (4 per milestone = weekly) ----------
+MAX_SUBGOALS_PER_MILESTONE = 4   # 🔧 TESTING: 1-2 | PRODUCTION: 4
+
+# ---------- TASK SETTINGS (7 per subgoal = daily) ----------
+MAX_TASKS_PER_SUBGOAL = 7        # 🔧 TESTING: 2-3 | PRODUCTION: 7
+
+# ================================================
+# TESTING MODE (⚠️ DISABLE IN PRODUCTION)
+# ================================================
+TESTING_MODE = True     # True = mock data (fast), False = real AI (slow)
+TESTING_DELAY = 0.2     # Simulated delay in seconds
 
 class GoalHierarchyGenerator(BaseAIService):
     """
@@ -104,6 +127,9 @@ class GoalHierarchyGenerator(BaseAIService):
 
         # FIX: Create a tracking job for the full hierarchy run.
         #      job_type='milestone_generation' matches JOB_TYPE_CHOICES.
+        
+
+        
         job, _ = self.create_or_update_job(
             user=user,
             job_type=HIERARCHY_JOB_TYPE,

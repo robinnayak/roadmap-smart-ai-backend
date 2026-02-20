@@ -816,17 +816,17 @@ class GoalListAPIView(APIView):
         
 
 # ==============================================================================
-# VIEW 2 — Goal Hierarchy (Milestones + SubGoals only)
+# VIEW 2 — Goal Hierarchy (Milestones + SubGoals + Tasks)
 # Drives: Expanded goal card on Goals page
-# Tasks are intentionally excluded — they live on the Routine page
+# Now includes full task details with all task information
 # ==============================================================================
 
 class GoalHierarchyAPIView(APIView):
     """
     GET /api/goals/<goal_id>/hierarchy/
 
-    Returns milestones and their subgoals.
-    Tasks are NOT included here — the Routine page pulls tasks separately.
+    Returns complete hierarchy: milestones → subgoals → tasks.
+    Full task details are now included for each subgoal.
 
     This is what powers the "Action Plan" expansion in your UI screenshot.
     """
@@ -836,7 +836,7 @@ class GoalHierarchyAPIView(APIView):
         try:
             goal = (
                 Goal.objects.prefetch_related(
-                    "milestones__subgoals",
+                    "milestones__subgoals__tasks",
                 )
                 .select_related("attributes")
                 .get(id=goal_id, user=request.user)
@@ -888,10 +888,27 @@ class GoalHierarchyAPIView(APIView):
             subgoals_data = []
 
             for subgoal in milestone.subgoals.all().order_by("display_order"):
-                # Task counts only — not the tasks themselves
-                task_qs = subgoal.tasks.all()
-                total_tasks     = task_qs.count()
-                completed_tasks = task_qs.filter(status="completed").count()
+                # Build full tasks list with all details
+                tasks_data = []
+                for task in subgoal.tasks.all().order_by("display_order"):
+                    tasks_data.append({
+                        "id":                         str(task.id),
+                        "title":                      task.title,
+                        "description":                task.description,
+                        "task_type":                  task.task_type,
+                        "priority":                   task.priority,
+                        "status":                     task.status,
+                        "display_order":              task.display_order,
+                        "estimated_duration_minutes": task.estimated_duration_minutes,
+                        "actual_duration_minutes":    task.actual_duration_minutes,
+                        "scheduled_date":             task.scheduled_date.isoformat() if task.scheduled_date else None,
+                        "completed_at":               task.completed_at.isoformat() if task.completed_at else None,
+                        "is_ai_generated":            task.is_ai_generated,
+                    })
+
+                # Calculate task counts from the tasks_data list
+                total_tasks     = len(tasks_data)
+                completed_tasks = sum(1 for t in tasks_data if t["status"] == "completed")
 
                 subgoals_data.append({
                     "id":                  str(subgoal.id),
@@ -906,6 +923,7 @@ class GoalHierarchyAPIView(APIView):
                     "target_date":         subgoal.target_date.isoformat() if subgoal.target_date else None,
                     "completed_date":      subgoal.completed_date.isoformat() if subgoal.completed_date else None,
                     "is_ai_generated":     subgoal.is_ai_generated,
+                    "tasks":               tasks_data,
                     "task_counts": {
                         "total":     total_tasks,
                         "completed": completed_tasks,

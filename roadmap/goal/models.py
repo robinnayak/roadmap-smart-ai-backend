@@ -104,7 +104,6 @@ class Goal(models.Model):
     growth
     """
 
-
     STATUS_CHOICES = [
         ("not_started", "Not Started"),
         ("in_progress", "In Progress"),
@@ -121,8 +120,11 @@ class Goal(models.Model):
     # Goals Details
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
-    why_it_matters = models.TextField(
-        help_text="Why this goal is important - shown to user for motivation"
+    # Change from TextField to JSONField for array storage
+    why_it_matters = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of reasons why this goal is important - shown to user for motivation. Example: ['Financial security', 'Career growth', 'Personal fulfillment']",
     )
     # key_skills = models.JSONField(
     #     blank=True, null=True
@@ -133,7 +135,7 @@ class Goal(models.Model):
     #     default=list,
     #     blank=True,
     #     help_text="""
-    #     List of categories this goal belongs to. 
+    #     List of categories this goal belongs to.
     #     Example: ["financial", "career", "personal"]
     #     """,
     # )
@@ -162,10 +164,9 @@ confidence'}
     #     null=True,
     #     help_text="['side-business', 'passive-income', 'python', 'ai']",
     # )
-    
-    
+
     # Priority & Status
-    
+
     priority = models.CharField(
         max_length=10, choices=PRIORITY_CHOICES, default="medium"
     )
@@ -189,8 +190,7 @@ confidence'}
         validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
         help_text="AI-calculated feasibility score (0.0 to 1.0)",
     )
-    
-    
+
     ai_generation_context = models.TextField(
         blank=True, help_text="Context/reasoning behind AI-generated goal"
     )
@@ -219,8 +219,8 @@ confidence'}
         ]
 
     def __str__(self):
-        return f"{self.title} ({self.get_primary_category_display()})"
-    
+        return f"[{self.user.email}]{self.title} ({self.get_primary_category_display()})"
+
     def save(self, *args, **kwargs):
         # Guarantee primary_category is never empty
         if not self.primary_category and self.impact_dimensions:
@@ -253,6 +253,7 @@ confidence'}
             self.status = "in_progress"
         self.save(update_fields=["progress_percentage", "status", "updated_at"])
 
+
 # ---------------------------------------------------------------------------
 # 3. GoalAttributes
 #    Domain-specific data for a goal, stored as typed JSONFields.
@@ -260,6 +261,7 @@ confidence'}
 #
 #    Each JSONField is nullable — only populate what's relevant to the goal.
 # ---------------------------------------------------------------------------
+
 
 class GoalAttributes(models.Model):
     """
@@ -400,8 +402,8 @@ class GoalAttributes(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    def __str__(self):
-        return f"Attributes for {self.goal.title}"
+    def __str__(self): 
+        return f"[{self.goal.user.email}] Attributes for {self.goal.title}"
 
 
 # ===============================================================
@@ -545,7 +547,7 @@ class Milestone(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.goal.title} → {self.title}"
+        return f"[{self.goal.user.email}] - {self.goal.title} → {self.title}"
 
     def update_progress(self):
         """Recalculate from subgoals, then cascade up to the parent Goal."""
@@ -559,7 +561,14 @@ class Milestone(models.Model):
             self.completed_date = timezone.localdate()
         elif self.progress_percentage > 0:
             self.status = "in_progress"
-        self.save(update_fields=["progress_percentage", "status", "completed_date", "updated_at"])
+        self.save(
+            update_fields=[
+                "progress_percentage",
+                "status",
+                "completed_date",
+                "updated_at",
+            ]
+        )
         self.goal.update_progress()
 
 
@@ -567,6 +576,7 @@ class Milestone(models.Model):
 # 5. SubGoal  (weekly level)
 #    Breaks a Milestone into week-sized chunks for the Goals page.
 # ---------------------------------------------------------------------------
+
 
 class SubGoal(models.Model):
     """
@@ -585,7 +595,6 @@ class SubGoal(models.Model):
         ("completed", "Completed"),
         ("skipped", "Skipped"),
     ]
-
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     milestone = models.ForeignKey(
@@ -662,8 +671,8 @@ class SubGoal(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.milestone.title} → {self.title}"
-    
+        return f"[{self.milestone.goal.user.email}] - {self.milestone.title} → {self.title}"
+
     @property
     def week_number(self) -> int:
         """Week number within the milestone (1-based, derived from display_order)."""
@@ -681,8 +690,16 @@ class SubGoal(models.Model):
             self.completed_date = timezone.localdate()
         elif self.progress_percentage > 0:
             self.status = "in_progress"
-        self.save(update_fields=["progress_percentage", "status", "completed_date", "updated_at"])
+        self.save(
+            update_fields=[
+                "progress_percentage",
+                "status",
+                "completed_date",
+                "updated_at",
+            ]
+        )
         self.milestone.update_progress()
+
 
 # ---------------------------------------------------------------------------
 # 6. Task  (daily level)
@@ -714,14 +731,12 @@ class Task(models.Model):
         ("skipped", "Skipped"),
     ]
 
-    
-
     TASK_TYPE_CHOICES = [
-        ("learning", "Learning"),       # Read / watch / study
-        ("practice", "Practice"),       # Coding / exercise / drill
-        ("project", "Project"),         # Build something tangible
-        ("review", "Review"),           # Revision / reflection
-        ("assessment", "Assessment"),   # Quiz / test / self-check
+        ("learning", "Learning"),  # Read / watch / study
+        ("practice", "Practice"),  # Coding / exercise / drill
+        ("project", "Project"),  # Build something tangible
+        ("review", "Review"),  # Revision / reflection
+        ("assessment", "Assessment"),  # Quiz / test / self-check
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -792,7 +807,6 @@ class Task(models.Model):
     # Controls ordering within a day
     display_order = models.PositiveIntegerField(default=0)
 
-
     # AI Generated
     is_ai_generated = models.BooleanField(default=True)
     ai_reasoning = models.TextField(
@@ -800,7 +814,6 @@ class Task(models.Model):
         help_text="AI: 'Lists are the most used data structure in Python interviews'",
     )
     is_user_modified = models.BooleanField(default=False)
-
 
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
@@ -816,8 +829,8 @@ class Task(models.Model):
         ]
 
     def __str__(self):
-        return f"Day {self.display_order} → {self.title}"
-    
+        return f"[{self.subgoal.milestone.goal.user.email}] - Day {self.display_order} → {self.title}"
+
     def mark_completed(
         self,
         notes: str = "",
