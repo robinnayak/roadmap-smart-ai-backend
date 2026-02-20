@@ -1,10 +1,33 @@
+# ==============================================================================
+# roadmap/goal/views.py  — Three views, nothing more
+# ==============================================================================
+#
+# VIEW MAP (matches your UI exactly):
+#
+#   GoalListAPIView              GET  /api/goals/
+#     → Goals page: Life Area cards + goal cards with progress
+#     → Supports ?status= ?category= ?priority= filters
+#
+#   GoalCreateWithHierarchyView  POST /api/goals/
+#     → Creates goal + AI hierarchy in one call
+#
+#   GoalHierarchyAPIView         GET  /api/goals/<goal_id>/hierarchy/
+#     → Goals page expanded view: milestones + subgoals (NO tasks here)
+#     → Tasks live on the Routine page, not here
+#
+# That's it. No GoalDetailLightweightAPIView, no GoalDetailWithHierarchyAPIView.
+# ==============================================================================
+
+
+
+
 from django.shortcuts import render
 from .serializers import UserCurrentSituationGoalSerializer
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
-from .models import UserCurrentSituationGoal, Goal, Milestone, SubGoal, Task
+from .models import UserCurrentSituationGoal, Goal, Milestone, SubGoal, Task, GoalAttributes
 from .serializers import (
     GoalSerializer,
     GoalListSerializer,
@@ -32,6 +55,11 @@ logger = logging.getLogger(__name__)
 
 
 # Create your views here.
+
+# Priority sort order used in Python (CharField can't sort high>medium>low in DB)
+PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
 
 
 class GoalProductionApiView(APIView):
@@ -182,6 +210,9 @@ class UserCurrentSituationGoalAPIView(GoalProductionApiView):
 # =======================
 # # Create Goal API View Here GET and POST
 # =======================
+
+
+
 
 
 class GoalAPIView(APIView):
@@ -662,628 +693,321 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
         return str(value) if value else ""
 
 
-class GoalDetailWithHierarchyAPIView(GoalProductionApiView):
-    """
-    GET API to retrieve a goal with its complete hierarchy:
-    Goal → Milestones → SubGoals → Tasks
-
-    Endpoint: GET /api/goals/<goal_id>/hierarchy/
-
-    Features:
-    - Optimized queries using select_related and prefetch_related
-    - Complete hierarchy in single API call
-    - Progress calculations
-    - Statistics and analytics
-    - User permission checks
-    """
-
-    permission_classes = [IsAuthenticated]
-    throttle_classes = [UserRateThrottle]   
-    
-
-    def get(self, request, goal_id):
-        try:
-            # 1. Fetch Goal with Optimized Queries
-            goal = self._get_goal_with_hierarchy(request.user, goal_id)
-
-            if not goal:
-                return Response(
-                    {"error": "Goal not found or you don't have permission to view it"},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-
-            # 2. Build Complete Response
-            response_data = {
-                "goal": self._serialize_goal(goal),
-                "hierarchy": self._serialize_hierarchy(goal),
-                "statistics": self._calculate_statistics(goal),
-                "progress": self._calculate_progress(goal),
-                "timeline": self._build_timeline(goal),
-            }
-
-            return Response(response_data, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            print(f"Error fetching goal hierarchy: {str(e)}")
-            import traceback
-
-            traceback.print_exc()
-            return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-    def _get_goal_with_hierarchy(self, user, goal_id):
-        """
-        Fetch goal with all related data using optimized queries.
-        This prevents N+1 query problems.
-        """
-        try:
-            goal = (
-                Goal.objects.select_related("attributes")
-                .prefetch_related(
-                    Prefetch(
-                        "milestones",
-                        queryset=Milestone.objects.prefetch_related(
-                            Prefetch(
-                                "subgoals",
-                                queryset=SubGoal.objects.prefetch_related(
-                                    Prefetch(
-                                        "tasks",
-                                        queryset=Task.objects.order_by("display_order"),
-                                    )
-                                ).order_by("display_order"),
-                            )
-                        ).order_by("display_order"),
-                    )
-                )
-                .get(id=goal_id, user=user)
-            )
-
-            return goal
-
-        except Goal.DoesNotExist:
-            return None
-
-    def _serialize_goal(self, goal):
-        """Serialize goal basic information"""
-        return {
-            "id": str(goal.id),
-            "title": goal.title,
-            "description": goal.description,
-            "why_it_matters": goal.why_it_matters,
-            "primary_category": goal.primary_category,
-            "categories": goal.categories,
-            "tags": goal.tags,
-            "priority": goal.priority,
-            "status": goal.status,
-            "progress_percentage": goal.progress_percentage,
-            "start_date": goal.start_date.isoformat() if goal.start_date else None,
-            "target_date": goal.target_date.isoformat() if goal.target_date else None,
-            "actual_completion_date": (
-                goal.actual_completion_date.isoformat()
-                if goal.actual_completion_date
-                else None
-            ),
-            "days_remaining": goal.days_remaining,
-            "is_overdue": goal.is_overdue,
-            "is_ai_generated": goal.is_ai_generated,
-            "ai_feasibility_score": goal.ai_feasibility_score,
-            "created_at": goal.created_at.isoformat(),
-            "updated_at": goal.updated_at.isoformat(),
-            "attributes": self._serialize_goal_attributes(goal),
-        }
-
-    def _serialize_goal_attributes(self, goal):
-        """Serialize goal attributes if they exist"""
-        if hasattr(goal, "attributes") and goal.attributes:
-            return {
-                "financial_data": goal.attributes.financial_data,
-                "career_data": goal.attributes.career_data,
-                "health_data": goal.attributes.health_data,
-                "personal_data": goal.attributes.personal_data,
-                "skill_data": goal.attributes.skill_data,
-                "custom_data": goal.attributes.custom_data,
-            }
-        return None
-
-    def _serialize_hierarchy(self, goal):
-        """
-        Serialize complete hierarchy: Milestones → SubGoals → Tasks
-        """
-        milestones_data = []
-
-        for milestone in goal.milestones.all():
-            milestone_dict = {
-                "id": str(milestone.id),
-                "title": milestone.title,
-                "description": milestone.description,
-                "success_criteria": milestone.success_criteria,
-                "priority": milestone.priority,
-                "status": milestone.status,
-                "progress_percentage": milestone.progress_percentage,
-                "month_year": milestone.month_year,
-                "start_date": (
-                    milestone.start_date.isoformat() if milestone.start_date else None
-                ),
-                "target_date": (
-                    milestone.target_date.isoformat() if milestone.target_date else None
-                ),
-                "completed_date": (
-                    milestone.completed_date.isoformat()
-                    if milestone.completed_date
-                    else None
-                ),
-                "estimated_duration_days": milestone.estimated_duration_days,
-                "display_order": milestone.display_order,
-                "is_required": milestone.is_required,
-                "is_ai_generated": milestone.is_ai_generated,
-                "ai_reasoning": milestone.ai_reasoning,
-                "is_user_modified": milestone.is_user_modified,
-                "subgoals": [],
-            }
-
-            # Add SubGoals
-            for subgoal in milestone.subgoals.all():
-                subgoal_dict = {
-                    "id": str(subgoal.id),
-                    "title": subgoal.title,
-                    "description": subgoal.description,
-                    "learning_objectives": subgoal.learning_objectives,
-                    "priority": subgoal.priority,
-                    "status": subgoal.status,
-                    "progress_percentage": subgoal.progress_percentage,
-                    "week_number": subgoal.week_number,
-                    "start_date": (
-                        subgoal.start_date.isoformat() if subgoal.start_date else None
-                    ),
-                    "target_date": (
-                        subgoal.target_date.isoformat() if subgoal.target_date else None
-                    ),
-                    "completed_date": (
-                        subgoal.completed_date.isoformat()
-                        if subgoal.completed_date
-                        else None
-                    ),
-                    "estimated_duration_days": subgoal.estimated_duration_days,
-                    "display_order": subgoal.display_order,
-                    "is_required": subgoal.is_required,
-                    "is_ai_generated": subgoal.is_ai_generated,
-                    "ai_reasoning": subgoal.ai_reasoning,
-                    "tasks": [],
-                }
-
-                # Add Tasks
-                for task in subgoal.tasks.all():
-                    task_dict = {
-                        "id": str(task.id),
-                        "title": task.title,
-                        "description": task.description,
-                        "instructions": task.instructions,
-                        "task_type": task.task_type,
-                        "resources": task.resources,
-                        "priority": task.priority,
-                        "status": task.status,
-                        "scheduled_date": (
-                            task.scheduled_date.isoformat()
-                            if task.scheduled_date
-                            else None
-                        ),
-                        "scheduled_time": (
-                            task.scheduled_time.isoformat()
-                            if task.scheduled_time
-                            else None
-                        ),
-                        "estimated_duration_minutes": task.estimated_duration_minutes,
-                        "actual_duration_minutes": task.actual_duration_minutes,
-                        "completed_at": (
-                            task.completed_at.isoformat() if task.completed_at else None
-                        ),
-                        "display_order": task.display_order,
-                        "is_required": task.is_required,
-                        "completion_notes": task.completion_notes,
-                        "difficulty_rating": task.difficulty_rating,
-                        "is_ai_generated": task.is_ai_generated,
-                        "ai_reasoning": task.ai_reasoning,
-                    }
-                    subgoal_dict["tasks"].append(task_dict)
-
-                milestone_dict["subgoals"].append(subgoal_dict)
-
-            milestones_data.append(milestone_dict)
-
-        return {"milestones": milestones_data, "total_milestones": len(milestones_data)}
-
-    def _calculate_statistics(self, goal):
-        """Calculate statistics for the goal"""
-        milestones = goal.milestones.all()
-        total_milestones = milestones.count()
-
-        # Milestone stats
-        milestones_completed = milestones.filter(status="completed").count()
-        milestones_in_progress = milestones.filter(status="in_progress").count()
-        milestones_not_started = milestones.filter(status="not_started").count()
-
-        # SubGoal stats
-        total_subgoals = 0
-        subgoals_completed = 0
-        subgoals_in_progress = 0
-
-        # Task stats
-        total_tasks = 0
-        tasks_completed = 0
-        tasks_in_progress = 0
-        tasks_pending = 0
-
-        for milestone in milestones:
-            subgoals = milestone.subgoals.all()
-            total_subgoals += subgoals.count()
-            subgoals_completed += subgoals.filter(status="completed").count()
-            subgoals_in_progress += subgoals.filter(status="in_progress").count()
-
-            for subgoal in subgoals:
-                tasks = subgoal.tasks.all()
-                total_tasks += tasks.count()
-                tasks_completed += tasks.filter(status="completed").count()
-                tasks_in_progress += tasks.filter(status="in_progress").count()
-                tasks_pending += tasks.filter(status="pending").count()
-
-        # Calculate average difficulty
-        all_tasks = Task.objects.filter(
-            subgoal__milestone__goal=goal, difficulty_rating__isnull=False
-        )
-        avg_difficulty = all_tasks.aggregate(avg=Avg("difficulty_rating"))["avg"] or 0
-
-        # Calculate total time
-        total_estimated_time = (
-            Task.objects.filter(subgoal__milestone__goal=goal).aggregate(
-                total=Sum("estimated_duration_minutes")
-            )["total"]
-            or 0
-        )
-
-        total_actual_time = (
-            Task.objects.filter(
-                subgoal__milestone__goal=goal, actual_duration_minutes__isnull=False
-            ).aggregate(total=Sum("actual_duration_minutes"))["total"]
-            or 0
-        )
-
-        return {
-            "milestones": {
-                "total": total_milestones,
-                "completed": milestones_completed,
-                "in_progress": milestones_in_progress,
-                "not_started": milestones_not_started,
-                "completion_rate": (
-                    round((milestones_completed / total_milestones * 100), 2)
-                    if total_milestones > 0
-                    else 0
-                ),
-            },
-            "subgoals": {
-                "total": total_subgoals,
-                "completed": subgoals_completed,
-                "in_progress": subgoals_in_progress,
-                "pending": total_subgoals - subgoals_completed - subgoals_in_progress,
-                "completion_rate": (
-                    round((subgoals_completed / total_subgoals * 100), 2)
-                    if total_subgoals > 0
-                    else 0
-                ),
-            },
-            "tasks": {
-                "total": total_tasks,
-                "completed": tasks_completed,
-                "in_progress": tasks_in_progress,
-                "pending": tasks_pending,
-                "completion_rate": (
-                    round((tasks_completed / total_tasks * 100), 2)
-                    if total_tasks > 0
-                    else 0
-                ),
-            },
-            "time": {
-                "total_estimated_hours": round(total_estimated_time / 60, 2),
-                "total_actual_hours": round(total_actual_time / 60, 2),
-                "time_efficiency": (
-                    round((total_actual_time / total_estimated_time * 100), 2)
-                    if total_estimated_time > 0
-                    else 0
-                ),
-            },
-            "difficulty": {"average_rating": round(avg_difficulty, 2)},
-        }
-
-    def _calculate_progress(self, goal):
-        """Calculate detailed progress information"""
-        today = timezone.now().date()
-
-        # Overall progress
-        overall_progress = goal.progress_percentage
-
-        # Current milestone
-        current_milestone = (
-            goal.milestones.filter(status="in_progress").first()
-            or goal.milestones.filter(status="not_started")
-            .order_by("display_order")
-            .first()
-        )
-
-        current_milestone_data = None
-        if current_milestone:
-            current_milestone_data = {
-                "id": str(current_milestone.id),
-                "title": current_milestone.title,
-                "progress": current_milestone.progress_percentage,
-                "status": current_milestone.status,
-            }
-
-        # Current week (subgoal)
-        current_subgoal = None
-        if current_milestone:
-            current_subgoal = (
-                current_milestone.subgoals.filter(status="in_progress").first()
-                or current_milestone.subgoals.filter(status="pending")
-                .order_by("display_order")
-                .first()
-            )
-
-        current_week_data = None
-        if current_subgoal:
-            current_week_data = {
-                "id": str(current_subgoal.id),
-                "title": current_subgoal.title,
-                "week_number": current_subgoal.week_number,
-                "progress": current_subgoal.progress_percentage,
-                "status": current_subgoal.status,
-            }
-
-        # Today's tasks
-        todays_tasks = []
-        if current_subgoal:
-            tasks = current_subgoal.tasks.filter(
-                Q(scheduled_date=today)
-                | Q(scheduled_date__isnull=True, status="pending")
-            ).order_by("display_order")[
-                :5
-            ]  # Limit to 5
-
-            todays_tasks = [
-                {
-                    "id": str(task.id),
-                    "title": task.title,
-                    "status": task.status,
-                    "estimated_duration_minutes": task.estimated_duration_minutes,
-                    "priority": task.priority,
-                }
-                for task in tasks
-            ]
-
-        # Streak calculation (tasks completed consecutively)
-        recent_tasks = Task.objects.filter(
-            subgoal__milestone__goal=goal,
-            status="completed",
-            completed_at__isnull=False,
-        ).order_by("-completed_at")[:30]
-
-        current_streak = 0
-        if recent_tasks:
-            last_date = recent_tasks[0].completed_at.date()
-            for task in recent_tasks:
-                task_date = task.completed_at.date()
-                if (last_date - task_date).days <= 1:
-                    current_streak += 1
-                    last_date = task_date
-                else:
-                    break
-
-        return {
-            "overall_progress": overall_progress,
-            "current_milestone": current_milestone_data,
-            "current_week": current_week_data,
-            "todays_tasks": todays_tasks,
-            "streak": {"current": current_streak, "unit": "days"},
-            "on_track": self._is_on_track(goal),
-        }
-
-    def _is_on_track(self, goal):
-        """Determine if user is on track to meet goal"""
-        if not goal.target_date:
-            return None
-
-        today = timezone.now().date()
-        total_days = (goal.target_date - goal.start_date).days
-        elapsed_days = (today - goal.start_date).days
-
-        if total_days <= 0:
-            return None
-
-        expected_progress = (elapsed_days / total_days) * 100
-        actual_progress = goal.progress_percentage
-
-        return {
-            "is_on_track": actual_progress >= expected_progress - 10,  # 10% buffer
-            "expected_progress": round(expected_progress, 2),
-            "actual_progress": actual_progress,
-            "difference": round(actual_progress - expected_progress, 2),
-        }
-
-    def _build_timeline(self, goal):
-        """Build a timeline view of the goal"""
-        timeline = []
-
-        for milestone in goal.milestones.all().order_by("display_order"):
-            milestone_entry = {
-                "type": "milestone",
-                "id": str(milestone.id),
-                "title": milestone.title,
-                "month": milestone.month_year,
-                "status": milestone.status,
-                "start_date": (
-                    milestone.start_date.isoformat() if milestone.start_date else None
-                ),
-                "target_date": (
-                    milestone.target_date.isoformat() if milestone.target_date else None
-                ),
-                "weeks": [],
-            }
-
-            for subgoal in milestone.subgoals.all().order_by("display_order"):
-                week_entry = {
-                    "type": "week",
-                    "id": str(subgoal.id),
-                    "title": subgoal.title,
-                    "week_number": subgoal.week_number,
-                    "status": subgoal.status,
-                    "task_count": subgoal.tasks.count(),
-                    "completed_tasks": subgoal.tasks.filter(status="completed").count(),
-                }
-                milestone_entry["weeks"].append(week_entry)
-
-            timeline.append(milestone_entry)
-
-        return timeline
-
 
 # ==============================================================================
-# ALTERNATIVE: Lightweight Version (Faster, Less Data)
+# VIEW 1 — Goal List + Life Area Summary
+# Drives: Life Area cards + goal card list on Goals page
 # ==============================================================================
-
-
-class GoalDetailLightweightAPIView(APIView):
-    """
-    Lightweight version that returns only basic info and counts.
-    Use this for list views or when you don't need all the details.
-
-    Endpoint: GET /api/goals/<goal_id>/
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, goal_id):
-        try:
-            goal = Goal.objects.annotate(
-                milestone_count=Count("milestones"),
-                completed_milestones=Count(
-                    "milestones", filter=Q(milestones__status="completed")
-                ),
-            ).get(id=goal_id, user=request.user)
-
-            return Response(
-                {
-                    "id": str(goal.id),
-                    "title": goal.title,
-                    "description": goal.description,
-                    "status": goal.status,
-                    "progress_percentage": goal.progress_percentage,
-                    "priority": goal.priority,
-                    "primary_category": goal.primary_category,
-                    "target_date": (
-                        goal.target_date.isoformat() if goal.target_date else None
-                    ),
-                    "days_remaining": goal.days_remaining,
-                    "is_overdue": goal.is_overdue,
-                    "counts": {
-                        "milestones": goal.milestone_count,
-                        "completed_milestones": goal.completed_milestones,
-                    },
-                },
-                status=status.HTTP_200_OK,
-            )
-
-        except Goal.DoesNotExist:
-            return Response(
-                {"error": "Goal not found"}, status=status.HTTP_404_NOT_FOUND
-            )
-
-
-# ==============================================================================
-# BONUS: List All Goals (Summary View)
-# ==============================================================================
-
 
 class GoalListAPIView(APIView):
     """
-    List all goals for the authenticated user with summary data.
+    GET  /api/goals/          → list all goals with life-area summary
+    POST /api/goals/          → create goal + AI hierarchy
 
-    Endpoint: GET /api/goals/
-    Query Params:
-    - status: Filter by status (not_started, in_progress, completed)
-    - category: Filter by category (financial, career, health, personal)
-    - priority: Filter by priority (low, medium, high)
+    Query params for GET:
+      ?status=in_progress
+      ?category=financial
+      ?priority=high
     """
-
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        try:
-            # Start with user's goals
-            goals = Goal.objects.filter(user=request.user)
-
-            # Apply filters
-            status_filter = request.query_params.get("status")
-            if status_filter:
-                goals = goals.filter(status=status_filter)
-
-            category_filter = request.query_params.get("category")
-            if category_filter:
-                goals = goals.filter(primary_category=category_filter)
-
-            priority_filter = request.query_params.get("priority")
-            if priority_filter:
-                goals = goals.filter(priority=priority_filter)
-
-            # Annotate with counts
-            goals = goals.annotate(
-                milestone_count=Count("milestones"),
+        # Base queryset — annotate counts in DB so we don't loop in Python
+        goals = (
+            Goal.objects.filter(user=request.user)
+            .annotate(
+                milestone_count=Count("milestones", distinct=True),
                 completed_milestones=Count(
-                    "milestones", filter=Q(milestones__status="completed")
+                    "milestones",
+                    filter=Q(milestones__status="completed"),
+                    distinct=True,
                 ),
-                total_tasks=Count("milestones__subgoals__tasks"),
-                completed_tasks=Count(
-                    "milestones__subgoals__tasks",
-                    filter=Q(milestones__subgoals__tasks__status="completed"),
-                ),
-            ).order_by("-priority", "target_date")
+            )
+            .select_related("attributes")
+            .order_by("target_date")  # DB-safe ordering; priority sort done below
+        )
 
-            # Serialize
-            goals_data = []
-            for goal in goals:
-                goals_data.append(
-                    {
-                        "id": str(goal.id),
-                        "title": goal.title,
-                        "description": (
-                            goal.description[:100] + "..."
-                            if len(goal.description) > 100
-                            else goal.description
-                        ),
-                        "status": goal.status,
-                        "progress_percentage": goal.progress_percentage,
-                        "priority": goal.priority,
-                        "primary_category": goal.primary_category,
-                        "categories": goal.categories,
-                        "target_date": (
-                            goal.target_date.isoformat() if goal.target_date else None
-                        ),
-                        "days_remaining": goal.days_remaining,
-                        "is_overdue": goal.is_overdue,
-                        "counts": {
-                            "milestones": goal.milestone_count,
-                            "completed_milestones": goal.completed_milestones,
-                            "total_tasks": goal.total_tasks,
-                            "completed_tasks": goal.completed_tasks,
-                        },
-                    }
+        # Optional filters
+        if s := request.query_params.get("status"):
+            goals = goals.filter(status=s)
+        if c := request.query_params.get("category"):
+            goals = goals.filter(primary_category=c)
+        if p := request.query_params.get("priority"):
+            goals = goals.filter(priority=p)
+
+        # Sort by priority (high→medium→low) then target_date
+        goals = sorted(goals, key=lambda g: (PRIORITY_ORDER.get(g.priority, 9), g.target_date or timezone.localdate()))
+
+        # --- Life Area summary (drives the 4 category cards in your UI) ------
+        categories = ["financial", "career", "health", "personal"]
+        life_areas = {}
+        for cat in categories:
+            cat_goals = [g for g in goals if g.primary_category == cat]
+            total = len(cat_goals)
+            completed = sum(1 for g in cat_goals if g.status == "completed")
+            avg_progress = (
+                round(sum(g.progress_percentage for g in cat_goals) / total)
+                if total else 0
+            )
+            life_areas[cat] = {
+                "goal_count":         total,
+                "completed":          completed,
+                "avg_progress":       avg_progress,
+            }
+
+        # --- Goal cards -------------------------------------------------------
+        goals_data = []
+        today = timezone.localdate()
+
+        for goal in goals:
+            days_left = goal.days_remaining  # @property on model
+            is_overdue = goal.is_overdue     # @property on model
+
+            goals_data.append({
+                "id":                  str(goal.id),
+                "title":               goal.title,
+                "description":         goal.description,
+                "why_it_matters":      goal.why_it_matters,
+                "primary_category":    goal.primary_category,
+                "priority":            goal.priority,
+                "status":              goal.status,
+                "progress_percentage": goal.progress_percentage,
+                "start_date":          goal.start_date.isoformat() if goal.start_date else None,
+                "target_date":         goal.target_date.isoformat() if goal.target_date else None,
+                "days_remaining":      days_left,
+                "is_overdue":          is_overdue,
+                "is_ai_generated":     goal.is_ai_generated,
+                # Counts for the milestone progress indicator on each card
+                "milestone_count":     goal.milestone_count,
+                "completed_milestones": goal.completed_milestones,
+                # Attributes — only the relevant category field, not all four
+                "attributes":          self._get_attributes(goal),
+            })
+
+        return Response(
+            {
+                "life_areas": life_areas,
+                "count":      len(goals_data),
+                "goals":      goals_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        """Create a goal and immediately generate the AI hierarchy."""
+        return CreateGoalWithHierarchyAPIView().post(request)
+
+    @staticmethod
+    def _get_attributes(goal) -> dict | None:
+        """Return only the relevant category's attribute data, not all four fields."""
+        try:
+            attr = goal.attributes  # select_related — no extra query
+            field_map = {
+                "financial": attr.financial_data,
+                "career":    attr.career_data,
+                "health":    attr.health_data,
+                "personal":  attr.personal_data,
+            }
+            data = field_map.get(goal.primary_category)
+            return {goal.primary_category: data} if data else None
+        except GoalAttributes.DoesNotExist:
+            return None
+        
+        
+
+# ==============================================================================
+# VIEW 2 — Goal Hierarchy (Milestones + SubGoals only)
+# Drives: Expanded goal card on Goals page
+# Tasks are intentionally excluded — they live on the Routine page
+# ==============================================================================
+
+class GoalHierarchyAPIView(APIView):
+    """
+    GET /api/goals/<goal_id>/hierarchy/
+
+    Returns milestones and their subgoals.
+    Tasks are NOT included here — the Routine page pulls tasks separately.
+
+    This is what powers the "Action Plan" expansion in your UI screenshot.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, goal_id):
+        try:
+            goal = (
+                Goal.objects.prefetch_related(
+                    "milestones__subgoals",
                 )
-
+                .select_related("attributes")
+                .get(id=goal_id, user=request.user)
+            )
+        except Goal.DoesNotExist:
             return Response(
-                {"count": len(goals_data), "goals": goals_data},
-                status=status.HTTP_200_OK,
+                {"error": "Goal not found."},
+                status=status.HTTP_404_NOT_FOUND,
             )
 
-        except Exception as e:
-            print(f"Error: {str(e)}")
-            return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        today = timezone.localdate()
+
+        # --- Goal summary (header of the expanded card) ----------------------
+        goal_data = {
+            "id":                  str(goal.id),
+            "title":               goal.title,
+            "description":         goal.description,
+            "why_it_matters":      goal.why_it_matters,
+            "primary_category":    goal.primary_category,
+            "priority":            goal.priority,
+            "status":              goal.status,
+            "progress_percentage": goal.progress_percentage,
+            "start_date":          goal.start_date.isoformat() if goal.start_date else None,
+            "target_date":         goal.target_date.isoformat() if goal.target_date else None,
+            "days_remaining":      goal.days_remaining,
+            "is_overdue":          goal.is_overdue,
+            "is_ai_generated":     goal.is_ai_generated,
+            "ai_feasibility_score": goal.ai_feasibility_score,
+        }
+
+        # --- On-track calculation (powers the progress indicator) ------------
+        on_track = None
+        if goal.start_date and goal.target_date:
+            total_days   = (goal.target_date - goal.start_date).days
+            elapsed_days = (today - goal.start_date).days
+            if total_days > 0:
+                expected = round((elapsed_days / total_days) * 100, 1)
+                actual   = goal.progress_percentage
+                on_track = {
+                    "is_on_track":        actual >= expected - 10,  # 10% buffer
+                    "expected_progress":  expected,
+                    "actual_progress":    actual,
+                    "difference":         round(actual - expected, 1),
+                }
+
+        # --- Milestones + SubGoals (the hierarchy shown in the UI) -----------
+        milestones_data = []
+        for milestone in goal.milestones.all().order_by("display_order"):
+            subgoals_data = []
+
+            for subgoal in milestone.subgoals.all().order_by("display_order"):
+                # Task counts only — not the tasks themselves
+                task_qs = subgoal.tasks.all()
+                total_tasks     = task_qs.count()
+                completed_tasks = task_qs.filter(status="completed").count()
+
+                subgoals_data.append({
+                    "id":                  str(subgoal.id),
+                    "title":               subgoal.title,
+                    "description":         subgoal.description,
+                    "priority":            subgoal.priority,
+                    "status":              subgoal.status,
+                    "progress_percentage": subgoal.progress_percentage,
+                    "week_number":         subgoal.week_number,  # @property
+                    "display_order":       subgoal.display_order,
+                    "start_date":          subgoal.start_date.isoformat() if subgoal.start_date else None,
+                    "target_date":         subgoal.target_date.isoformat() if subgoal.target_date else None,
+                    "completed_date":      subgoal.completed_date.isoformat() if subgoal.completed_date else None,
+                    "is_ai_generated":     subgoal.is_ai_generated,
+                    "task_counts": {
+                        "total":     total_tasks,
+                        "completed": completed_tasks,
+                        "pending":   total_tasks - completed_tasks,
+                    },
+                })
+
+            milestones_data.append({
+                "id":                  str(milestone.id),
+                "title":               milestone.title,
+                "description":         milestone.description,
+                "success_criteria":    milestone.success_criteria,
+                "priority":            milestone.priority,
+                "status":              milestone.status,
+                "progress_percentage": milestone.progress_percentage,
+                "display_order":       milestone.display_order,
+                "start_date":          milestone.start_date.isoformat() if milestone.start_date else None,
+                "target_date":         milestone.target_date.isoformat() if milestone.target_date else None,
+                "completed_date":      milestone.completed_date.isoformat() if milestone.completed_date else None,
+                "is_ai_generated":     milestone.is_ai_generated,
+                "subgoals":            subgoals_data,
+                "subgoal_count":       len(subgoals_data),
+            })
+
+        # --- Aggregate stats (drives the statistics panel) -------------------
+        all_milestones  = goal.milestones.all()
+        total_m         = all_milestones.count()
+        completed_m     = all_milestones.filter(status="completed").count()
+
+        # Single query across all subgoals and tasks for this goal
+        all_subgoals    = SubGoal.objects.filter(milestone__goal=goal)
+        total_sg        = all_subgoals.count()
+        completed_sg    = all_subgoals.filter(status="completed").count()
+
+        from goal.models import Task
+        from django.db.models import Sum, Avg
+        all_tasks       = Task.objects.filter(subgoal__milestone__goal=goal)
+        total_t         = all_tasks.count()
+        completed_t     = all_tasks.filter(status="completed").count()
+        est_minutes     = all_tasks.aggregate(s=Sum("estimated_duration_minutes"))["s"] or 0
+        actual_minutes  = all_tasks.filter(actual_duration_minutes__isnull=False).aggregate(
+            s=Sum("actual_duration_minutes")
+        )["s"] or 0
+
+        stats = {
+            "milestones": {
+                "total":           total_m,
+                "completed":       completed_m,
+                "completion_rate": round(completed_m / total_m * 100, 1) if total_m else 0,
+            },
+            "subgoals": {
+                "total":           total_sg,
+                "completed":       completed_sg,
+                "completion_rate": round(completed_sg / total_sg * 100, 1) if total_sg else 0,
+            },
+            "tasks": {
+                "total":           total_t,
+                "completed":       completed_t,
+                "completion_rate": round(completed_t / total_t * 100, 1) if total_t else 0,
+            },
+            "time": {
+                "estimated_hours": round(est_minutes / 60, 1),
+                "actual_hours":    round(actual_minutes / 60, 1),
+            },
+        }
+
+        return Response(
+            {
+                "goal":       goal_data,
+                "on_track":   on_track,
+                "milestones": milestones_data,
+                "stats":      stats,
+            },
+            status=status.HTTP_200_OK,
+        )
+        
+
+
+class GoalDetailAPIView(APIView):
+    """
+    PATCH  /api/goals/<goal_id>/   → partial update (title, priority, target_date, etc.)
+    DELETE /api/goals/<goal_id>/   → delete goal and all children (CASCADE)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, goal_id):
+        try:
+            goal = Goal.objects.get(id=goal_id, user=request.user)
+        except Goal.DoesNotExist:
+            return Response({"error": "Goal not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = GoalSerializer(goal, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, goal_id):
+        try:
+            goal = Goal.objects.get(id=goal_id, user=request.user)
+        except Goal.DoesNotExist:
+            return Response({"error": "Goal not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        goal.delete()  # CASCADE deletes Milestones → SubGoals → Tasks automatically
+        return Response(status=status.HTTP_204_NO_CONTENT)
