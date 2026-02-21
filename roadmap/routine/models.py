@@ -232,6 +232,7 @@ class DailyTaskItem(models.Model):
                 habit=self.habit,
                 completion_date=self.task_list.date,
                 defaults={
+                    'user':                self.habit.user,
                     'is_completed':        True,
                     'completed_at':        self.completed_at,
                     'time_spent_minutes':  actual_minutes,
@@ -247,6 +248,12 @@ class DailyTaskItem(models.Model):
         self.skip_reason = reason
         self.save(update_fields=['is_skipped', 'skip_reason', 'updated_at'])
         self.task_list.update_progress()
+        
+    @property
+    def primary_category(self) -> str:
+        if self.related_goal:
+            return self.related_goal.primary_category
+        return ''
 
 
 # ==============================================================================

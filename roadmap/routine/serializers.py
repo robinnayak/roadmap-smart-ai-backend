@@ -15,13 +15,14 @@ class HabitTrackerSerializer(serializers.ModelSerializer):
          so the frontend can display the goal name without a second API call.
     """
     linked_goal_info = serializers.SerializerMethodField()
+    category = serializers.SerializerMethodField()
 
     class Meta:
         model = HabitTracker
         fields = [
             'id', 'name', 'description', 'icon',
             'why_important', 'frequency', 'custom_days',
-            'estimated_minutes', 'priority',
+            'estimated_minutes', 'priority', 'category',
             'linked_goal', 'linked_goal_info',          # raw FK + summary
             'is_active', 'current_streak', 'longest_streak',
             'total_completions', 'last_completed_date',
@@ -30,7 +31,7 @@ class HabitTrackerSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'current_streak', 'longest_streak',
             'total_completions', 'last_completed_date',
-            'created_at', 'updated_at',
+            'created_at', 'updated_at', 'category',
         ]
 
     def get_linked_goal_info(self, obj):
@@ -42,10 +43,17 @@ class HabitTrackerSerializer(serializers.ModelSerializer):
             }
         return None
 
+    def get_category(self, obj):
+        """Return category from linked goal or a static 'Habit' category."""
+        if obj.linked_goal_id:
+            return obj.linked_goal.primary_category
+        return 'Habit'
+
 
 class DailyTaskItemSerializer(serializers.ModelSerializer):
     related_goal_info = serializers.SerializerMethodField()
     habit_info        = serializers.SerializerMethodField()
+    primary_category  = serializers.SerializerMethodField()
 
     class Meta:
         model = DailyTaskItem
@@ -54,11 +62,11 @@ class DailyTaskItemSerializer(serializers.ModelSerializer):
             'priority', 'estimated_minutes', 'actual_minutes',
             'is_completed', 'completed_at', 'suggested_time',
             'is_skipped', 'skip_reason', 'completion_notes',
-            'why_important', 'display_order', 'points_earned',
+            'why_important', 'display_order', 'points_earned', 'primary_category',
             'related_goal_info', 'habit_info',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'completed_at', 'points_earned', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'completed_at', 'points_earned', 'created_at', 'updated_at', 'primary_category']
 
     def get_related_goal_info(self, obj):
         if obj.related_goal_id:
@@ -77,12 +85,22 @@ class DailyTaskItemSerializer(serializers.ModelSerializer):
                 'name':           obj.habit.name,
                 'icon':           obj.habit.icon,
                 'current_streak': obj.habit.current_streak,
+                'category':       'Habit',
             }
         return None
+
+    def get_primary_category(self, obj):
+        """Return the primary category from related goal or task item source."""
+        if obj.related_goal_id:
+            return obj.related_goal.primary_category
+        elif obj.habit_id:
+            return 'Habit'
+        return 'Task'
 
 
 class DailyTaskItemSummarySerializer(serializers.ModelSerializer):
     """Minimal serializer used inside DailyTaskListSerializer by default."""
+    primary_category = serializers.SerializerMethodField()
 
     class Meta:
         model = DailyTaskItem
@@ -90,7 +108,16 @@ class DailyTaskItemSummarySerializer(serializers.ModelSerializer):
             'id', 'item_type', 'title', 'icon',
             'priority', 'estimated_minutes',
             'is_completed', 'is_skipped', 'display_order',
+            'primary_category',
         ]
+
+    def get_primary_category(self, obj):
+        """Return the primary category from related goal or task item source."""
+        if obj.related_goal_id:
+            return obj.related_goal.primary_category
+        elif obj.habit_id:
+            return 'Habit'
+        return 'Task'
 
 
 class DailyTaskListSerializer(serializers.ModelSerializer):
