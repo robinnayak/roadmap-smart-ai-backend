@@ -187,7 +187,7 @@ class DailyTaskItem(models.Model):
 
     def __str__(self):
         marker = '✅' if self.is_completed else '⏳'
-        return f"{marker} {self.title}"
+        return f"{self.task_list.user.email}{marker} {self.title}"
 
     def mark_completed(self, notes: str = "", actual_minutes: int | None = None):
         """
@@ -311,7 +311,7 @@ class HabitTracker(models.Model):
         ordering = ['-priority', 'name']
 
     def __str__(self):
-        return f"{self.icon} {self.name}"
+        return f"{self.user.email} - {self.icon} {self.name}"
 
     def should_include_today(self) -> bool:
         if not self.is_active:
