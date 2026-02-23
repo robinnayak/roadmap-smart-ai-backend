@@ -127,7 +127,7 @@ Description: {goal_context.get('description', '')}
 Target Date: {goal_context.get('target_date', 'Not set')}
 Months to Plan: {months}
 
-Create {min(6, max(3, months))} monthly milestones.
+Create {max(1, months)} monthly milestones.
 
 Each milestone should:
 1. Represent 3-4 weeks of focused work

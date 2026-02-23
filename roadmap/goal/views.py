@@ -40,9 +40,11 @@ from ai.models import AIProcessingJob
 from ai.services.text_extraction import GoalAttributeExtractor
 from ai.services.GoalHierarchyGenerator import GoalHierarchyGenerator
 from rest_framework import status
+import threading
 import json
 from authentication.models import UserPersonalDetails
 from django.db.models import Prefetch, Count, Avg, Q, Sum
+from django.db import close_old_connections
 from rest_framework.throttling import UserRateThrottle
 import logging
 
@@ -454,7 +456,54 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
             logger.info(f"Goal created: {goal.id} - {goal.title}")
             print(f"✓ Goal created: {goal.id} - {goal.title}")
 
+            sync_mode = str(request.query_params.get("sync", "false")).lower() == "true"
+            if not sync_mode:
+                job = AIProcessingJob.objects.create(
+                    user=request.user,
+                    job_type="milestone_generation",
+                    input_data={
+                        "goal_id": str(goal.id),
+                        "goal_title": goal.title,
+                        "target_date": str(goal.target_date or ""),
+                    },
+                    metadata={
+                        "goal_id": str(goal.id),
+                        "progress_message": "Queued for hierarchy generation...",
+                    },
+                    status="pending",
+                    progress_percentage=0,
+                )
+
+                estimated_seconds = self._estimate_generation_seconds(goal)
+                worker = threading.Thread(
+                    target=self._run_hierarchy_generation_async,
+                    kwargs={
+                        "goal_id": str(goal.id),
+                        "user_id": request.user.id,
+                        "job_id": str(job.id),
+                    },
+                    daemon=True,
+                )
+                worker.start()
+
+                return Response(
+                    {
+                        "message": "Goal created. Hierarchy generation started.",
+                        "goal": GoalSerializer(goal).data,
+                        "job": {
+                            "id": str(job.id),
+                            "status": job.status,
+                            "progress_percentage": job.progress_percentage,
+                            "progress_message": "Queued for hierarchy generation...",
+                            "poll_url": f"/ai/jobs/{job.id}/",
+                            "estimated_seconds": estimated_seconds,
+                        },
+                    },
+                    status=status.HTTP_202_ACCEPTED,
+                )
+
             goal_data = {
+                "id": str(goal.id),
                 "title": goal.title,
                 "description": goal.description,
                 "why_it_matters": goal.why_it_matters,
@@ -514,11 +563,11 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
             return Response(
                 {
                     "message": "Goal created with complete hierarchy!",
-                    "goal": GoalSerializer(goal).data,
-                    "hierarchy": {
-                        "milestones_saved": saved_counts["milestones"],
-                        "subgoals_saved": saved_counts["subgoals"],
-                        "tasks_saved": saved_counts["tasks"],
+                "goal": GoalSerializer(goal).data,
+                "hierarchy": {
+                    "milestones_saved": saved_counts["milestones"],
+                    "subgoals_saved": saved_counts["subgoals"],
+                    "tasks_saved": saved_counts["tasks"],
                         "total_items": sum(saved_counts.values()),
                     },
                 },
@@ -533,6 +582,73 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    def _run_hierarchy_generation_async(self, goal_id: str, user_id: int, job_id: str):
+        try:
+            user = None
+            from authentication.models import CustomUser
+            user = CustomUser.objects.get(id=user_id)
+            goal = Goal.objects.get(id=goal_id, user=user)
+
+            goal_data = {
+                "id": str(goal.id),
+                "title": goal.title,
+                "description": goal.description,
+                "why_it_matters": goal.why_it_matters,
+                "primary_category": goal.primary_category,
+                "impact_dimensions": goal.impact_dimensions,
+                "start_date": goal.start_date,
+                "target_date": goal.target_date,
+            }
+            user_context = self._get_user_context(user)
+            generator = GoalHierarchyGenerator()
+
+            hierarchy_result = generator.generate_complete_hierarchy(
+                goal_data=goal_data,
+                user=user,
+                user_context=user_context,
+                existing_job_id=job_id,
+            )
+
+            if hierarchy_result.get("status") != "success":
+                logger.warning(
+                    "Async hierarchy generation failed for goal %s: %s",
+                    goal.id,
+                    hierarchy_result.get("message"),
+                )
+                return
+
+            saved_counts = self._save_complete_hierarchy_to_db(
+                goal, hierarchy_result.get("data", {})
+            )
+            logger.info(
+                "Async hierarchy saved for goal %s — milestones: %d, subgoals: %d, tasks: %d",
+                goal.id,
+                saved_counts["milestones"],
+                saved_counts["subgoals"],
+                saved_counts["tasks"],
+            )
+        except Exception:
+            logger.exception("Async hierarchy worker failed for goal %s", goal_id)
+            try:
+                failed_job = AIProcessingJob.objects.get(id=job_id, user_id=user_id)
+                failed_job.mark_failed("Unexpected error in async hierarchy worker.")
+            except Exception:
+                logger.exception("Could not mark async job as failed: %s", job_id)
+        finally:
+            close_old_connections()
+
+    @staticmethod
+    def _estimate_generation_seconds(goal: Goal) -> int:
+        # Heuristic for UI ETA; real ETA is served by /ai/jobs/<id>/ polling.
+        if goal.start_date and goal.target_date:
+            days = max(1, (goal.target_date - goal.start_date).days + 1)
+        else:
+            days = 60
+        months = max(1, min(12, (days + 29) // 30))
+        milestones = min(months, 6)
+        calls_estimate = 1 + milestones + (milestones * 3)
+        return max(60, calls_estimate * 20)
 
     def _get_user_context(self, user):
         """Get user context for better AI generation"""

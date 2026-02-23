@@ -55,55 +55,142 @@ class ResponseParser:
     @staticmethod
     def parse_json(content):
         """
-        Simplified JSON parser that handles both strings and already-parsed dicts.
+        Parse JSON returned by models, including common near-JSON formats.
         """
-        import json
-        import re
-        
-        print(f"DEBUG Parser: Input type: {type(content)}")
-        
-        # If content is already a dict or list, return it directly
         if isinstance(content, (dict, list)):
-            print("DEBUG: Content is already parsed, returning directly")
             return content
-        
-        # If it's bytes, decode to string
+
         if isinstance(content, bytes):
-            content = content.decode('utf-8')
-        
-        # Now it should be a string
+            content = content.decode("utf-8", errors="replace")
+
         if not isinstance(content, str):
-            print(f"DEBUG: Content is {type(content)}, value: {content}")
             raise TypeError(f"Expected string, dict, or list, got {type(content)}")
-        
-        print(f"DEBUG: Cleaning string content, length: {len(content)}")
-        
-        # Clean the string
-        content = content.strip()
-        
-        # Remove markdown code blocks
-        content = re.sub(r'```json\s*', '', content)
-        content = re.sub(r'```\s*', '', content)
-        
-        # Find JSON in the text
-        json_match = re.search(r'(\{.*\}|\[.*\])', content, re.DOTALL)
-        if json_match:
-            content = json_match.group(1)
-        
-        # Parse JSON
+
+        text = content.lstrip("\ufeff").strip()
+        if not text:
+            raise ValueError("Invalid JSON: empty content")
+
+        candidates = []
+
+        def add_candidate(value):
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped and stripped not in candidates:
+                    candidates.append(stripped)
+
+        add_candidate(text)
+        cleaned = ResponseParser._strip_markdown_fences(text)
+        add_candidate(cleaned)
+        extracted = ResponseParser._extract_first_json_block(cleaned)
+        add_candidate(extracted)
+
+        errors = []
+        for candidate in candidates:
+            parsed, error = ResponseParser._try_parse_candidate(candidate)
+            if error is None:
+                return parsed
+            errors.append(str(error))
+
+        raise ValueError(f"Invalid JSON: {errors[-1] if errors else 'unable to parse content'}")
+
+    @staticmethod
+    def _try_parse_candidate(candidate: str):
         try:
-            result = json.loads(content)
-            print(f"DEBUG: Successfully parsed JSON, type: {type(result)}")
-            return result
-        except json.JSONDecodeError as e:
-            print(f"JSON Decode Error: {e}")
-            print(f"Problematic content: {content[:200]}...")
-            # Try to fix common issues
-            content = content.replace("'", '"')
+            return json.loads(candidate), None
+        except Exception as exc:
+            first_error = exc
+
+        repaired = ResponseParser._repair_json_string(candidate)
+        if repaired != candidate:
             try:
-                return json.loads(content)
-            except:
-                raise ValueError(f"Invalid JSON: {str(e)}")
+                return json.loads(repaired), None
+            except Exception:
+                pass
+
+        return None, first_error
+
+    @staticmethod
+    def _strip_markdown_fences(text: str) -> str:
+        text = re.sub(r"```json\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"```\s*", "", text)
+        return text.strip()
+
+    @staticmethod
+    def _extract_first_json_block(text: str) -> str:
+        start = None
+        for idx, ch in enumerate(text):
+            if ch in "{[":
+                start = idx
+                break
+        if start is None:
+            return text
+
+        stack = []
+        in_string = False
+        escape = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif ch in "{[":
+                stack.append(ch)
+            elif ch in "}]":
+                if not stack:
+                    continue
+                opener = stack.pop()
+                if (opener == "{" and ch != "}") or (opener == "[" and ch != "]"):
+                    return text[start : idx + 1]
+                if not stack:
+                    return text[start : idx + 1]
+
+        return text[start:]
+
+    @staticmethod
+    def _repair_json_string(text: str) -> str:
+        repaired = text
+
+        # Normalize smart quotes often produced by copied or generated text.
+        repaired = (
+            repaired.replace("“", '"')
+            .replace("”", '"')
+            .replace("‘", "'")
+            .replace("’", "'")
+        )
+
+        # Remove JS-style comments and trailing commas.
+        repaired = re.sub(r"/\*.*?\*/", "", repaired, flags=re.DOTALL)
+        repaired = re.sub(r"(?m)^\s*//.*$", "", repaired)
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+
+        # Quote bare object keys: { key: ... } -> { "key": ... }
+        repaired = re.sub(
+            r'([{,]\s*)([A-Za-z_][A-Za-z0-9_\-]*)(\s*:)',
+            r'\1"\2"\3',
+            repaired,
+        )
+
+        # Convert Python booleans/nulls.
+        repaired = re.sub(r"\bTrue\b", "true", repaired)
+        repaired = re.sub(r"\bFalse\b", "false", repaired)
+        repaired = re.sub(r"\bNone\b", "null", repaired)
+
+        # Convert single-quoted strings where possible.
+        repaired = re.sub(
+            r"(?<!\\)'([^'\\]*(?:\\.[^'\\]*)*)'",
+            lambda m: '"' + m.group(1).replace('"', '\\"') + '"',
+            repaired,
+        )
+
+        return repaired
             
    
   
@@ -200,9 +287,6 @@ class MilestoneParser:
         # First parse the JSON using ResponseParser
         parsed = ResponseParser.parse_json(response_content)
         
-        print(f"DEBUG PARSER: Parsed type: {type(parsed)}")
-        # print(f"DEBUG PARSER: Parsed content: {parsed}")
-        
         # Extract milestones from parsed data
         milestones = []
         
@@ -220,8 +304,6 @@ class MilestoneParser:
         elif isinstance(parsed, list):
             # If list of milestones
             milestones = parsed
-        
-        print(f"DEBUG PARSER: Extracted {len(milestones)} milestones")
         
         # Validate and return
         return MilestoneParser._validate_milestones(milestones)

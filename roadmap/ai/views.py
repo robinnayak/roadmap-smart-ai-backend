@@ -3,6 +3,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from django.utils import timezone
+from django.db.models import Avg
 from goal.models import UserCurrentSituationGoal, GoalAttributes, Goal, Milestone, SubGoal, Task
 from authentication.models import UserPersonalDetails
 from .models import AIProcessingJob
@@ -214,6 +216,68 @@ class GenerateMileStonesAPIView(APIView):
             
         except Exception as e:
             return Response({"message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class AIJobStatusAPIView(APIView):
+    """
+    GET /ai/jobs/<job_id>/
+    Returns progress, status, elapsed time and ETA for a running AI job.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, job_id):
+        job = get_object_or_404(AIProcessingJob, id=job_id, user=request.user)
+
+        now = timezone.now()
+        elapsed_seconds = None
+        if job.started_at:
+            elapsed_seconds = max(0, int((now - job.started_at).total_seconds()))
+
+        avg_seconds = (
+            AIProcessingJob.objects.filter(
+                user=request.user,
+                job_type=job.job_type,
+                status="completed",
+                processing_time_seconds__isnull=False,
+            )
+            .exclude(id=job.id)
+            .aggregate(avg=Avg("processing_time_seconds"))
+            .get("avg")
+        )
+
+        if avg_seconds is None:
+            avg_seconds = 240.0 if job.job_type == "milestone_generation" else 120.0
+
+        if job.status in {"completed", "failed", "cancelled"}:
+            eta_seconds = 0
+        elif elapsed_seconds is None:
+            eta_seconds = int(avg_seconds)
+        else:
+            remaining_by_progress = 0
+            if job.progress_percentage > 0:
+                estimated_total = elapsed_seconds / (job.progress_percentage / 100)
+                remaining_by_progress = max(0, int(estimated_total - elapsed_seconds))
+            remaining_by_history = max(0, int(avg_seconds - elapsed_seconds))
+            eta_seconds = remaining_by_progress or remaining_by_history
+
+        return Response(
+            {
+                "id": str(job.id),
+                "jobType": job.job_type,
+                "status": job.status,
+                "progressPercentage": job.progress_percentage,
+                "progressMessage": (job.metadata or {}).get("progress_message", ""),
+                "goalId": (job.metadata or {}).get("goal_id"),
+                "errorMessage": job.error_message,
+                "startedAt": job.started_at.isoformat() if job.started_at else None,
+                "completedAt": job.completed_at.isoformat() if job.completed_at else None,
+                "elapsedSeconds": elapsed_seconds,
+                "estimatedRemainingSeconds": eta_seconds,
+                "processingTimeSeconds": job.processing_time_seconds,
+            },
+            status=status.HTTP_200_OK,
+        )
        
 
 # class GoalEnhancementAPIView(APIView):

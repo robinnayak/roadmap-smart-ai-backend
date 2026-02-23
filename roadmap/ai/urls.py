@@ -5,6 +5,7 @@ from .views import (
     AIHealthCheckView,
     GoalAttributeExtractorAPIView,
     GenerateMileStonesAPIView,
+    AIJobStatusAPIView,
 )
 
 
@@ -21,5 +22,6 @@ urlpatterns = [
         GoalAttributeExtractorAPIView.as_view(),
         name="goal-attribute-extractor",
     ),
+    path("jobs/<uuid:job_id>/", AIJobStatusAPIView.as_view(), name="ai-job-status"),
     path("generate-milestones/<uuid:goal_id>/", GenerateMileStonesAPIView.as_view(), name="generate-milestones"),
 ]

@@ -2,6 +2,8 @@ from ai.services.base_service import BaseAIService
 from ai.providers.ollama_provider import OllamaProvider
 from ai.utils.parsers import ResponseParser, MilestoneParser
 from ai.utils.formatters import MileStoneFormatter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 from datetime import timedelta
 from ai.prompts.GoalHierarchyGeneratorPrompts import GoalHierarchyGeneratorPrompts
 from ai.utils.validators import OutputValidator
@@ -9,6 +11,8 @@ import json
 import logging
 from typing import Any
 from datetime import datetime
+import math
+from ai.models import AIProcessingJob
 
 
 logger = logging.getLogger(__name__)
@@ -30,17 +34,17 @@ HIERARCHY_JOB_TYPE = "milestone_generation"
 
 # ---------- MONTH SETTINGS (Controls timeline) ----------
 MIN_MONTHS = 1        # Minimum months allowed
-MAX_MONTHS = 2        # 🔧 TESTING: 2 months | PRODUCTION: Set higher (12-36)
+MAX_MONTHS = int(os.getenv("HIERARCHY_MAX_MONTHS", "12"))
 DEFAULT_MONTHS = 1    # Fallback if dates missing
 
 # ---------- MILESTONE SETTINGS (1 per month) ----------
 MAX_MILESTONES = 6    # Safety cap - keeps first X milestones
 
 # ---------- SUBGOAL SETTINGS (4 per milestone = weekly) ----------
-MAX_SUBGOALS_PER_MILESTONE = 4   # 🔧 TESTING: 1-2 | PRODUCTION: 4
+MAX_SUBGOALS_PER_MILESTONE = int(os.getenv("HIERARCHY_MAX_SUBGOALS_PER_MILESTONE", "3"))
 
 # ---------- TASK SETTINGS (7 per subgoal = daily) ----------
-MAX_TASKS_PER_SUBGOAL = 7        # 🔧 TESTING: 2-3 | PRODUCTION: 7
+MAX_TASKS_PER_SUBGOAL = int(os.getenv("HIERARCHY_MAX_TASKS_PER_SUBGOAL", "5"))
 
 # ================================================
 # TESTING MODE (⚠️ DISABLE IN PRODUCTION)
@@ -66,11 +70,12 @@ class GoalHierarchyGenerator(BaseAIService):
 
     def __init__(self):
         provider = OllamaProvider(
-            model="gpt-oss:120b-cloud",
-            temperature=0.2,
-            max_tokens=4000,
+            model=os.getenv("HIERARCHY_MODEL", "gpt-oss:120b-cloud"),
+            temperature=0.15,
+            max_tokens=int(os.getenv("HIERARCHY_MAX_TOKENS", "2400")),
         )
         super().__init__(provider)
+        self.max_task_workers = max(1, int(os.getenv("HIERARCHY_TASK_WORKERS", "2")))
         self.milestone_parser = MilestoneParser()
         self.parser = ResponseParser()
         self.formatter = MileStoneFormatter()
@@ -85,6 +90,7 @@ class GoalHierarchyGenerator(BaseAIService):
         goal_data: dict,
         user,
         user_context: dict | None = None,
+        existing_job_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Generate a complete hierarchy for a goal and track it as a job.
@@ -131,16 +137,53 @@ class GoalHierarchyGenerator(BaseAIService):
         
 
         
-        job, _ = self.create_or_update_job(
-            user=user,
-            job_type=HIERARCHY_JOB_TYPE,
-            input_data={
-                "goal_title":       goal_data.get("title"),
+        if existing_job_id:
+            job = AIProcessingJob.objects.get(
+                id=existing_job_id,
+                user=user,
+                job_type=HIERARCHY_JOB_TYPE,
+            )
+            job.input_data = {
+                "goal_id": goal_data.get("id"),
+                "goal_title": goal_data.get("title"),
                 "primary_category": goal_data.get("primary_category"),
-                "target_date":      str(goal_data.get("target_date", "")),
-                "user_context":     user_context or {},
-            },
-        )
+                "target_date": str(goal_data.get("target_date", "")),
+                "user_context": user_context or {},
+            }
+            job.metadata = {
+                **(job.metadata or {}),
+                "goal_id": str(goal_data.get("id", "")),
+                "progress_message": "Preparing hierarchy generation...",
+            }
+            job.status = "pending"
+            job.error_message = ""
+            job.progress_percentage = 0
+            job.save(
+                update_fields=[
+                    "input_data",
+                    "metadata",
+                    "status",
+                    "error_message",
+                    "progress_percentage",
+                    "updated_at",
+                ]
+            )
+        else:
+            job = self.create_job(
+                user=user,
+                job_type=HIERARCHY_JOB_TYPE,
+                input_data={
+                    "goal_id": goal_data.get("id"),
+                    "goal_title": goal_data.get("title"),
+                    "primary_category": goal_data.get("primary_category"),
+                    "target_date": str(goal_data.get("target_date", "")),
+                    "user_context": user_context or {},
+                },
+                metadata={
+                    "goal_id": str(goal_data.get("id", "")),
+                    "progress_message": "Preparing hierarchy generation...",
+                },
+            )
         job.start_processing()
 
         try:
@@ -184,13 +227,33 @@ class GoalHierarchyGenerator(BaseAIService):
                 milestone_entry = {"milestone_data": milestone_dict, "subgoals": []}
 
                 # Generate tasks for each subgoal
+                task_results_by_index: dict[int, dict] = {}
+                with ThreadPoolExecutor(max_workers=min(self.max_task_workers, max(1, len(subgoals_list)))) as executor:
+                    future_map = {
+                        executor.submit(self._generate_tasks, subgoal_dict, milestone_dict): sg_idx
+                        for sg_idx, subgoal_dict in enumerate(subgoals_list, 1)
+                    }
+                    for future in as_completed(future_map):
+                        sg_idx = future_map[future]
+                        try:
+                            task_results_by_index[sg_idx] = future.result()
+                        except Exception as exc:
+                            logger.exception("Task generation failed for subgoal %d: %s", sg_idx, exc)
+                            task_results_by_index[sg_idx] = {
+                                "status": "error",
+                                "message": str(exc),
+                                "data": {"tasks": []},
+                            }
+
                 for sg_idx, subgoal_dict in enumerate(subgoals_list, 1):
                     logger.info(
                         "  Subgoal %d/%d: %s",
                         sg_idx, len(subgoals_list), subgoal_dict.get("title", "?"),
                     )
-
-                    tasks_result = self._generate_tasks(subgoal_dict, milestone_dict)
+                    tasks_result = task_results_by_index.get(
+                        sg_idx,
+                        {"status": "error", "message": "No task result", "data": {"tasks": []}},
+                    )
                     tasks_list = []
 
                     if tasks_result.get("status") == "success":
@@ -425,7 +488,8 @@ class GoalHierarchyGenerator(BaseAIService):
             if isinstance(target, str):
                 target = datetime.strptime(target, "%Y-%m-%d").date()
 
-            months = (target - start).days // 30
+            days = max(1, (target - start).days + 1)
+            months = math.ceil(days / 30)
             return max(MIN_MONTHS, min(MAX_MONTHS, months))
 
         except Exception as exc:

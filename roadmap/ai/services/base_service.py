@@ -45,6 +45,26 @@ class BaseAIService:
         )
         print(f"Job {'created' if created else 'updated'} for user {user.id} (type={job_type})")
         return job, created
+
+    def create_job(self, user, job_type: str, input_data: dict, metadata: dict | None = None):
+        """
+        Create a fresh AIProcessingJob row for each request.
+        Use this for long-running operations where frontend polls a specific job id.
+        """
+        print("Starting fresh job creation...")
+        with transaction.atomic():
+            job = AIProcessingJob.objects.create(
+                user=user,
+                job_type=job_type,
+                input_data=input_data or {},
+                metadata=metadata or {},
+                status="pending",
+                error_message="",
+                progress_percentage=0,
+            )
+        logger.info("Fresh job created for user %s (type=%s)", user.id, job_type)
+        print(f"Fresh job created for user {user.id} (type={job_type})")
+        return job
             
         
         
