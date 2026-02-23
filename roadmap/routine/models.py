@@ -328,15 +328,18 @@ class HabitTracker(models.Model):
         return f"{self.user.email} - {self.icon} {self.name}"
 
     def should_include_today(self) -> bool:
+        return self.should_include_on_date(timezone.localdate())
+
+    def should_include_on_date(self, target_date) -> bool:
         if not self.is_active:
             return False
-        today = timezone.now().weekday()  # 0=Monday, 6=Sunday
+        weekday = target_date.weekday()  # 0=Monday, 6=Sunday
         if self.frequency == 'daily':
             return True
         elif self.frequency == 'weekdays':
-            return today < 5
+            return weekday < 5
         elif self.frequency == 'custom' and self.custom_days:
-            return today in self.custom_days
+            return weekday in self.custom_days
         return False
 
     def record_completion(self, date):

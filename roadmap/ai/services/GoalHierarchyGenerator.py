@@ -4,6 +4,7 @@ from ai.utils.parsers import ResponseParser, MilestoneParser
 from ai.utils.formatters import MileStoneFormatter
 from datetime import timedelta
 from ai.prompts.GoalHierarchyGeneratorPrompts import GoalHierarchyGeneratorPrompts
+from ai.utils.validators import OutputValidator
 import json
 import logging
 from typing import Any
@@ -221,7 +222,31 @@ class GoalHierarchyGenerator(BaseAIService):
                 "subgoals_total":   total_subgoals,
                 "tasks_total":      total_tasks,
             }
-            output_data = {"milestones": all_milestones_data, "stats": stats}
+            timeline_days = None
+            try:
+                start = goal_data.get("start_date")
+                target = goal_data.get("target_date")
+                if isinstance(start, str):
+                    start = datetime.strptime(start, "%Y-%m-%d").date()
+                if isinstance(target, str):
+                    target = datetime.strptime(target, "%Y-%m-%d").date()
+                if start and target:
+                    timeline_days = max(1, (target - start).days + 1)
+            except Exception:
+                timeline_days = None
+
+            quality_assessment = OutputValidator.assess_hierarchy_quality(
+                hierarchy={"milestones": all_milestones_data},
+                timeline_days=timeline_days,
+                experience_level=(user_context or {}).get("experience_level", "beginner"),
+                constraints=(user_context or {}).get("constraints", []),
+            )
+
+            output_data = {
+                "milestones": all_milestones_data,
+                "stats": stats,
+                "quality_assessment": quality_assessment,
+            }
 
             # FIX: Use mark_completed() — sets status, output_data, timestamps atomically
             job.mark_completed(
@@ -241,7 +266,8 @@ class GoalHierarchyGenerator(BaseAIService):
                 "message": (
                     f"Generated {stats['milestones_total']} milestones, "
                     f"{stats['subgoals_total']} subgoals, "
-                    f"{stats['tasks_total']} tasks."
+                    f"{stats['tasks_total']} tasks. "
+                    f"Quality score: {quality_assessment.get('overall_score', 0)}."
                 ),
             }
 

@@ -102,12 +102,21 @@ Your task:
 - Break goals into clear, actionable steps
 - Consider time, skills, money, and constraints
 - Balance career, finance, health, and personal growth
+- Ensure sequence from foundation -> practice -> review -> assessment
+- Keep workload realistic for the user's timeline and daily time availability
 
 Rules:
 - Be realistic and practical
 - Avoid vague advice
 - Respond with VALID JSON ONLY
 - Follow the provided schema exactly
+- Include self-check reasoning internally, then output only final JSON
+- Optimize for measurable outputs and daily execution feasibility
+
+Feedback loop policy:
+- If prior user feedback indicates tasks were too hard, reduce task size/scope.
+- If tasks were too easy, increase depth without breaking timeline realism.
+- If tasks were skipped for time constraints, prefer shorter high-impact tasks.
 """
 
     # ========================================

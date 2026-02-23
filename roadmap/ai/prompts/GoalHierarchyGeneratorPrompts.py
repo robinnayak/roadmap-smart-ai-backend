@@ -4,6 +4,9 @@ class GoalHierarchyGeneratorPrompts(BasePrompt):
 
     def get_subgoal_generating_prompt(self, milestone_data, goal_data):
         prompt = f"""
+Goal: {goal_data.get('title', 'Unknown')}
+Goal Description: {goal_data.get('description', '')}
+Goal Target Date: {goal_data.get('target_date', '')}
 Milestone: {milestone_data.get('title', 'Unknown')}
 Description: {milestone_data.get('description', '')}
 
@@ -19,6 +22,15 @@ Each weekly subgoal should:
 2. Build on the previous week's progress
 3. Be achievable in 5-7 days
 4. Include clear success criteria
+5. Use concrete outcomes, not vague phrases
+
+Quality requirements:
+- Specific and actionable: each subgoal must describe exactly what will be done.
+- Proper sequence: Week N must depend on Week N-1 outputs.
+- Timeline realism: avoid overloading any week.
+- Skill alignment: keep complexity realistic for user context implied by the goal text.
+
+Return ONLY valid JSON (no markdown, no explanation).
 
 IMPORTANT: Return JSON in this EXACT format:
 {{
@@ -31,9 +43,17 @@ IMPORTANT: Return JSON in this EXACT format:
       "display_order": 1,
       "estimated_duration_days": 7,
       "priority": "high/medium/low",
-      "ai_reasoning": "Why this week's focus is important"
+      "ai_reasoning": "Why this week's focus is important",
+      "success_criteria": ["Concrete output 1", "Concrete output 2"]
     }}
-  ]
+  ],
+  "quality_check": {{
+    "is_specific_and_actionable": true,
+    "is_sequenced": true,
+    "is_timeline_realistic": true,
+    "is_skill_aligned": true,
+    "notes": "Short note"
+  }}
 }}
 """
         return prompt
@@ -43,8 +63,9 @@ IMPORTANT: Return JSON in this EXACT format:
 Weekly Subgoal: {subgoal_data.get('title', 'Unknown')}
 Description: {subgoal_data.get('description', '')}
 Learning Objectives: {subgoal_data.get('learning_objectives', [])}
+Milestone: {milestone_data.get('title', 'Unknown')}
 
-Create 5 daily tasks (Monday-Friday) for this weekly subgoal:
+Create 7 daily tasks (Monday-Sunday) for this weekly subgoal:
 
 Daily Structure:
 - Monday: Setup, Planning & Foundation
@@ -55,11 +76,21 @@ Daily Structure:
 
 Each daily task should:
 1. Be specific and actionable
-2. Take 1-3 hours to complete
+2. Take 15-180 minutes (avoid unrealistic duration)
 3. Have clear instructions
-4. Specify task type (learning/practice/execution/review)
+4. Specify task type (learning/practice/project/review/assessment)
 5. Include estimated time
 6. Include preferred time slot: morning/afternoon/evening
+7. Be realistically completable in a single day
+8. Maintain progressive difficulty through the week
+
+Quality requirements:
+- Avoid vague tasks like "work on it" or "learn more".
+- Use action verbs in title (Build/Create/Practice/Review/Analyze/etc).
+- Ensure sequence across day_order is logically progressive.
+- Include at least one review or assessment task by day 6 or 7.
+
+Return ONLY valid JSON (no markdown, no explanation).
 
 IMPORTANT: Return JSON in this EXACT format:
 {{
@@ -68,7 +99,7 @@ IMPORTANT: Return JSON in this EXACT format:
       "title": "[Verb] [Specific Action]",
       "description": "Detailed description of what to do",
       "instructions": "Step-by-step instructions",
-      "task_type": "learning/practice/execution/review",
+      "task_type": "learning/practice/project/review/assessment",
       "resources": ["Resource 1", "Resource 2"],
       "estimated_duration_minutes": 120,
       "preferred_time_slot": "morning/afternoon/evening",
@@ -77,7 +108,14 @@ IMPORTANT: Return JSON in this EXACT format:
       "priority": "high/medium/low",
       "ai_reasoning": "Why this task is important"
     }}
-  ]
+  ],
+  "quality_check": {{
+    "is_specific_and_actionable": true,
+    "is_sequenced": true,
+    "is_timeline_realistic": true,
+    "is_skill_aligned": true,
+    "notes": "Short note"
+  }}
 }}
 """
         return prompt
@@ -96,6 +134,14 @@ Each milestone should:
 2. Build on previous milestones
 3. Have clear, measurable success criteria
 4. Be specific and actionable
+5. Fit within the target timeline and avoid overload
+
+Quality requirements:
+- Milestone order must be dependency-aware.
+- Scope must be realistic per month.
+- Must connect clearly to the goal outcome.
+
+Return ONLY valid JSON (no markdown, no explanation).
 
 IMPORTANT: Return JSON in this EXACT format:
 {{
@@ -110,7 +156,14 @@ IMPORTANT: Return JSON in this EXACT format:
       "estimated_duration_days": 30,
       "ai_reasoning": "Why this milestone comes first"
     }}
-  ]
+  ],
+  "quality_check": {{
+    "is_specific_and_actionable": true,
+    "is_sequenced": true,
+    "is_timeline_realistic": true,
+    "is_skill_aligned": true,
+    "notes": "Short note"
+  }}
 }}
 """
         return prompt

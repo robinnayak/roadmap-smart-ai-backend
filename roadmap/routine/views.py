@@ -134,6 +134,12 @@ class GenerateDailyTaskListAPIView(APIView):
 
     def post(self, request):
         date_str = request.data.get("date")
+        force = str(request.data.get("force", "false")).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         try:
             target_date = (
                 datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -146,9 +152,15 @@ class GenerateDailyTaskListAPIView(APIView):
                 status=http_status.HTTP_400_BAD_REQUEST,
             )
 
-        task_list, created = get_or_create_today_task_list(request.user, target_date)
+        task_list, created = get_or_create_today_task_list(
+            request.user, target_date, force_regenerate=force
+        )
         serializer = DailyTaskListSerializer(task_list, context={"request": request})
-        message = "Daily task list generated." if created else f"Task list already exists for {target_date}."
+        message = (
+            "Daily task list generated."
+            if created
+            else f"Task list already exists for {target_date}."
+        )
         response_status = http_status.HTTP_201_CREATED if created else http_status.HTTP_200_OK
         return Response({"message": message, "task_list": serializer.data}, status=response_status)
 

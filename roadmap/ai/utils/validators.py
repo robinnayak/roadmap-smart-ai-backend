@@ -118,3 +118,115 @@ class OutputValidator:
                 all_errors[f"goal_{i}"] = errors
         
         return (len(all_errors) == 0, all_errors)
+
+    @staticmethod
+    def assess_hierarchy_quality(
+        hierarchy: Dict[str, Any],
+        timeline_days: int | None = None,
+        experience_level: str = "beginner",
+        constraints: List[str] | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Heuristic quality report for generated hierarchy.
+        Returns scores and issues for:
+        - specificity/actionability
+        - sequencing
+        - realism vs timeline
+        - alignment with user constraints/skill level
+        """
+        constraints = [c.lower() for c in (constraints or [])]
+        milestones = hierarchy.get("milestones", []) or []
+        tasks = []
+        sequencing_ok = True
+
+        for milestone in milestones:
+            subgoals = milestone.get("subgoals", []) or []
+            previous_week = 0
+            for sg in subgoals:
+                week = int(sg.get("subgoal_data", {}).get("week_number", 0) or 0)
+                if week and previous_week and week < previous_week:
+                    sequencing_ok = False
+                if week:
+                    previous_week = week
+                tasks.extend(sg.get("tasks", []) or [])
+
+        action_verbs = (
+            "build", "create", "write", "study", "practice", "review", "design",
+            "implement", "analyze", "test", "plan", "record", "track", "document",
+        )
+        specific_tasks = 0
+        realistic_tasks = 0
+        aligned_tasks = 0
+
+        for task in tasks:
+            title = (task.get("title") or "").strip().lower()
+            description = (task.get("description") or "").strip().lower()
+            minutes = int(task.get("estimated_duration_minutes", 0) or 0)
+            task_type = (task.get("task_type") or "").strip().lower()
+
+            has_verb = any(title.startswith(v + " ") for v in action_verbs)
+            has_detail = len(description) >= 30
+            if has_verb and has_detail and task_type in {"learning", "practice", "project", "review", "assessment"}:
+                specific_tasks += 1
+
+            # Basic realism guard by skill level.
+            if experience_level.lower() in {"beginner", "novice"}:
+                if 15 <= minutes <= 150:
+                    realistic_tasks += 1
+            else:
+                if 15 <= minutes <= 240:
+                    realistic_tasks += 1
+
+            # Basic alignment check for common constraints.
+            if "limited time" in constraints and minutes > 120:
+                continue
+            if "low energy" in constraints and minutes > 90:
+                continue
+            aligned_tasks += 1
+
+        total_tasks = len(tasks)
+        specificity_score = round((specific_tasks / max(total_tasks, 1)) * 100)
+        realism_score = round((realistic_tasks / max(total_tasks, 1)) * 100)
+        alignment_score = round((aligned_tasks / max(total_tasks, 1)) * 100)
+
+        timeline_score = 100
+        if timeline_days:
+            # Expect at most 1 task per day on average for the hierarchy horizon.
+            expected_max_tasks = max(1, timeline_days)
+            if total_tasks > expected_max_tasks:
+                overflow = total_tasks - expected_max_tasks
+                timeline_score = max(0, 100 - round((overflow / expected_max_tasks) * 100))
+
+        overall = round(
+            (specificity_score * 0.35)
+            + (realism_score * 0.25)
+            + (alignment_score * 0.2)
+            + ((100 if sequencing_ok else 40) * 0.1)
+            + (timeline_score * 0.1)
+        )
+
+        issues: List[str] = []
+        if specificity_score < 70:
+            issues.append("Low specificity/actionability in tasks.")
+        if not sequencing_ok:
+            issues.append("Subgoal sequencing is not strictly progressive.")
+        if realism_score < 70:
+            issues.append("Task duration realism is weak for user skill level.")
+        if alignment_score < 70:
+            issues.append("Tasks do not align well with user constraints.")
+        if timeline_score < 70:
+            issues.append("Generated workload appears unrealistic for the timeline.")
+
+        return {
+            "overall_score": overall,
+            "specificity_score": specificity_score,
+            "sequencing_score": 100 if sequencing_ok else 40,
+            "realism_score": realism_score,
+            "alignment_score": alignment_score,
+            "timeline_score": timeline_score,
+            "issues": issues,
+            "feedback_hint": (
+                "Collect user feedback on skipped/delayed tasks and feed those "
+                "patterns back into prompts for future generations."
+            ),
+        }

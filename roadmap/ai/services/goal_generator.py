@@ -6,11 +6,12 @@
 
 from typing import Dict, Any, List
 from .base_service import BaseAIService
-from roadmap.ai.prompts.system_prompts import SystemPrompts
-from roadmap.ai.prompts.personalization.user_context_prompts import UserContextPrompt
-from roadmap.ai.utils.parsers import ResponseParser
-from roadmap.ai.utils.validators import OutputValidator
-from roadmap.ai.utils.formatters import ResponseFormatter
+from ai.prompts.system_prompts import SystemPrompts
+from ai.prompts.goal_generator import GoalGeneratorPrompts
+from ai.prompts.personalization.user_context_prompts import UserContextPrompt
+from ai.utils.parsers import ResponseParser
+from ai.utils.validators import OutputValidator
+from ai.utils.formatters import ResponseFormatter
 import logging
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,11 @@ class GoalGenerator(BaseAIService):
         try:
             # Build context-aware prompt
             prompt = self._build_roadmap_prompt(user_goal_input, structured_situation)
-            system_prompt = SystemPrompts.get_prompt('goal_generation')
+            system_prompt = (
+                SystemPrompts.get_prompt('goal_generation')
+                + "\n\n"
+                + GoalGeneratorPrompts.get_roadmap_prompt_template()
+            )
             
             # Generate with AI
             logger.info(f"Generating roadmap for user {user.email}")
