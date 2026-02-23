@@ -13,6 +13,7 @@ from .views import (
     CompleteTaskItemAPIView,
     SkipTaskItemAPIView,
     WeekOverviewAPIView,
+    ProgressOverviewAPIView,
     DisciplineStreakAPIView,
     HabitTrackerAPIView,
     HabitDetailAPIView,
@@ -33,6 +34,9 @@ urlpatterns = [
     
     # Week overview
     path('week/', WeekOverviewAPIView.as_view(), name='week-overview'),
+
+    # Progress analytics report
+    path('progress/', ProgressOverviewAPIView.as_view(), name='progress-overview'),
     
     # Discipline streak
     path('streak/', DisciplineStreakAPIView.as_view(), name='discipline-streak'),
