@@ -680,9 +680,45 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
             display_order=index - 1,
             estimated_duration_minutes=data.get("estimated_duration_minutes", 60),
             scheduled_date=data.get("scheduled_date") or None,
+            preferred_time_slot=self._normalize_time_slot(data, index),
             is_ai_generated=True,
             ai_reasoning=data.get("reasoning", data.get("ai_reasoning", "")),
         )
+
+    @staticmethod
+    def _normalize_time_slot(task_data: dict, index: int) -> str:
+        """
+        Resolve AI-provided time slot into one of:
+        morning | afternoon | evening.
+        """
+        allowed = {"morning", "afternoon", "evening"}
+        for key in ("preferred_time_slot", "time_slot", "suggested_time_slot", "time_of_day"):
+            value = task_data.get(key)
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in allowed:
+                    return normalized
+
+        day_order = task_data.get("day_order")
+        if isinstance(day_order, int):
+            if day_order <= 2:
+                return "morning"
+            if day_order <= 4:
+                return "afternoon"
+            return "evening"
+
+        text = f"{task_data.get('title', '')} {task_data.get('description', '')}".lower()
+        if any(word in text for word in ("morning", "am", "breakfast", "wake", "early")):
+            return "morning"
+        if any(word in text for word in ("evening", "night", "pm", "journal", "reflect")):
+            return "evening"
+
+        # Index fallback for stable distribution if AI omits the field.
+        if index <= 2:
+            return "morning"
+        if index <= 4:
+            return "afternoon"
+        return "evening"
         
         
     @staticmethod

@@ -105,6 +105,7 @@ class TaskSerializer(serializers.ModelSerializer):
             "status",
             "scheduled_date",
             "scheduled_time",
+            "preferred_time_slot",
             "estimated_duration_minutes",
             "actual_duration_minutes",
             "completed_at",
@@ -139,6 +140,7 @@ class TaskListSerializer(serializers.ModelSerializer):
             "task_type",
             "scheduled_date",
             "scheduled_time",
+            "preferred_time_slot",
             "estimated_duration_minutes",
             "display_order",
         ]

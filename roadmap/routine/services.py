@@ -6,7 +6,7 @@ Routine selection logic — pure database queries, no AI needed for task picking
 AI is only used to generate the daily motivation + mantra (two short strings).
 """
 import logging
-from datetime import date
+from datetime import date, time
 
 from django.db import transaction
 
@@ -14,6 +14,26 @@ from goal.models import Task, Goal
 from routine.models import DailyTaskList, DailyTaskItem, HabitTracker, DisciplineStreak
 
 logger = logging.getLogger(__name__)
+
+
+def _default_time_for_slot(slot: str | None):
+    mapping = {
+        "morning": time(hour=8, minute=0),
+        "afternoon": time(hour=14, minute=0),
+        "evening": time(hour=19, minute=0),
+    }
+    return mapping.get(slot or "", None)
+
+
+def _infer_time_slot_from_text(*values: str, fallback: str = "morning") -> str:
+    text = " ".join(v for v in values if isinstance(v, str)).lower()
+    if any(word in text for word in ("morning", "am", "breakfast", "wake", "early")):
+        return "morning"
+    if any(word in text for word in ("evening", "night", "pm", "journal", "reflect")):
+        return "evening"
+    if any(word in text for word in ("afternoon", "noon", "midday", "lunch")):
+        return "afternoon"
+    return fallback
 
 
 def get_or_create_today_task_list(user, target_date: date) -> tuple[DailyTaskList, bool]:
@@ -95,8 +115,13 @@ def get_or_create_today_task_list(user, target_date: date) -> tuple[DailyTaskLis
         items_to_create = []
         order = 0
 
-        # Habits first (morning anchors)
+        # Habits first
         for habit in habits:
+            habit_slot = _infer_time_slot_from_text(
+                habit.name,
+                habit.description,
+                fallback="morning",
+            )
             items_to_create.append(
                 DailyTaskItem(
                     task_list=task_list,
@@ -108,6 +133,8 @@ def get_or_create_today_task_list(user, target_date: date) -> tuple[DailyTaskLis
                     icon=habit.icon,
                     priority=habit.priority,
                     estimated_minutes=habit.estimated_minutes,
+                    time_slot=habit_slot,
+                    suggested_time=_default_time_for_slot(habit_slot),
                     why_important=habit.why_important,
                     display_order=order,
                 )
@@ -117,6 +144,11 @@ def get_or_create_today_task_list(user, target_date: date) -> tuple[DailyTaskLis
         # Goal tasks next
         for task in goal_tasks:
             goal = task.subgoal.milestone.goal  # already in memory via select_related
+            task_slot = task.preferred_time_slot or _infer_time_slot_from_text(
+                task.title,
+                task.description,
+                fallback="afternoon",
+            )
             items_to_create.append(
                 DailyTaskItem(
                     task_list=task_list,
@@ -128,6 +160,8 @@ def get_or_create_today_task_list(user, target_date: date) -> tuple[DailyTaskLis
                     icon="🎯",
                     priority=task.priority,
                     estimated_minutes=task.estimated_duration_minutes,
+                    time_slot=task_slot,
+                    suggested_time=task.scheduled_time or _default_time_for_slot(task_slot),
                     why_important=f"Part of: {goal.title}",
                     display_order=order,
                 )

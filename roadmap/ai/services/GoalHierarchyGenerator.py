@@ -351,7 +351,8 @@ class GoalHierarchyGenerator(BaseAIService):
                     "Create exactly 7 specific, actionable tasks (one per day of the week). "
                     "Each task must include: title, description (what exactly to do), "
                     "task_type (learning/practice/project/review/assessment), "
-                    "and estimated_duration_minutes. "
+                    "estimated_duration_minutes, and preferred_time_slot "
+                    "(morning/afternoon/evening). "
                     "Respond with valid JSON containing a 'tasks' array. No prose."
                 ),
             )

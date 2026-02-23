@@ -241,16 +241,27 @@ confidence'}
         return False
 
     def update_progress(self):
-        """Recalculate progress from milestones and bubble it up."""
+        """
+        Recalculate progress from milestone progress and bubble it up.
+
+        Uses the average of milestone.progress_percentage so partial milestone
+        work is reflected at the goal level (not only fully completed milestones).
+        """
         milestones = self.milestones.all()
         if not milestones.exists():
             return
-        completed = milestones.filter(status="completed").count()
-        self.progress_percentage = int((completed / milestones.count()) * 100)
+
+        total = milestones.count()
+        total_progress = sum(m.progress_percentage or 0 for m in milestones)
+        self.progress_percentage = int(total_progress / total) if total else 0
+
         if self.progress_percentage == 100:
             self.status = "completed"
         elif self.progress_percentage > 0:
             self.status = "in_progress"
+        elif self.status == "completed":
+            self.status = "not_started"
+
         self.save(update_fields=["progress_percentage", "status", "updated_at"])
 
 
@@ -738,6 +749,11 @@ class Task(models.Model):
         ("review", "Review"),  # Revision / reflection
         ("assessment", "Assessment"),  # Quiz / test / self-check
     ]
+    TIME_SLOT_CHOICES = [
+        ("morning", "Morning"),
+        ("afternoon", "Afternoon"),
+        ("evening", "Evening"),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     subgoal = models.ForeignKey(SubGoal, on_delete=models.CASCADE, related_name="tasks")
@@ -780,6 +796,13 @@ class Task(models.Model):
     )
     scheduled_time = models.TimeField(
         null=True, blank=True, help_text="Example: 09:00 AM"
+    )
+    preferred_time_slot = models.CharField(
+        max_length=10,
+        choices=TIME_SLOT_CHOICES,
+        null=True,
+        blank=True,
+        help_text="Preferred time window for this task: morning/afternoon/evening.",
     )
     estimated_duration_minutes = models.PositiveIntegerField(
         default=60, help_text="Example: 120 minutes (2 hours)"

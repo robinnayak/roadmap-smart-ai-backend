@@ -60,7 +60,7 @@ class DailyTaskItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'item_type', 'title', 'description', 'icon',
             'priority', 'estimated_minutes', 'actual_minutes',
-            'is_completed', 'completed_at', 'suggested_time',
+            'is_completed', 'completed_at', 'time_slot', 'suggested_time',
             'is_skipped', 'skip_reason', 'completion_notes',
             'why_important', 'display_order', 'points_earned', 'primary_category',
             'related_goal_info', 'habit_info',
@@ -105,10 +105,10 @@ class DailyTaskItemSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = DailyTaskItem
         fields = [
-            'id', 'item_type', 'title', 'icon',
+            'id', 'item_type', 'title', 'description', 'icon',
             'priority', 'estimated_minutes',
             'is_completed', 'is_skipped', 'display_order',
-            'primary_category',
+            'primary_category', 'time_slot',
         ]
 
     def get_primary_category(self, obj):
@@ -142,6 +142,7 @@ class DailyTaskListSerializer(serializers.ModelSerializer):
             'daily_motivation', 'daily_mantra',
             'created_at', 'updated_at', 'completed_at',
             'tasks', 'high_priority_tasks', 'next_task',
+            
         ]
         read_only_fields = [
             'id', 'status', 'total_tasks', 'completed_tasks',

@@ -59,6 +59,7 @@ Each daily task should:
 3. Have clear instructions
 4. Specify task type (learning/practice/execution/review)
 5. Include estimated time
+6. Include preferred time slot: morning/afternoon/evening
 
 IMPORTANT: Return JSON in this EXACT format:
 {{
@@ -70,6 +71,7 @@ IMPORTANT: Return JSON in this EXACT format:
       "task_type": "learning/practice/execution/review",
       "resources": ["Resource 1", "Resource 2"],
       "estimated_duration_minutes": 120,
+      "preferred_time_slot": "morning/afternoon/evening",
       "day_order": 1,
       "display_order": 1,
       "priority": "high/medium/low",

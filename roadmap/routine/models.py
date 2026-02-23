@@ -124,6 +124,11 @@ class DailyTaskItem(models.Model):
         ('medium', 'Medium'),
         ('low',    'Low'),
     ]
+    TIME_SLOT_CHOICES = [
+        ('morning', 'Morning'),
+        ('afternoon', 'Afternoon'),
+        ('evening', 'Evening'),
+    ]
     # Numeric weight used for ordering (higher = more urgent)
     PRIORITY_ORDER = {'high': 3, 'medium': 2, 'low': 1}
 
@@ -156,6 +161,7 @@ class DailyTaskItem(models.Model):
 
     is_completed     = models.BooleanField(default=False)
     completed_at     = models.DateTimeField(null=True, blank=True)
+    time_slot        = models.CharField(max_length=10, choices=TIME_SLOT_CHOICES, null=True, blank=True)
     suggested_time   = models.TimeField(null=True, blank=True)
 
     is_skipped       = models.BooleanField(default=False)
@@ -183,6 +189,7 @@ class DailyTaskItem(models.Model):
         indexes = [
             models.Index(fields=['task_list', 'is_completed']),
             models.Index(fields=['task_list', 'priority']),
+            models.Index(fields=['task_list', 'time_slot']),
         ]
 
     def __str__(self):
