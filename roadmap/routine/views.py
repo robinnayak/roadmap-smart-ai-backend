@@ -4,7 +4,7 @@
 import logging
 from datetime import datetime, timedelta
 
-from django.db.models import Sum
+from django.db.models import Sum, Count, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status as http_status
@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from goal.models import Goal, Milestone
+from goal.models import Goal, Milestone, Task
 from routine.models import DailyTaskList, DailyTaskItem, HabitTracker, DisciplineStreak
 from routine.serializers import (
     DailyTaskListSerializer, DailyTaskListSummarySerializer,
@@ -276,36 +276,115 @@ class ProgressOverviewAPIView(APIView):
 
     def get(self, request):
         period = request.query_params.get("period", "week").lower()
+        selected_date_str = request.query_params.get("date")
+        today = timezone.localdate()
+        if selected_date_str:
+            try:
+                target_date = datetime.strptime(selected_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return Response(
+                    {"error": "Invalid date format. Use YYYY-MM-DD."},
+                    status=http_status.HTTP_400_BAD_REQUEST,
+                )
+            if target_date > today:
+                return Response(
+                    {"error": "Date cannot be in the future."},
+                    status=http_status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            target_date = today
+
         window_days = {
             "week": 7,
             "month": 30,
             "year": 365,
             "all": None,
         }.get(period, 7)
-
-        today = timezone.localdate()
-        start_date = today - timedelta(days=window_days - 1) if window_days else None
+        start_date = target_date - timedelta(days=window_days - 1) if window_days else None
 
         # --- Goals overview ---------------------------------------------------
-        goals_qs = Goal.objects.filter(user=request.user).exclude(status="cancelled")
-        goals = list(
-            goals_qs.values("id", "status", "progress_percentage", "primary_category")
+        goals_qs = Goal.objects.filter(user=request.user).exclude(status="cancelled").values(
+            "id", "primary_category"
         )
+        goals = list(goals_qs)
+
+        task_progress_rows = (
+            Task.objects.filter(subgoal__milestone__goal__user=request.user)
+            .values("subgoal__milestone__goal_id")
+            .annotate(
+                total_tasks=Count("id"),
+                completed_tasks=Count(
+                    "id",
+                    filter=Q(completed_at__isnull=False, completed_at__date__lte=target_date),
+                ),
+            )
+        )
+        task_progress_map = {
+            str(row["subgoal__milestone__goal_id"]): row for row in task_progress_rows
+        }
+
+        milestone_rows = (
+            Milestone.objects.filter(goal__user=request.user)
+            .values("goal_id")
+            .annotate(
+                total_milestones=Count("id"),
+                completed_milestones=Count(
+                    "id",
+                    filter=Q(status="completed", completed_date__isnull=False, completed_date__lte=target_date),
+                ),
+            )
+        )
+        milestone_map = {str(row["goal_id"]): row for row in milestone_rows}
+
+        goal_snapshots = []
+        for goal in goals:
+            goal_id = str(goal["id"])
+            task_metrics = task_progress_map.get(goal_id)
+            milestone_metrics = milestone_map.get(goal_id)
+
+            progress_as_of = 0
+            if task_metrics and (task_metrics.get("total_tasks") or 0) > 0:
+                progress_as_of = round(
+                    (task_metrics.get("completed_tasks", 0) / task_metrics.get("total_tasks", 1)) * 100
+                )
+            elif milestone_metrics and (milestone_metrics.get("total_milestones") or 0) > 0:
+                progress_as_of = round(
+                    (milestone_metrics.get("completed_milestones", 0) / milestone_metrics.get("total_milestones", 1)) * 100
+                )
+
+            if progress_as_of == 100:
+                status_as_of = "completed"
+            elif progress_as_of > 0:
+                status_as_of = "in_progress"
+            else:
+                status_as_of = "not_started"
+
+            goal_snapshots.append(
+                {
+                    "id": goal_id,
+                    "primary_category": goal["primary_category"],
+                    "progress_percentage": progress_as_of,
+                    "status": status_as_of,
+                }
+            )
+
         total_goals = len(goals)
         overall_progress = (
-            round(sum(g["progress_percentage"] or 0 for g in goals) / total_goals)
+            round(sum(g["progress_percentage"] or 0 for g in goal_snapshots) / total_goals)
             if total_goals
             else 0
         )
-        total_goals_completed = sum(1 for g in goals if g["status"] == "completed")
+        total_goals_completed = sum(1 for g in goal_snapshots if g["status"] == "completed")
         active_goals = sum(
-            1 for g in goals if g["status"] not in {"completed", "cancelled"}
+            1 for g in goal_snapshots if g["status"] not in {"completed", "cancelled"}
         )
 
         # --- Task success rate -----------------------------------------------
         task_lists_qs = DailyTaskList.objects.filter(user=request.user)
         if start_date:
-            task_lists_qs = task_lists_qs.filter(date__gte=start_date, date__lte=today)
+            task_lists_qs = task_lists_qs.filter(date__gte=start_date, date__lte=target_date)
+        else:
+            task_lists_qs = task_lists_qs.filter(date__lte=target_date)
 
         task_totals = task_lists_qs.aggregate(
             total=Sum("total_tasks"),
@@ -340,8 +419,10 @@ class ProgressOverviewAPIView(APIView):
         ).select_related("habit", "task_list")
         if start_date:
             habit_items_qs = habit_items_qs.filter(
-                task_list__date__gte=start_date, task_list__date__lte=today
+                task_list__date__gte=start_date, task_list__date__lte=target_date
             )
+        else:
+            habit_items_qs = habit_items_qs.filter(task_list__date__lte=target_date)
 
         habit_aggregate = {}
         for item in habit_items_qs:
@@ -406,7 +487,7 @@ class ProgressOverviewAPIView(APIView):
         # --- Category progress ------------------------------------------------
         category_stats = []
         for category in ("financial", "career", "health", "personal"):
-            category_goals = [g for g in goals if g["primary_category"] == category]
+            category_goals = [g for g in goal_snapshots if g["primary_category"] == category]
             total = len(category_goals)
             completed = sum(1 for g in category_goals if g["status"] == "completed")
             in_progress = sum(1 for g in category_goals if g["status"] == "in_progress")
@@ -431,9 +512,9 @@ class ProgressOverviewAPIView(APIView):
             )
 
         # --- Weekly chart -----------------------------------------------------
-        weekly_start = today - timedelta(days=6)
+        weekly_start = target_date - timedelta(days=6)
         weekly_task_lists = DailyTaskList.objects.filter(
-            user=request.user, date__range=(weekly_start, today)
+            user=request.user, date__range=(weekly_start, target_date)
         )
         weekly_by_date = {item.date: item for item in weekly_task_lists}
         weekly_data = []
@@ -456,13 +537,14 @@ class ProgressOverviewAPIView(APIView):
             goal__user=request.user,
             status="completed",
             completed_date__isnull=False,
+            completed_date__lte=target_date,
         ).order_by("-completed_date")[:4]
 
         for milestone in completed_milestones:
             milestones_payload.append(
                 {
                     "title": milestone.title,
-                    "date": _relative_date_label(milestone.completed_date, today),
+                    "date": _relative_date_label(milestone.completed_date, target_date),
                     "icon": "🏆",
                     "sortDate": milestone.completed_date,
                 }
@@ -472,11 +554,11 @@ class ProgressOverviewAPIView(APIView):
             user=request.user, status="completed"
         ).order_by("-updated_at")[:3]
         for goal in completed_goals_recent:
-            goal_date = goal.updated_at.date()
+            goal_date = min(goal.updated_at.date(), target_date)
             milestones_payload.append(
                 {
                     "title": f"Completed goal: {goal.title}",
-                    "date": _relative_date_label(goal_date, today),
+                    "date": _relative_date_label(goal_date, target_date),
                     "icon": "🎯",
                     "sortDate": goal_date,
                 }
@@ -488,7 +570,7 @@ class ProgressOverviewAPIView(APIView):
                     "title": f"{streak.longest_streak_days}-Day Discipline Streak",
                     "date": "Ongoing",
                     "icon": "🔥",
-                    "sortDate": today,
+                    "sortDate": target_date,
                 }
             )
 
@@ -505,9 +587,9 @@ class ProgressOverviewAPIView(APIView):
         ]
 
         # --- 35-day activity heatmap -----------------------------------------
-        heatmap_start = today - timedelta(days=34)
+        heatmap_start = target_date - timedelta(days=34)
         heatmap_task_lists = DailyTaskList.objects.filter(
-            user=request.user, date__range=(heatmap_start, today)
+            user=request.user, date__range=(heatmap_start, target_date)
         )
         heatmap_by_date = {row.date: row for row in heatmap_task_lists}
         activity_heatmap = []
@@ -522,15 +604,69 @@ class ProgressOverviewAPIView(APIView):
                 }
             )
 
+        # --- Today task tracking sheet ---------------------------------------
+        if target_date == today:
+            selected_task_list, _ = get_or_create_today_task_list(request.user, target_date)
+        else:
+            selected_task_list = DailyTaskList.objects.filter(
+                user=request.user, date=target_date
+            ).first()
+        if selected_task_list:
+            selected_items = (
+                DailyTaskItem.objects.filter(task_list=selected_task_list)
+                .select_related("related_goal")
+                .order_by("display_order")
+            )
+        else:
+            selected_items = []
+
+        today_task_sheet = []
+        for item in selected_items:
+            if item.is_completed:
+                status = "completed"
+            elif item.is_skipped:
+                status = "skipped"
+            else:
+                status = "pending"
+
+            category = "personal"
+            if item.related_goal_id and item.related_goal and item.related_goal.primary_category:
+                category = item.related_goal.primary_category
+
+            today_task_sheet.append(
+                {
+                    "id": str(item.id),
+                    "task": item.title,
+                    "itemType": item.item_type,
+                    "status": status,
+                    "priority": item.priority,
+                    "category": category,
+                    "goalTitle": item.related_goal.title if item.related_goal_id and item.related_goal else None,
+                    "timeSlot": item.time_slot,
+                    "suggestedTime": item.suggested_time.isoformat() if item.suggested_time else None,
+                    "estimatedMinutes": item.estimated_minutes,
+                    "pointsEarned": item.points_earned,
+                }
+            )
+
         return Response(
             {
                 "timePeriod": period if period in {"week", "month", "year", "all"} else "week",
+                "selectedDate": target_date.isoformat(),
+                "hasDataForDate": bool(selected_task_list),
+                "existingDates": [
+                    d.isoformat()
+                    for d in DailyTaskList.objects.filter(user=request.user)
+                    .order_by("-date")
+                    .values_list("date", flat=True)[:120]
+                ],
                 "overallStats": overall_stats,
                 "habitStats": habit_stats,
                 "categoryStats": category_stats,
                 "weeklyData": weekly_data,
                 "milestones": milestones_payload,
                 "activityHeatmap": activity_heatmap,
+                "todayTaskSheet": today_task_sheet,
                 "generatedAt": timezone.now().isoformat(),
             },
             status=http_status.HTTP_200_OK,
