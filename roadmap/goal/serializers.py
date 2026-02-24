@@ -5,6 +5,7 @@ from rest_framework import serializers
 from .models import (
     UserCurrentSituationGoal,
     Goal,
+    CommitmentContract,
     GoalAttributes,
     Milestone,
     SubGoal,
@@ -596,3 +597,37 @@ class GoalDetailSerializer(serializers.ModelSerializer):
             for m in obj.milestones.all()
             for sg in m.subgoals.all()
         )
+
+
+class CommitmentContractSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CommitmentContract
+        fields = [
+            "id",
+            "identity_statement",
+            "signature_name",
+            "cc_email",
+            "goals_snapshot",
+            "deadlines_snapshot",
+            "is_signed",
+            "signed_at",
+            "pdf_url",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "goals_snapshot",
+            "deadlines_snapshot",
+            "is_signed",
+            "signed_at",
+            "pdf_url",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class CommitmentContractSignSerializer(serializers.Serializer):
+    identity_statement = serializers.CharField(max_length=2000)
+    signature_name = serializers.CharField(max_length=255)
+    cc_email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)

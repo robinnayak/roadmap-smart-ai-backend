@@ -27,13 +27,15 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
-from .models import UserCurrentSituationGoal, Goal, Milestone, SubGoal, Task, GoalAttributes
+from .models import UserCurrentSituationGoal, Goal, Milestone, SubGoal, Task, GoalAttributes, CommitmentContract
 from .serializers import (
     GoalSerializer,
     GoalListSerializer,
     MilestoneSerializer,
     SubGoalSerializer,
     TaskSerializer,
+    CommitmentContractSerializer,
+    CommitmentContractSignSerializer,
 )
 from django.utils import timezone
 from ai.models import AIProcessingJob
@@ -45,12 +47,19 @@ import json
 from authentication.models import UserPersonalDetails
 from django.db.models import Prefetch, Count, Avg, Q, Sum
 from django.db import close_old_connections
+from django.db import transaction
 from rest_framework.throttling import UserRateThrottle
 import logging
 
 from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
 from rest_framework.exceptions import NotFound, ValidationError
 from goal.core.response import success_response, error_response, created_response
+from goal.services.commitment_contract import (
+    build_goal_snapshots,
+    generate_contract_pdf_bytes,
+    send_contract_email_via_resend,
+    build_contract_email_html,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1223,6 +1232,168 @@ class TaskDetailApiView(GoalProductionApiView):
             return Response({"error": "Task not found."})
         task.delete()
         return Response({"message": "Task deleted successfully."},status=status.HTTP_204_NO_CONTENT)
+
+
+class CommitmentContractAPIView(APIView):
+    """
+    Commitment contract lifecycle:
+    - GET: fetch signed contract or unsigned preview
+    - PATCH: update draft fields (only before signing)
+    - POST: sign permanently + generate PDF + email via Resend
+    - DELETE: forbidden after signing
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _default_identity_statement(user) -> str:
+        return (
+            f"I am committed to becoming the disciplined version of myself, {user.email}, "
+            "who consistently honors daily actions and long-term goals."
+        )
+
+    def get(self, request):
+        contract = CommitmentContract.objects.filter(user=request.user).first()
+        goals_snapshot, deadlines_snapshot = build_goal_snapshots(request.user)
+
+        if contract:
+            payload = CommitmentContractSerializer(contract).data
+            payload["preview_goals"] = goals_snapshot
+            payload["preview_deadlines"] = deadlines_snapshot
+            return Response(payload, status=status.HTTP_200_OK)
+
+        return Response(
+            {
+                "id": None,
+                "identity_statement": self._default_identity_statement(request.user),
+                "signature_name": request.user.email,
+                "cc_email": None,
+                "goals_snapshot": [],
+                "deadlines_snapshot": [],
+                "is_signed": False,
+                "signed_at": None,
+                "pdf_url": None,
+                "preview_goals": goals_snapshot,
+                "preview_deadlines": deadlines_snapshot,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def patch(self, request):
+        contract, _ = CommitmentContract.objects.get_or_create(
+            user=request.user,
+            defaults={
+                "identity_statement": self._default_identity_statement(request.user),
+                "signature_name": request.user.email,
+            },
+        )
+        if contract.is_signed:
+            return Response(
+                {"detail": "Signed contract cannot be modified."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = CommitmentContractSerializer(contract, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request):
+        sign_serializer = CommitmentContractSignSerializer(data=request.data)
+        sign_serializer.is_valid(raise_exception=True)
+
+        contract, _ = CommitmentContract.objects.get_or_create(
+            user=request.user,
+            defaults={
+                "identity_statement": self._default_identity_statement(request.user),
+                "signature_name": request.user.email,
+            },
+        )
+        if contract.is_signed:
+            return Response(
+                {"detail": "Contract already signed and immutable."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        goals_snapshot, deadlines_snapshot = build_goal_snapshots(request.user)
+        if not goals_snapshot:
+            return Response(
+                {"detail": "At least one goal is required before signing."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        identity_statement = sign_serializer.validated_data["identity_statement"]
+        signature_name = sign_serializer.validated_data["signature_name"]
+        cc_email = sign_serializer.validated_data.get("cc_email")
+        signed_at = timezone.now()
+        signed_at_display = signed_at.strftime("%Y-%m-%d %H:%M UTC")
+
+        try:
+            pdf_bytes = generate_contract_pdf_bytes(
+                user_name=request.user.email,
+                signed_at=signed_at_display,
+                identity_statement=identity_statement,
+                signature_name=signature_name,
+                goals_snapshot=goals_snapshot,
+            )
+        except Exception as exc:
+            return Response(
+                {"detail": f"Failed to generate contract PDF: {str(exc)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        with transaction.atomic():
+            contract.identity_statement = identity_statement
+            contract.signature_name = signature_name
+            contract.cc_email = cc_email
+            contract.goals_snapshot = goals_snapshot
+            contract.deadlines_snapshot = deadlines_snapshot
+            contract.is_signed = True
+            contract.signed_at = signed_at
+            contract.pdf_url = f"resend://commitment-contracts/{contract.id}"
+            contract.save()
+
+        email_delivery = "sent"
+        email_error = None
+        try:
+            email_html = build_contract_email_html(
+                user_name=request.user.email,
+                signed_at_display=signed_at_display,
+                goals_snapshot=goals_snapshot,
+            )
+            filename = f"commitment-contract-{request.user.id}.pdf"
+            send_contract_email_via_resend(
+                to_email=request.user.email,
+                cc_email=cc_email,
+                subject="Your Signed Roadmap Commitment Contract",
+                html_content=email_html,
+                attachment_filename=filename,
+                attachment_bytes=pdf_bytes,
+            )
+        except Exception as exc:
+            logger.exception("Commitment contract email delivery failed for user %s", request.user.id)
+            email_delivery = "failed"
+            email_error = str(exc)
+
+        payload = CommitmentContractSerializer(contract).data
+        payload["email_delivery"] = email_delivery
+        if email_error:
+            payload["email_error"] = email_error
+
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+    def delete(self, request):
+        contract = CommitmentContract.objects.filter(user=request.user).first()
+        if not contract:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        if contract.is_signed:
+            return Response(
+                {"detail": "Signed contract cannot be deleted."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        contract.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
     

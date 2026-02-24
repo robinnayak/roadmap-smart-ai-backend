@@ -265,6 +265,41 @@ confidence'}
         self.save(update_fields=["progress_percentage", "status", "updated_at"])
 
 
+class CommitmentContract(models.Model):
+    """
+    One immutable commitment contract per user after signing.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        "authentication.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="commitment_contract",
+    )
+
+    identity_statement = models.TextField()
+    signature_name = models.CharField(max_length=255)
+    cc_email = models.EmailField(blank=True, null=True)
+
+    goals_snapshot = models.JSONField(default=list, blank=True)
+    deadlines_snapshot = models.JSONField(default=list, blank=True)
+
+    is_signed = models.BooleanField(default=False)
+    signed_at = models.DateTimeField(blank=True, null=True)
+    pdf_url = models.TextField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "commitment_contracts"
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        status = "signed" if self.is_signed else "draft"
+        return f"[{self.user.email}] Commitment ({status})"
+
+
 # ---------------------------------------------------------------------------
 # 3. GoalAttributes
 #    Domain-specific data for a goal, stored as typed JSONFields.

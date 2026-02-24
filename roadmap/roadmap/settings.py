@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     'ai.apps.AiConfig',
     'routine.apps.RoutineConfig',
     'base.apps.BaseConfig',
+    'journeybook.apps.JourneybookConfig'
 ]
 
 MIDDLEWARE = [
@@ -215,3 +216,13 @@ if DEBUG:
     # Longer tokens during dev (optional — comment out if you want short tokens)
     # SIMPLE_JWT['ACCESS_TOKEN_LIFETIME'] = timedelta(days=1)
     # SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'] = timedelta(days=30)
+
+# =============================================================================
+# RESEND / CONTRACT DELIVERY
+# =============================================================================
+
+RESEND_API_KEY = config("RESEND_API_KEY", default="")
+RESEND_FROM_EMAIL = config(
+    "RESEND_FROM_EMAIL",
+    default="Roadmap Smart Planner <onboarding@resend.dev>",
+)
