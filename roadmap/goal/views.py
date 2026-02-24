@@ -1047,6 +1047,7 @@ class GoalHierarchyAPIView(APIView):
         milestones_data = []
         for milestone in goal.milestones.all().order_by("display_order"):
             subgoals_data = []
+            milestone_progress_values = []
 
             for subgoal in milestone.subgoals.all().order_by("display_order"):
                 # Build full tasks list with all details
@@ -1070,6 +1071,8 @@ class GoalHierarchyAPIView(APIView):
                 # Calculate task counts from the tasks_data list
                 total_tasks     = len(tasks_data)
                 completed_tasks = sum(1 for t in tasks_data if t["status"] == "completed")
+                subgoal_progress = round((completed_tasks / total_tasks) * 100) if total_tasks else (subgoal.progress_percentage or 0)
+                milestone_progress_values.append(subgoal_progress)
 
                 subgoals_data.append({
                     "id":                  str(subgoal.id),
@@ -1077,7 +1080,7 @@ class GoalHierarchyAPIView(APIView):
                     "description":         subgoal.description,
                     "priority":            subgoal.priority,
                     "status":              subgoal.status,
-                    "progress_percentage": subgoal.progress_percentage,
+                    "progress_percentage": subgoal_progress,
                     "week_number":         subgoal.week_number,  # @property
                     "display_order":       subgoal.display_order,
                     "start_date":          subgoal.start_date.isoformat() if subgoal.start_date else None,
@@ -1092,6 +1095,11 @@ class GoalHierarchyAPIView(APIView):
                     },
                 })
 
+            milestone_progress = (
+                round(sum(milestone_progress_values) / len(milestone_progress_values))
+                if milestone_progress_values
+                else (milestone.progress_percentage or 0)
+            )
             milestones_data.append({
                 "id":                  str(milestone.id),
                 "title":               milestone.title,
@@ -1099,7 +1107,7 @@ class GoalHierarchyAPIView(APIView):
                 "success_criteria":    milestone.success_criteria,
                 "priority":            milestone.priority,
                 "status":              milestone.status,
-                "progress_percentage": milestone.progress_percentage,
+                "progress_percentage": milestone_progress,
                 "display_order":       milestone.display_order,
                 "start_date":          milestone.start_date.isoformat() if milestone.start_date else None,
                 "target_date":         milestone.target_date.isoformat() if milestone.target_date else None,

@@ -127,6 +127,14 @@ class TaskSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Cannot schedule a task in the past.")
         return value
 
+    def update(self, instance, validated_data):
+        """
+        Keep hierarchy progress in sync when task status changes via API edits.
+        """
+        updated = super().update(instance, validated_data)
+        updated.subgoal.update_progress()
+        return updated
+
 
 class TaskListSerializer(serializers.ModelSerializer):
     """Lightweight Task serializer for list and Dashboard views."""
@@ -353,6 +361,18 @@ class GoalSerializer(serializers.ModelSerializer):
         allow_blank=True,
         help_text="Natural language description used to auto-extract GoalAttributes.",
     )
+    commitment_confirmed = serializers.BooleanField(
+        write_only=True,
+        required=False,
+        default=False,
+        help_text="Must be true when creating a goal.",
+    )
+    commitment_note = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        help_text="Optional motivational commitment line captured at creation time.",
+    )
 
     class Meta:
         model = Goal
@@ -376,6 +396,8 @@ class GoalSerializer(serializers.ModelSerializer):
             "is_user_modified",
             "attributes",
             "goal_attributes_input",
+            "commitment_confirmed",
+            "commitment_note",
             "created_at",
             "updated_at",
         ]
@@ -408,6 +430,11 @@ class GoalSerializer(serializers.ModelSerializer):
         if start and target and target <= start:
             raise serializers.ValidationError(
                 {"target_date": "Target date must be after start date."}
+            )
+
+        if self.instance is None and not attrs.get("commitment_confirmed", False):
+            raise serializers.ValidationError(
+                {"commitment_confirmed": "You must accept the goal commitment before creating a goal."}
             )
         return attrs
 
@@ -457,6 +484,8 @@ class GoalSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         goal_attributes_input = validated_data.pop("goal_attributes_input", None)
+        validated_data.pop("commitment_confirmed", None)
+        validated_data.pop("commitment_note", None)
 
         # User-created goals are always marked as modified
         if not validated_data.get("is_ai_generated", False):

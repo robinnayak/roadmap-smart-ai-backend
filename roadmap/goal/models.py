@@ -596,17 +596,27 @@ class Milestone(models.Model):
         return f"[{self.goal.user.email}] - {self.goal.title} → {self.title}"
 
     def update_progress(self):
-        """Recalculate from subgoals, then cascade up to the parent Goal."""
+        """
+        Recalculate from subgoals, then cascade up to the parent Goal.
+
+        Uses average subgoal progress so partial weekly completion contributes
+        to milestone progress instead of staying at 0 until a full subgoal is done.
+        """
         subgoals = self.subgoals.all()
         if not subgoals.exists():
             return
-        completed = subgoals.filter(status="completed").count()
-        self.progress_percentage = int((completed / subgoals.count()) * 100)
+        total = subgoals.count()
+        total_progress = sum(sg.progress_percentage or 0 for sg in subgoals)
+        self.progress_percentage = int(total_progress / total) if total else 0
         if self.progress_percentage == 100:
             self.status = "completed"
             self.completed_date = timezone.localdate()
         elif self.progress_percentage > 0:
             self.status = "in_progress"
+            self.completed_date = None
+        else:
+            self.status = "not_started"
+            self.completed_date = None
         self.save(
             update_fields=[
                 "progress_percentage",
