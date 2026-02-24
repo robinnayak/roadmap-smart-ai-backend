@@ -6,6 +6,7 @@ Routine selection logic - pure database queries, no AI needed for task picking.
 AI is only used to generate the daily motivation + mantra (two short strings).
 """
 import logging
+from collections import deque
 from datetime import date, time
 
 from django.db import transaction
@@ -15,6 +16,9 @@ from goal.models import Task
 from routine.models import DailyTaskList, DailyTaskItem, HabitTracker, DisciplineStreak
 
 logger = logging.getLogger(__name__)
+
+MAX_DAILY_GOAL_TASKS = 15
+GOAL_PRIORITY_ORDER = {"high": 3, "medium": 2, "low": 1}
 
 
 def _default_time_for_slot(slot: str | None):
@@ -35,6 +39,75 @@ def _infer_time_slot_from_text(*values: str, fallback: str = "morning") -> str:
     if any(word in text for word in ("afternoon", "noon", "midday", "lunch")):
         return "afternoon"
     return fallback
+
+
+def _select_balanced_goal_tasks(user, limit: int = MAX_DAILY_GOAL_TASKS) -> list[Task]:
+    """
+    Pick pending tasks across active goals using balanced round-robin.
+
+    Goal ordering is deterministic:
+      1) goal priority (high > medium > low)
+      2) goal UUID (string) as tie-breaker
+
+    Task ordering inside each goal is deterministic:
+      milestone.display_order -> subgoal.display_order -> task.display_order -> task.id
+    """
+    goal_tasks_qs = (
+        Task.objects.filter(
+            subgoal__milestone__goal__user=user,
+            subgoal__milestone__goal__status__in=["not_started", "in_progress"],
+            status="pending",
+        )
+        .select_related(
+            "subgoal",
+            "subgoal__milestone",
+            "subgoal__milestone__goal",
+        )
+        .order_by(
+            "subgoal__milestone__display_order",
+            "subgoal__display_order",
+            "display_order",
+            "id",
+        )
+    )
+
+    if limit <= 0:
+        return []
+
+    goals_to_tasks: dict[str, dict] = {}
+    for task in goal_tasks_qs:
+        goal = task.subgoal.milestone.goal
+        goal_id = str(goal.id)
+        if goal_id not in goals_to_tasks:
+            goals_to_tasks[goal_id] = {"goal": goal, "tasks": deque()}
+        goals_to_tasks[goal_id]["tasks"].append(task)
+
+    if not goals_to_tasks:
+        return []
+
+    goal_buckets = sorted(
+        goals_to_tasks.values(),
+        key=lambda bucket: (
+            -GOAL_PRIORITY_ORDER.get(bucket["goal"].priority, 0),
+            str(bucket["goal"].id),
+        ),
+    )
+
+    selected: list[Task] = []
+    while len(selected) < limit:
+        picked_in_cycle = False
+        for bucket in goal_buckets:
+            if not bucket["tasks"]:
+                continue
+            selected.append(bucket["tasks"].popleft())
+            picked_in_cycle = True
+            if len(selected) >= limit:
+                break
+
+        if not picked_in_cycle:
+            break
+
+    return selected
 
 
 def get_or_create_today_task_list(
@@ -61,25 +134,8 @@ def get_or_create_today_task_list(
         else:
             return existing, False
 
-    # 1) Fetch pending goal tasks
-    goal_tasks = (
-        Task.objects.filter(
-            subgoal__milestone__goal__user=user,
-            subgoal__milestone__goal__status__in=["not_started", "in_progress"],
-            status="pending",
-        )
-        .select_related(
-            "subgoal",
-            "subgoal__milestone",
-            "subgoal__milestone__goal",
-        )
-        .order_by(
-            "subgoal__milestone__goal__priority",
-            "subgoal__milestone__display_order",
-            "subgoal__display_order",
-            "display_order",
-        )[:15]
-    )
+    # 1) Fetch pending goal tasks with balanced cross-goal coverage
+    goal_tasks = _select_balanced_goal_tasks(user=user, limit=MAX_DAILY_GOAL_TASKS)
 
     # 2) Fetch habits that should run on target_date
     habits = [
@@ -193,7 +249,7 @@ def get_or_create_today_task_list(
         user.id,
         target_date,
         len(habits),
-        len(list(goal_tasks)),
+        len(goal_tasks),
     )
     return task_list, True
 
