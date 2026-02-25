@@ -11,5 +11,6 @@ urlpatterns = [
     path('goal/', include('goal.urls')),
     path('routines/', include('routine.urls')),
     path('journal/', include('journal.urls')),
+    path('api/journeybook/', include('journeybook.urls', namespace='journeybook')),
     path('', include('base.urls'))
 ]
