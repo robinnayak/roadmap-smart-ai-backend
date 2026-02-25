@@ -10,5 +10,6 @@ urlpatterns = [
     path('ai/', include('ai.urls')),
     path('goal/', include('goal.urls')),
     path('routines/', include('routine.urls')),
+    path('journal/', include('journal.urls')),
     path('', include('base.urls'))
 ]

@@ -67,7 +67,7 @@ class Profile(models.Model):
         blank=True, null=True, default="As an expert in AI application integration..."
     )
     avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
-    timezone = models.CharField(max_length=50, default="UTC")
+    timezone = models.CharField(max_length=50, default="Asia/Kathmandu")
     subscription_tier = models.CharField(
         max_length=20, choices=SUBSCRIPTION_CHOICES, default="free"
     )

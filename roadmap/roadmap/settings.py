@@ -41,7 +41,8 @@ INSTALLED_APPS = [
     'ai.apps.AiConfig',
     'routine.apps.RoutineConfig',
     'base.apps.BaseConfig',
-    'journeybook.apps.JourneybookConfig'
+    'journeybook.apps.JourneybookConfig',
+    'journal.apps.JournalConfig',
 ]
 
 MIDDLEWARE = [
@@ -140,6 +141,7 @@ CORS_ALLOW_HEADERS = [
     'accept',
     'x-csrftoken',
     'x-requested-with',
+    'x-user-timezone',
 ]
 
 # =============================================================================

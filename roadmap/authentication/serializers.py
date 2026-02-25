@@ -184,7 +184,7 @@ class ProfileSerializer(serializers.ModelSerializer):
                 "help_text": "The user's avatar image URL (can be null).",
             },
             "timezone": {
-                "help_text": "The user's preferred timezone (default is UTC)."
+                "help_text": "The user's preferred timezone (default is Asia/Kathmandu)."
             },
             "subscription_tier": {
                 "help_text": "The user's subscription tier (free, pro_monthly, lifetime)."
