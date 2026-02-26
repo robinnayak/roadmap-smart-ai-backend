@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from io import BytesIO
 from typing import Any
 
 from journeybook.models import JourneyBook
@@ -214,9 +213,5 @@ def build_demo_pdf_bytes(
         book_type=payload["book_type"],
         trim_size=payload["print_spec"]["trim_size"],
     )
-    try:
-        pdf_bytes = pdf_builder.build(chapter_texts, motivational_texts, {})
-    except RuntimeError:
-        # Dependency fallback for constrained local/test runtimes.
-        pdf_bytes = BytesIO(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF")
+    pdf_bytes = pdf_builder.build(chapter_texts, motivational_texts, {})
     return pdf_bytes, payload
