@@ -17,9 +17,10 @@ from rest_framework.test import APIClient
 
 from goal.models import Goal
 from journal.models import JournalEntry
-from journeybook.models import BookChapter, JourneyBook
+from journeybook.models import BookAsset, BookChapter, DerivedMilestone, JourneyBook
 from journeybook.services.data_collector import DataCollector
 from journeybook.services.metrics_calculator import MetricsCalculator
+from journeybook.services.pdf_builder import PDFBuilder
 
 TEMP_MEDIA_ROOT = tempfile.mkdtemp(prefix="journeybook_test_media_")
 
@@ -91,6 +92,7 @@ class JourneyBookAPITestCase(TestCase):
         status_value: str = JourneyBook.STATUS_READY,
         with_pdf: bool = False,
         created_at=None,
+        error_message: str = "",
     ) -> JourneyBook:
         user = user or self.user
         goal = goal or self._create_goal(user=user, status="completed")
@@ -102,6 +104,7 @@ class JourneyBookAPITestCase(TestCase):
             data_start_date=date.today() - timedelta(days=10),
             data_end_date=date.today(),
             days_of_data=11,
+            error_message=error_message,
         )
         if with_pdf:
             book.pdf_file.save(
@@ -123,6 +126,17 @@ class JourneyBookAPITestCase(TestCase):
         self.assertFalse(payload["can_generate_complete"])
         self.assertFalse(payload["can_generate_in_progress"])
         self.assertIsNotNone(payload["reason_blocked"])
+        self.assertEqual(payload["complete_unlock_reason"], "not_unlocked")
+        self.assertEqual(payload["journal_days"], 0)
+        self.assertGreaterEqual(payload["goal_age_days"], 1)
+        self.assertFalse(payload["goal_completed_or_due"])
+        self.assertEqual(payload["minimum_requirements"]["in_progress_min_days"], 7)
+        self.assertEqual(
+            payload["minimum_requirements"]["complete_min_days_if_goal_not_done_or_due"],
+            180,
+        )
+        self.assertTrue(payload["minimum_requirements"]["uses_journal_entries"])
+        self.assertTrue(payload["minimum_requirements"]["uses_goal_timeline"])
 
     def test_eligibility_7_to_179_days(self):
         goal = self._create_goal(status="not_started", start_days_ago=20)
@@ -133,6 +147,7 @@ class JourneyBookAPITestCase(TestCase):
         self.assertFalse(payload["can_generate_complete"])
         self.assertTrue(payload["can_generate_in_progress"])
         self.assertFalse(payload["can_choose_type"])
+        self.assertEqual(payload["complete_unlock_reason"], "not_unlocked")
 
     def test_eligibility_180_plus_days(self):
         goal = self._create_goal(status="not_started", start_days_ago=200)
@@ -143,6 +158,7 @@ class JourneyBookAPITestCase(TestCase):
         self.assertTrue(payload["can_generate_complete"])
         self.assertTrue(payload["can_generate_in_progress"])
         self.assertTrue(payload["can_choose_type"])
+        self.assertEqual(payload["complete_unlock_reason"], "long_journey")
 
     def test_eligibility_completed_goal(self):
         goal = self._create_goal(status="completed", start_days_ago=0)
@@ -152,6 +168,19 @@ class JourneyBookAPITestCase(TestCase):
         payload = response.json()
         self.assertTrue(payload["can_generate_complete"])
         self.assertTrue(payload["can_generate_in_progress"])
+        self.assertTrue(payload["goal_completed_or_due"])
+        self.assertEqual(payload["complete_unlock_reason"], "completed_goal")
+
+    def test_eligibility_goal_due_unlocks_complete(self):
+        goal = self._create_goal(status="in_progress", start_days_ago=1, target_days_from_now=-1)
+        url = reverse("journeybook:journeybook-eligibility")
+        response = self.client.get(url, {"goal_id": str(goal.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertTrue(payload["can_generate_complete"])
+        self.assertTrue(payload["can_generate_in_progress"])
+        self.assertTrue(payload["goal_completed_or_due"])
+        self.assertEqual(payload["complete_unlock_reason"], "goal_due")
 
     @patch("journeybook.views.JourneyBookViewSet._generate_sync")
     def test_generate_creates_record(self, mock_generate_sync):
@@ -170,6 +199,95 @@ class JourneyBookAPITestCase(TestCase):
         book = JourneyBook.objects.filter(user=self.user).first()
         self.assertIsNotNone(book)
         self.assertIn(book.status, [JourneyBook.STATUS_QUEUED, JourneyBook.STATUS_GENERATING])
+
+    def test_generate_demo_mode_returns_payload_without_writes(self):
+        url = reverse("journeybook:journeybook-list")
+        payload = {
+            "mode": "demo",
+            "book_type": "in_progress",
+        }
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.json()
+        self.assertEqual(body["mode"], "demo")
+        self.assertEqual(body["book_type"], "in_progress")
+        self.assertGreater(len(body.get("chapters", [])), 0)
+        self.assertEqual(JourneyBook.objects.count(), 0)
+
+    def test_public_demo_preview_endpoint_is_unauthenticated(self):
+        anon_client = APIClient()
+        url = reverse("journeybook-demo-preview")
+        response = anon_client.get(url, {"book_type": "complete"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.json()
+        self.assertEqual(body["mode"], "demo")
+        self.assertEqual(body["book_type"], "complete")
+        self.assertEqual(body["source"], "demo_data")
+
+    def test_public_demo_preview_includes_generation_source_and_trim_spec(self):
+        anon_client = APIClient()
+        url = reverse("journeybook-demo-preview")
+        response = anon_client.get(url, {"book_type": "in_progress", "trim_size": "7x10"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.json()
+        self.assertIn("generation_source", body)
+        self.assertIn(body["generation_source"]["overall"], ["ai", "fallback", "mixed"])
+        self.assertIn("print_spec", body)
+        self.assertEqual(body["print_spec"]["trim_size"], "7x10")
+        self.assertGreater(len(body.get("chapters", [])), 0)
+        self.assertIn("generation_source", body["chapters"][0])
+
+    def test_public_demo_preview_invalid_trim_defaults_to_6x9(self):
+        anon_client = APIClient()
+        url = reverse("journeybook-demo-preview")
+        response = anon_client.get(url, {"book_type": "complete", "trim_size": "invalid"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.json()
+        self.assertEqual(body["print_spec"]["trim_size"], "6x9")
+
+    @patch(
+        "journeybook.services.demo_mode.PDFBuilder.build",
+        return_value=BytesIO(b"%PDF-1.4\nmock-demo\n%%EOF"),
+    )
+    def test_public_demo_preview_pdf_is_unauthenticated_and_has_no_db_writes(self, _mock_pdf):
+        anon_client = APIClient()
+        url = reverse("journeybook-demo-preview-pdf")
+        before_counts = {
+            "books": JourneyBook.objects.count(),
+            "chapters": BookChapter.objects.count(),
+            "assets": BookAsset.objects.count(),
+            "milestones": DerivedMilestone.objects.count(),
+        }
+
+        response = anon_client.get(url, {"book_type": "complete", "trim_size": "5.5x8.5"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("application/pdf", response.get("Content-Type", ""))
+        self.assertTrue(response.content.startswith(b"%PDF"))
+        self.assertIn("journey_book_demo_complete_5_5x8_5.pdf", response.get("Content-Disposition", ""))
+
+        after_counts = {
+            "books": JourneyBook.objects.count(),
+            "chapters": BookChapter.objects.count(),
+            "assets": BookAsset.objects.count(),
+            "milestones": DerivedMilestone.objects.count(),
+        }
+        self.assertEqual(after_counts, before_counts)
+
+    @patch(
+        "journeybook.services.demo_mode.PDFBuilder.build",
+        return_value=BytesIO(b"%PDF-1.4\nmock-demo\n%%EOF"),
+    )
+    def test_public_demo_preview_pdf_invalid_trim_defaults_to_6x9(self, _mock_pdf):
+        anon_client = APIClient()
+        url = reverse("journeybook-demo-preview-pdf")
+        response = anon_client.get(url, {"book_type": "complete", "trim_size": "bad-trim"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("journey_book_demo_complete_6x9.pdf", response.get("Content-Disposition", ""))
 
     def test_generate_rate_limit(self):
         goal = self._create_goal(status="completed")
@@ -196,6 +314,100 @@ class JourneyBookAPITestCase(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_preview_non_failed_returns_400(self):
+        goal = self._create_goal(status="in_progress")
+        book = self._create_book(goal=goal, status_value=JourneyBook.STATUS_GENERATING)
+
+        url = reverse("journeybook:journeybook-preview", args=[str(book.id)])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_preview_requires_ownership(self):
+        goal = self._create_goal(user=self.other_user, status="completed")
+        book = self._create_book(
+            user=self.other_user,
+            goal=goal,
+            status_value=JourneyBook.STATUS_FAILED,
+            error_message="ReportLab is required to build Journey Book PDFs.",
+        )
+
+        self.client.force_authenticate(user=self.user)
+        url = reverse("journeybook:journeybook-preview", args=[str(book.id)])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_preview_returns_generated_chapter_snippets(self):
+        goal = self._create_goal(status="completed")
+        book = self._create_book(
+            goal=goal,
+            status_value=JourneyBook.STATUS_FAILED,
+            error_message="ReportLab is required to build Journey Book PDFs.",
+        )
+        BookChapter.objects.create(
+            journey_book=book,
+            chapter_number=1,
+            chapter_title="Who I Was",
+            content="Generated chapter content " * 80,
+            word_count=160,
+            is_projection=False,
+        )
+        BookChapter.objects.create(
+            journey_book=book,
+            chapter_number=2,
+            chapter_title="The Turning Point",
+            content="Another generated chapter segment " * 60,
+            word_count=120,
+            is_projection=False,
+        )
+
+        url = reverse("journeybook:journeybook-preview", args=[str(book.id)])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["source"], "generated_chapters")
+        self.assertGreaterEqual(len(payload["sections"]), 2)
+        self.assertIn("retry_context", payload)
+        self.assertEqual(payload["retry_context"]["book_type"], book.book_type)
+
+    def test_preview_returns_fallback_template_when_no_chapters(self):
+        goal = self._create_goal(status="completed", start_days_ago=15)
+        self._create_journal_entry(entry_date=date.today() - timedelta(days=2))
+        self._create_journal_entry(entry_date=date.today() - timedelta(days=1))
+
+        book = self._create_book(
+            goal=goal,
+            status_value=JourneyBook.STATUS_FAILED,
+            error_message="ReportLab is required to build Journey Book PDFs.",
+        )
+
+        url = reverse("journeybook:journeybook-preview", args=[str(book.id)])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["source"], "fallback_template")
+        self.assertGreaterEqual(len(payload["sections"]), 1)
+        self.assertIn("stats", payload)
+        self.assertIn("days_of_data", payload["stats"])
+
+    def test_failed_serializer_exposes_error_mapping_and_retry_context(self):
+        goal = self._create_goal(status="completed")
+        self._create_book(
+            goal=goal,
+            status_value=JourneyBook.STATUS_FAILED,
+            error_message="ReportLab is required to build Journey Book PDFs.",
+        )
+
+        url = reverse("journeybook:journeybook-list")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        record = payload["results"][0] if isinstance(payload, dict) else payload[0]
+        self.assertEqual(record["error_code"], "pdf_dependency_missing")
+        self.assertTrue(record["can_preview_sample"])
+        self.assertTrue(record["can_retry"])
+        self.assertIn("retry_context", record)
+        self.assertIn("error_display", record)
+
     def test_download_returns_pdf(self):
         goal = self._create_goal(status="completed")
         book = self._create_book(goal=goal, with_pdf=True, status_value=JourneyBook.STATUS_READY)
@@ -212,6 +424,113 @@ class JourneyBookAPITestCase(TestCase):
         url = reverse("journeybook:journeybook-download", args=[str(book.id)])
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    @patch(
+        "journeybook.services.pdf_builder.PDFBuilder.build",
+        return_value=BytesIO(b"%PDF-1.4\nreal-export\n%%EOF"),
+    )
+    def test_export_ready_returns_real_pdf_payload(self, _mock_pdf):
+        goal = self._create_goal(status="completed")
+        book = self._create_book(goal=goal, status_value=JourneyBook.STATUS_READY, with_pdf=False)
+        BookChapter.objects.create(
+            journey_book=book,
+            chapter_number=1,
+            chapter_title="Chapter One",
+            content="Generated chapter content " * 20,
+            word_count=80,
+            is_projection=False,
+        )
+        book.metadata = {"chapter_count": 1, "page_count": 10, "word_count": 80}
+        book.save(update_fields=["metadata"])
+
+        url = reverse("journeybook:journeybook-export", args=[str(book.id)])
+        response = self.client.post(url, {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["status"], "success")
+        self.assertFalse(payload["is_demo_pdf"])
+        self.assertIn("pdf_url", payload)
+        self.assertIsNone(payload["error_type"])
+        book.refresh_from_db()
+        self.assertTrue(bool(book.pdf_file))
+
+    @patch(
+        "journeybook.services.pdf_builder.PDFBuilder.build",
+        return_value=BytesIO(b"%PDF-1.4\ndemo-export\n%%EOF"),
+    )
+    def test_export_failed_returns_demo_pdf_payload(self, _mock_pdf):
+        goal = self._create_goal(status="completed")
+        book = self._create_book(
+            goal=goal,
+            status_value=JourneyBook.STATUS_FAILED,
+            with_pdf=False,
+            error_message="Generation failed for testing.",
+        )
+
+        url = reverse("journeybook:journeybook-export", args=[str(book.id)])
+        response = self.client.post(url, {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["status"], "success")
+        self.assertTrue(payload["is_demo_pdf"])
+        self.assertIn("pdf_url", payload)
+        self.assertIn(payload["error_type"], ["GENERATION_FAILED", "INSUFFICIENT_DATA", "EMPTY_CONTENT"])
+        book.refresh_from_db()
+        self.assertTrue(bool(book.pdf_file))
+
+    @patch(
+        "journeybook.services.pdf_builder.PDFBuilder.build",
+        return_value=BytesIO(b"%PDF-1.4\ndemo-insufficient\n%%EOF"),
+    )
+    def test_export_insufficient_data_returns_demo_pdf(self, _mock_pdf):
+        goal = self._create_goal(status="not_started", start_days_ago=0)
+        book = JourneyBook.objects.create(
+            user=self.user,
+            goal=goal,
+            book_type=JourneyBook.BOOK_TYPE_IN_PROGRESS,
+            status=JourneyBook.STATUS_FAILED,
+            data_start_date=date.today(),
+            data_end_date=date.today(),
+            days_of_data=1,
+            error_message="Come back after at least 7 days of journey data.",
+        )
+
+        url = reverse("journeybook:journeybook-export", args=[str(book.id)])
+        response = self.client.post(url, {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertTrue(payload["is_demo_pdf"])
+        self.assertEqual(payload["error_type"], "INSUFFICIENT_DATA")
+        self.assertIsNotNone(payload["demo_pdf_url"])
+        book.refresh_from_db()
+        self.assertTrue(bool(book.pdf_file))
+
+    @patch(
+        "journeybook.views.JourneyBookViewSet._build_and_store_demo_pdf",
+        side_effect=RuntimeError("demo fallback unavailable"),
+    )
+    @patch(
+        "journeybook.views.JourneyBookViewSet._build_and_store_real_pdf",
+        side_effect=RuntimeError("pdf engine crashed"),
+    )
+    def test_export_pdf_engine_failure_returns_structured_error_with_fallback(
+        self,
+        _mock_real,
+        _mock_demo,
+    ):
+        goal = self._create_goal(status="completed")
+        book = self._create_book(goal=goal, status_value=JourneyBook.STATUS_READY, with_pdf=False)
+        book.metadata = {"chapter_count": 2, "page_count": 12, "word_count": 500}
+        book.save(update_fields=["metadata"])
+
+        url = reverse("journeybook:journeybook-export", args=[str(book.id)])
+        response = self.client.post(url, {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error_type"], "PDF_ENGINE_ERROR")
+        self.assertTrue(payload["fallback_available"])
+        self.assertFalse(payload["is_demo_pdf"])
 
     def test_dip_detection_finds_gap(self):
         start = date.today() - timedelta(days=20)
@@ -385,3 +704,45 @@ class JourneyBookAPITestCase(TestCase):
         book = JourneyBook.objects.filter(user=self.user).order_by("-created_at").first()
         self.assertIsNotNone(book)
         self.assertEqual(BookChapter.objects.filter(journey_book=book).count(), 5)
+
+    def test_pdf_builder_respects_trim_page_size(self):
+        builder = PDFBuilder(
+            user_data={
+                "profile": {"name": "Test User"},
+                "goal": {"title": "Test Goal", "status": "in_progress", "deadline": date.today()},
+            },
+            metrics={
+                "journey_overview": {
+                    "start_date": date.today() - timedelta(days=30),
+                    "end_date": date.today(),
+                    "total_entries": 30,
+                },
+                "derived_milestones": [],
+            },
+            book_type=JourneyBook.BOOK_TYPE_COMPLETE,
+            trim_size="5.5x8.5",
+        )
+        page_width, page_height = builder.get_page_size_points()
+        self.assertAlmostEqual(page_width, 396.0, delta=0.1)
+        self.assertAlmostEqual(page_height, 612.0, delta=0.1)
+
+    def test_pdf_builder_fixed_image_frame_uses_trim_spec(self):
+        builder = PDFBuilder(
+            user_data={},
+            metrics={},
+            book_type=JourneyBook.BOOK_TYPE_IN_PROGRESS,
+            trim_size="7x10",
+        )
+        expected_width, expected_height = builder.get_image_frame_size_points()
+        self.assertAlmostEqual(expected_width, 388.8, delta=0.1)
+        self.assertAlmostEqual(expected_height, 223.2, delta=0.1)
+
+        # 2000x1000 image should fit exactly to frame width and preserve ratio.
+        fit_width, fit_height = builder._fit_within_frame(
+            src_width=2000.0,
+            src_height=1000.0,
+            frame_width=expected_width,
+            frame_height=expected_height,
+        )
+        self.assertAlmostEqual(fit_width, expected_width, delta=0.1)
+        self.assertAlmostEqual(fit_height, expected_width / 2.0, delta=0.1)

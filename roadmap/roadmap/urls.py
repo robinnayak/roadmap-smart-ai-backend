@@ -1,6 +1,7 @@
 
 from django.contrib import admin
 from django.urls import path, include
+from journeybook.views import JourneyBookDemoPreviewAPIView, JourneyBookDemoPreviewPDFAPIView
 
 
 urlpatterns = [
@@ -12,5 +13,7 @@ urlpatterns = [
     path('routines/', include('routine.urls')),
     path('journal/', include('journal.urls')),
     path('api/journeybook/', include('journeybook.urls', namespace='journeybook')),
+    path('journey-books/demo-preview/', JourneyBookDemoPreviewAPIView.as_view(), name='journeybook-demo-preview'),
+    path('journey-books/demo-preview/pdf/', JourneyBookDemoPreviewPDFAPIView.as_view(), name='journeybook-demo-preview-pdf'),
     path('', include('base.urls'))
 ]
