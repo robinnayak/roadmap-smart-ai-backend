@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
 from datetime import date
 from typing import Any
 
 from django.core.files.base import ContentFile
-from django.http import FileResponse, HttpResponse
+from django.http import FileResponse, HttpResponse, JsonResponse
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet
@@ -27,6 +29,18 @@ from journeybook.services.demo_mode import build_demo_book_payload, build_demo_p
 from journeybook.services.image_generator import ImageGenerator
 from journeybook.services.metrics_calculator import MetricsCalculator
 from journeybook.services.pdf_builder import PDFBuilder
+
+logger = logging.getLogger(__name__)
+
+
+class PDFBinaryRenderer(BaseRenderer):
+    media_type = "application/pdf"
+    format = "pdf"
+    charset = None
+    render_style = "binary"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
 
 
 class JourneyBookViewSet(ModelViewSet):
@@ -643,6 +657,8 @@ class JourneyBookDemoPreviewAPIView(APIView):
 class JourneyBookDemoPreviewPDFAPIView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
+    renderer_classes = [PDFBinaryRenderer, JSONRenderer]
+    ERROR_TYPE_PDF_ENGINE_ERROR = "PDF_ENGINE_ERROR"
 
     def get(self, request):
         book_type = request.query_params.get("book_type", JourneyBook.BOOK_TYPE_COMPLETE)
@@ -650,7 +666,18 @@ class JourneyBookDemoPreviewPDFAPIView(APIView):
         if book_type not in {JourneyBook.BOOK_TYPE_COMPLETE, JourneyBook.BOOK_TYPE_IN_PROGRESS}:
             book_type = JourneyBook.BOOK_TYPE_COMPLETE
 
-        pdf_bytes, payload = build_demo_pdf_bytes(book_type=book_type, trim_size=trim_size)
+        try:
+            pdf_bytes, payload = build_demo_pdf_bytes(book_type=book_type, trim_size=trim_size)
+        except RuntimeError as exc:
+            logger.error("Journey Book demo PDF export failed due to missing PDF engine: %s", exc)
+            return JsonResponse(
+                {
+                    "error_type": self.ERROR_TYPE_PDF_ENGINE_ERROR,
+                    "message": "ReportLab is not installed in backend runtime.",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         normalized_trim = payload["print_spec"]["trim_size"]
         filename_trim = normalized_trim.replace(".", "_")
 

@@ -38,13 +38,14 @@ The platform assists users in achieving goals across career, financial, health, 
 
 2. **Create virtual environment**:
    ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   python -m venv .venv
+   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
    ```
 
 3. **Install dependencies**:
    ```bash
-   pip install -r requirements.txt
+   python -m pip install -r roadmap/requirements.txt
+   python -c "import reportlab,sys; print('reportlab', reportlab.__version__, 'from', sys.executable)"
    ```
 
 4. **Environment variables**:
@@ -70,9 +71,18 @@ The platform assists users in achieving goals across career, financial, health, 
 
 7. **Run the server**:
    ```bash
-   python manage.py runserver
+   python roadmap/manage.py runserver
    ```
    The API will be available at `http://localhost:8000/`
+
+8. **Interpreter-safe startup scripts** (recommended):
+   ```bash
+   # Windows
+   ./start_backend.ps1
+
+   # Linux/macOS
+   ./start_backend.sh
+   ```
 
 ### Production Deployment
 - Use a production-grade database (PostgreSQL/MySQL)

@@ -19,6 +19,7 @@ from goal.models import Goal
 from journal.models import JournalEntry
 from journeybook.models import BookAsset, BookChapter, DerivedMilestone, JourneyBook
 from journeybook.services.data_collector import DataCollector
+from journeybook.services.demo_mode import build_demo_pdf_bytes
 from journeybook.services.metrics_calculator import MetricsCalculator
 from journeybook.services.pdf_builder import PDFBuilder
 
@@ -226,6 +227,14 @@ class JourneyBookAPITestCase(TestCase):
         self.assertEqual(body["book_type"], "complete")
         self.assertEqual(body["source"], "demo_data")
 
+    def test_base_endpoint_exposes_reportlab_readiness(self):
+        anon_client = APIClient()
+        response = anon_client.get("/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertIn("readiness", payload)
+        self.assertIn("reportlab_available", payload["readiness"])
+
     def test_public_demo_preview_includes_generation_source_and_trim_spec(self):
         anon_client = APIClient()
         url = reverse("journeybook-demo-preview")
@@ -288,6 +297,28 @@ class JourneyBookAPITestCase(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("journey_book_demo_complete_6x9.pdf", response.get("Content-Disposition", ""))
+
+    @patch(
+        "journeybook.views.build_demo_pdf_bytes",
+        side_effect=RuntimeError("ReportLab is required to build Journey Book PDFs."),
+    )
+    def test_public_demo_preview_pdf_returns_503_when_pdf_engine_missing(self, _mock_pdf):
+        anon_client = APIClient()
+        url = reverse("journeybook-demo-preview-pdf")
+        response = anon_client.get(url, {"book_type": "complete", "trim_size": "6x9"})
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        payload = response.json()
+        self.assertEqual(payload["error_type"], "PDF_ENGINE_ERROR")
+        self.assertEqual(payload["message"], "ReportLab is not installed in backend runtime.")
+
+    @patch(
+        "journeybook.services.demo_mode.PDFBuilder.build",
+        side_effect=RuntimeError("ReportLab is required to build Journey Book PDFs."),
+    )
+    def test_build_demo_pdf_bytes_propagates_runtime_error_without_placeholder_pdf(self, _mock_pdf):
+        with self.assertRaises(RuntimeError):
+            build_demo_pdf_bytes(book_type="complete", trim_size="6x9")
 
     def test_generate_rate_limit(self):
         goal = self._create_goal(status="completed")
