@@ -6,6 +6,9 @@ from uuid import UUID
 
 
 class DataCollector:
+    MIN_IN_PROGRESS_DAYS = 7
+    MIN_COMPLETE_DAYS_WITHOUT_GOAL_COMPLETION = 180
+
     def __init__(self, user, goal_id: str | UUID | None = None, privacy_settings: dict | None = None):
         self.user = user
         self.goal_id = goal_id
@@ -29,29 +32,32 @@ class DataCollector:
     def check_eligibility(self, goal_id: str | UUID | None = None) -> dict[str, Any]:
         goal = self._get_goal(goal_id)
         journals = self._get_journals()
-        days_of_data = self._calculate_days_of_data(goal=goal, journals=journals)
+        journal_days, goal_age_days = self._calculate_data_day_breakdown(goal=goal, journals=journals)
+        days_of_data = max(journal_days, goal_age_days)
 
         goal_deadline = goal.get("deadline")
         goal_status = (goal.get("status") or "").lower()
-        is_completed_or_due = (
-            goal_status == "completed"
-            or (goal_deadline is not None and goal_deadline <= date.today())
-        )
+        goal_is_completed = goal_status == "completed"
+        goal_is_due = goal_deadline is not None and goal_deadline <= date.today()
+        is_completed_or_due = goal_is_completed or goal_is_due
 
         can_generate_complete = False
         can_generate_in_progress = False
         can_choose_type = False
         reason_blocked = None
+        complete_unlock_reason = "not_unlocked"
 
         if is_completed_or_due:
             can_generate_complete = True
             can_generate_in_progress = True
             can_choose_type = True
-        elif days_of_data >= 180:
+            complete_unlock_reason = "completed_goal" if goal_is_completed else "goal_due"
+        elif days_of_data >= self.MIN_COMPLETE_DAYS_WITHOUT_GOAL_COMPLETION:
             can_generate_complete = True
             can_generate_in_progress = True
             can_choose_type = True
-        elif days_of_data >= 7:
+            complete_unlock_reason = "long_journey"
+        elif days_of_data >= self.MIN_IN_PROGRESS_DAYS:
             can_generate_complete = False
             can_generate_in_progress = True
             can_choose_type = False
@@ -63,6 +69,16 @@ class DataCollector:
             "can_generate_in_progress": can_generate_in_progress,
             "can_choose_type": can_choose_type,
             "days_of_data": days_of_data,
+            "journal_days": journal_days,
+            "goal_age_days": goal_age_days,
+            "goal_completed_or_due": is_completed_or_due,
+            "complete_unlock_reason": complete_unlock_reason,
+            "minimum_requirements": {
+                "in_progress_min_days": self.MIN_IN_PROGRESS_DAYS,
+                "complete_min_days_if_goal_not_done_or_due": self.MIN_COMPLETE_DAYS_WITHOUT_GOAL_COMPLETION,
+                "uses_journal_entries": True,
+                "uses_goal_timeline": True,
+            },
             "reason_blocked": reason_blocked,
             "goal_id": str(goal.get("id")) if goal.get("id") else (str(goal_id) if goal_id else None),
             "goal_title": goal.get("title"),
@@ -185,6 +201,11 @@ class DataCollector:
 
     @staticmethod
     def _calculate_days_of_data(goal: dict[str, Any], journals: list[dict[str, Any]]) -> int:
+        journal_days, goal_age_days = DataCollector._calculate_data_day_breakdown(goal=goal, journals=journals)
+        return max(journal_days, goal_age_days)
+
+    @staticmethod
+    def _calculate_data_day_breakdown(goal: dict[str, Any], journals: list[dict[str, Any]]) -> tuple[int, int]:
         journal_days = len({entry["entry_date"] for entry in journals if entry.get("entry_date")})
 
         goal_age_days = 0
@@ -195,4 +216,4 @@ class DataCollector:
         except Exception:
             goal_age_days = 0
 
-        return max(journal_days, goal_age_days)
+        return journal_days, goal_age_days
