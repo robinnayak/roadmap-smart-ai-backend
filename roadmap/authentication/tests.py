@@ -1,5 +1,7 @@
 import json
 from django.contrib.auth import get_user_model
+from datetime import timedelta
+from django.utils import timezone
 from django.core.serializers.json import DjangoJSONEncoder
 from rest_framework.test import APITestCase
 from django.urls import reverse
@@ -8,6 +10,7 @@ from rest_framework.test import APIClient as Client
 from django.core.cache import cache
 from rest_framework import status 
 
+from authentication.models import UserPersonalDetails
 
 User = get_user_model()
 
@@ -197,6 +200,59 @@ class UserRegistrationTestCase(APITestCase):
                 self.assertIn('error', response.data)
                 break
         # self.assertTrue(rate_limited, "Rate limiting was not triggered within the expected number of requests")
+
+
+class ProfilePersonalNotificationEndpointTests(APITestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(
+            email="profiletest@example.com",
+            password="StrongPass123!",
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_personal_details_put_without_existing_record_returns_404_envelope(self):
+        url = reverse("user-personal-details")
+        payload = {
+            "date_of_birth": "2000-01-01",
+            "roadmap_start_date": str(timezone.now().date() + timedelta(days=2)),
+            "current_situation": "Working toward a stronger career transition.",
+        }
+        response = self.client.put(url, data=payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "details_not_found")
+
+    def test_personal_details_delete_without_existing_record_returns_404_envelope(self):
+        url = reverse("user-personal-details")
+        response = self.client.delete(url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "details_not_found")
+
+    def test_notification_get_uses_standard_success_envelope(self):
+        url = reverse("user-notification")
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertIn("data", response.data)
+        self.assertIn("notifications_enabled", response.data["data"])
+
+    def test_notification_put_invalid_payload_returns_standard_error_envelope(self):
+        url = reverse("user-notification")
+        response = self.client.put(
+            url,
+            data={"notifications_enabled": "not-a-boolean"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "invalid_data")
+        self.assertIn("errors", response.data)
         
         
 

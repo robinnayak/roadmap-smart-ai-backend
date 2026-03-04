@@ -1,4 +1,5 @@
 from ai.services.base_service import BaseAIService
+from ai.config import get_hierarchy_model
 from ai.providers.ollama_provider import OllamaProvider
 from ai.utils.parsers import ResponseParser, MilestoneParser
 from ai.utils.formatters import MileStoneFormatter
@@ -70,7 +71,7 @@ class GoalHierarchyGenerator(BaseAIService):
 
     def __init__(self):
         provider = OllamaProvider(
-            model=os.getenv("HIERARCHY_MODEL", "gpt-oss:120b-cloud"),
+            model=get_hierarchy_model(),
             temperature=0.15,
             max_tokens=int(os.getenv("HIERARCHY_MAX_TOKENS", "2400")),
         )

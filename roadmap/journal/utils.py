@@ -172,8 +172,6 @@ def _generate_with_ollama(prompt: str, system_prompt: str) -> str:
     from ai.providers.ollama_provider import OllamaProvider
 
     provider = OllamaProvider(
-        host=__import__("os").getenv("OLLAMA_HOST", "http://localhost:11434"),
-        model=__import__("os").getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud"),
         temperature=0.2,
     )
     health = provider.health_check()

@@ -10,6 +10,7 @@ import logging
 from datetime import date
 
 from ai.services.base_service import BaseAIService
+from ai.config import get_ollama_model
 from ai.providers.ollama_provider import OllamaProvider
 from ai.utils.parsers import ResponseParser
 from ai.utils.formatters import ResponseFormatter
@@ -34,7 +35,7 @@ class DailyRoutineGenerator(BaseAIService):
 
     def __init__(self):
         provider = OllamaProvider(
-            model="gpt-oss:120b-cloud",
+            model=get_ollama_model(),
             temperature=0.7,   # Higher temp is fine for creative motivation text
             max_tokens=500,    # Motivation + mantra don't need 3000 tokens
         )

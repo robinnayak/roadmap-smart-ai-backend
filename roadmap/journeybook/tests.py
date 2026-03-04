@@ -201,6 +201,21 @@ class JourneyBookAPITestCase(TestCase):
         self.assertIsNotNone(book)
         self.assertIn(book.status, [JourneyBook.STATUS_QUEUED, JourneyBook.STATUS_GENERATING])
 
+    @patch("journeybook.views.JourneyBookViewSet._generate_sync", side_effect=ValueError("generation failure"))
+    def test_generate_handles_sync_value_error_without_crashing(self, _mock_generate_sync):
+        goal = self._create_goal(status="completed", start_days_ago=0)
+        url = reverse("journeybook:journeybook-list")
+        payload = {
+            "goal_id": str(goal.id),
+            "book_type": "in_progress",
+            "privacy_settings": {"exclude_journal_ids": []},
+        }
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(JourneyBook.objects.filter(user=self.user).count(), 1)
+
     def test_generate_demo_mode_returns_payload_without_writes(self):
         url = reverse("journeybook:journeybook-list")
         payload = {
@@ -420,6 +435,23 @@ class JourneyBookAPITestCase(TestCase):
         self.assertIn("stats", payload)
         self.assertIn("days_of_data", payload["stats"])
 
+    @patch("journeybook.views.JourneyBookViewSet._collect_preview_metrics", side_effect=ValueError("metrics failure"))
+    def test_preview_metrics_value_error_returns_safe_fallback(self, _mock_collect):
+        goal = self._create_goal(status="completed", start_days_ago=15)
+        book = self._create_book(
+            goal=goal,
+            status_value=JourneyBook.STATUS_FAILED,
+            error_message="ReportLab is required to build Journey Book PDFs.",
+        )
+
+        url = reverse("journeybook:journeybook-preview", args=[str(book.id)])
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["source"], "fallback_template")
+        self.assertGreaterEqual(len(payload["sections"]), 1)
+
     def test_failed_serializer_exposes_error_mapping_and_retry_context(self):
         goal = self._create_goal(status="completed")
         self._create_book(
@@ -455,6 +487,22 @@ class JourneyBookAPITestCase(TestCase):
         url = reverse("journeybook:journeybook-download", args=[str(book.id)])
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    @patch(
+        "journeybook.models.JourneyBook.pdf_file.field.storage.open",
+        side_effect=FileNotFoundError("missing file"),
+    )
+    def test_download_missing_storage_file_returns_structured_error(self, _mock_open):
+        goal = self._create_goal(status="completed")
+        book = self._create_book(goal=goal, with_pdf=True, status_value=JourneyBook.STATUS_READY)
+
+        url = reverse("journeybook:journeybook-download", args=[str(book.id)])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        payload = response.json()
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error_type"], "STORAGE_ERROR")
+        self.assertIn("fallback_available", payload)
 
     @patch(
         "journeybook.services.pdf_builder.PDFBuilder.build",
@@ -562,6 +610,27 @@ class JourneyBookAPITestCase(TestCase):
         self.assertEqual(payload["error_type"], "PDF_ENGINE_ERROR")
         self.assertTrue(payload["fallback_available"])
         self.assertFalse(payload["is_demo_pdf"])
+
+    @patch("journeybook.views.JourneyBookViewSet._build_and_store_demo_pdf")
+    @patch(
+        "journeybook.views.JourneyBookViewSet._build_and_store_real_pdf",
+        side_effect=RuntimeError("pdf engine crashed"),
+    )
+    def test_export_real_pdf_runtime_failure_falls_back_to_demo(self, _mock_real, _mock_demo):
+        goal = self._create_goal(status="completed")
+        book = self._create_book(goal=goal, status_value=JourneyBook.STATUS_READY, with_pdf=False)
+        book.metadata = {"chapter_count": 2, "page_count": 12, "word_count": 500}
+        book.save(update_fields=["metadata"])
+
+        url = reverse("journeybook:journeybook-export", args=[str(book.id)])
+        response = self.client.post(url, {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["status"], "success")
+        self.assertTrue(payload["is_demo_pdf"])
+        self.assertEqual(payload["error_type"], "PDF_ENGINE_ERROR")
+        self.assertFalse(payload["fallback_available"])
+        _mock_demo.assert_called_once()
 
     def test_dip_detection_finds_gap(self):
         start = date.today() - timedelta(days=20)

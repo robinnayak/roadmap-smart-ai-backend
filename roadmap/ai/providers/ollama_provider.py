@@ -2,12 +2,15 @@
 
 from ollama import Client
 from ai.providers.base import BaseAIProvider, AIResponse, AIMessage
+from common.env import get_required_env
 
 
 class OllamaProvider(BaseAIProvider):
-    def __init__(self, host='http://localhost:11434', model='gpt-oss:20b-cloud', temperature=0.7, max_tokens=None, stream=False):        
-        super().__init__(model, temperature, max_tokens, stream)
-        self.host = host
+    def __init__(self, host=None, model=None, temperature=0.7, max_tokens=None, stream=False):
+        resolved_host = host or get_required_env("OLLAMA_HOST")
+        resolved_model = model or get_required_env("OLLAMA_MODEL")
+        super().__init__(resolved_model, temperature, max_tokens, stream)
+        self.host = resolved_host
         self.client = Client(host=self.host)
     
     def health_check(self):

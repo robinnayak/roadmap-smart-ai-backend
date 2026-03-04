@@ -9,6 +9,24 @@ from routine.models import (
 )
 
 
+class GenerateDailyTaskListRequestSerializer(serializers.Serializer):
+    date = serializers.DateField(
+        required=False,
+        input_formats=["%Y-%m-%d"],
+        error_messages={"invalid": "Invalid date format. Use YYYY-MM-DD."},
+    )
+    force = serializers.BooleanField(required=False, default=False)
+
+
+class CompleteTaskItemRequestSerializer(serializers.Serializer):
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+    actual_minutes = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+
+
+class SkipTaskItemRequestSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True, default="")
+
+
 class HabitTrackerSerializer(serializers.ModelSerializer):
     """
     FIX: linked_goal now returns a summary dict instead of a raw UUID,

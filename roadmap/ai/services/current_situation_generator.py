@@ -7,6 +7,7 @@ from django.utils import timezone
 from ai.services.base_service import BaseAIService
 from ai.prompts.personalization.user_context_prompts import UserContextPrompt
 from ai.prompts.system_prompts import SystemPrompts
+from ai.config import get_ollama_model
 from ai.providers.ollama_provider import OllamaProvider
 from ai.utils.parsers import ResponseParser
 from ai.utils.formatters import ResponseFormatter
@@ -21,7 +22,7 @@ class CurrentSituationGenerator(BaseAIService):
 
     def __init__(self):
         provider = OllamaProvider(
-            model="gpt-oss:120b-cloud",
+            model=get_ollama_model(),
             temperature=0.3,
             max_tokens=2000,
         )

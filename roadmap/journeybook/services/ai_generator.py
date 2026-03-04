@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import os
 from datetime import date
 from typing import Any
+
+from ai.config import get_journeybook_model, get_ollama_host
 
 
 class AIGenerator:
@@ -20,8 +21,8 @@ class AIGenerator:
             from ai.providers.ollama_provider import OllamaProvider
 
             self.provider = OllamaProvider(
-                host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-                model=os.getenv("JOURNEYBOOK_MODEL", "gpt-oss:20b-cloud"),
+                host=get_ollama_host(),
+                model=get_journeybook_model(),
                 temperature=0.45,
             )
         except Exception:

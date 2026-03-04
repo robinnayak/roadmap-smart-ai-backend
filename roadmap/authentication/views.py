@@ -511,17 +511,25 @@ class UserPersonalDetailsAPIView(ProductionApiView):
         Full update of personal details
         """
 
-        try:
-            details = self.get_object(request.user)
-            serializer = UserPersonalDetailsSerializer(details, data=request.data)
-            if not serializer.is_valid():
-                return error_response(
-                    message="Invalid personal details data.",
-                    errors=serializer.errors,
-                    code="invalid_data",
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        details = self.get_object(request.user)
+        if details is None:
+            return error_response(
+                message="Personal details not found.",
+                code="details_not_found",
+                status=status.HTTP_404_NOT_FOUND,
+                errors=[str("Personal details not found.")],
+            )
 
+        serializer = UserPersonalDetailsSerializer(details, data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid personal details data.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
             serializer.save()
             logger.info(
                 f"Personal details updated successfully for user: {request.user.email}"
@@ -532,29 +540,21 @@ class UserPersonalDetailsAPIView(ProductionApiView):
                 message="Personal details updated successfully",
                 status=status.HTTP_200_OK,
             )
-
-        except UserPersonalDetails.DoesNotExist:
+        except Exception as e:
+            logger.error(f"Error updating personal details: {str(e)}", exc_info=True)
             return error_response(
-                message="Personal details not found.",
-                code="details_not_found",
-                status=status.HTTP_404_NOT_FOUND,
-                errors=[str("Personal details not found.")],
+                message="An error occurred while updating personal details.",
+                code="details_update_error",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors=[str(e)],
             )
 
     def delete(self, request):
         """
         Delete personal details of the logged-in user
         """
-        try:
-            details = self.get_object(request.user)
-            user_email = request.user.email
-            details.delete()
-            logger.info(f"Personal details deleted successfully for user: {user_email}")
-            return success_response(
-                message="Personal details deleted successfully",
-                status=status.HTTP_204_NO_CONTENT,
-            )
-        except UserPersonalDetails.DoesNotExist:
+        details = self.get_object(request.user)
+        if details is None:
             return error_response(
                 message="Personal details not found.",
                 code="details_not_found",
@@ -562,31 +562,59 @@ class UserPersonalDetailsAPIView(ProductionApiView):
                 errors=[str("Personal details not found.")],
             )
 
+        user_email = request.user.email
+        details.delete()
+        logger.info(f"Personal details deleted successfully for user: {user_email}")
+        return success_response(
+            message="Personal details deleted successfully",
+            status=status.HTTP_204_NO_CONTENT,
+        )
 
-class NotificationDetailView(APIView):
+
+class NotificationDetailView(ProductionApiView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
 
     def get(self, request):
-        print("==" * 70)
-        print("user", request.user)
-
-        # Get or create profile
-        notification, created = NotificationSettings.objects.get_or_create(
-            user=request.user
-        )
-        print(f"profile: {notification}, created: {created}")
-
-        # For GET requests, just serialize the instance
-        serializer = NotificationSettingsSerializer(notification)
-        print(f"serializer data: {serializer.data}")
-        print("==" * 70)
-        # Return the serialized data
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        try:
+            notification, _ = NotificationSettings.objects.get_or_create(user=request.user)
+            serializer = NotificationSettingsSerializer(notification)
+            return success_response(
+                data=serializer.data,
+                message="Notification settings retrieved successfully",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.error(f"Error retrieving notification settings: {str(e)}", exc_info=True)
+            return error_response(
+                message="An error occurred while retrieving notification settings.",
+                code="notification_retrieval_error",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors=[str(e)],
+            )
 
     def put(self, request):
-        profile, created = NotificationSettings.objects.get_or_create(user=request.user)
-        serializer = NotificationSettingsSerializer(profile, data=request.data)
-        if serializer.is_valid():
+        try:
+            notification, _ = NotificationSettings.objects.get_or_create(user=request.user)
+            serializer = NotificationSettingsSerializer(notification, data=request.data)
+            if not serializer.is_valid():
+                return error_response(
+                    message="Invalid notification settings data.",
+                    errors=serializer.errors,
+                    code="invalid_data",
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return success_response(
+                data=serializer.data,
+                message="Notification settings updated successfully",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.error(f"Error updating notification settings: {str(e)}", exc_info=True)
+            return error_response(
+                message="An error occurred while updating notification settings.",
+                code="notification_update_error",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors=[str(e)],
+            )

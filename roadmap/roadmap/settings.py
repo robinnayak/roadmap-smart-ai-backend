@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'base.apps.BaseConfig',
     'journeybook.apps.JourneybookConfig',
     'journal.apps.JournalConfig',
+    'community.apps.CommunityConfig',
 ]
 
 MIDDLEWARE = [
@@ -152,6 +153,9 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
+    'DEFAULT_RENDERER_CLASSES': [
+        'common.renderers.ContractJSONRenderer',
+    ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
@@ -211,7 +215,7 @@ LOGGING = {
 if DEBUG:
     # Show browsable API in dev
     REST_FRAMEWORK['DEFAULT_RENDERER_CLASSES'] = [
-        'rest_framework.renderers.JSONRenderer',
+        'common.renderers.ContractJSONRenderer',
         'rest_framework.renderers.BrowsableAPIRenderer',
     ]
     

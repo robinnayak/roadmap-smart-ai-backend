@@ -87,6 +87,81 @@ class RoutineCompletionCascadeTests(APITestCase):
         self.assertEqual(goal.progress_percentage, 100)
 
 
+class RoutineWriteValidationTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="routine-validation@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Validation Goal",
+            description="Validation coverage test",
+            primary_category="career",
+            status="in_progress",
+            target_date=timezone.localdate() + timedelta(days=20),
+        )
+        milestone = Milestone.objects.create(
+            goal=goal,
+            title="Validation Milestone",
+            display_order=1,
+            status="in_progress",
+        )
+        subgoal = SubGoal.objects.create(
+            milestone=milestone,
+            title="Validation Subgoal",
+            display_order=1,
+            status="in_progress",
+        )
+        goal_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Validation Task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=45,
+            display_order=1,
+        )
+        task_list = DailyTaskList.objects.create(
+            user=self.user,
+            date=timezone.localdate(),
+        )
+        self.daily_item = DailyTaskItem.objects.create(
+            task_list=task_list,
+            item_type="goal_task",
+            goal_task=goal_task,
+            related_goal=goal,
+            title=goal_task.title,
+            description=goal_task.description,
+            priority=goal_task.priority,
+            estimated_minutes=goal_task.estimated_duration_minutes,
+            display_order=0,
+        )
+
+    def test_generate_endpoint_rejects_invalid_date_via_serializer(self):
+        response = self.client.post("/routines/generate/", data={"date": "2026/01/31"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "Invalid date format. Use YYYY-MM-DD.")
+
+    def test_complete_endpoint_rejects_invalid_actual_minutes(self):
+        response = self.client.post(
+            f"/routines/tasks/{self.daily_item.id}/complete/",
+            data={"actual_minutes": "not-a-number"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("actual_minutes", response.data)
+
+    def test_skip_endpoint_rejects_invalid_reason_type(self):
+        response = self.client.post(
+            f"/routines/tasks/{self.daily_item.id}/skip/",
+            data={"reason": {"unexpected": "object"}},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("reason", response.data)
+
+
 class DailyTaskGenerationTests(APITestCase):
     def setUp(self):
         self.user = CustomUser.objects.create_user(
@@ -317,3 +392,84 @@ class DailyTaskGenerationTests(APITestCase):
         habit_item_day_two = day_two_list.tasks.filter(item_type="habit", habit=habit).first()
         self.assertIsNotNone(habit_item_day_two)
         self.assertFalse(habit_item_day_two.is_completed)
+
+
+class RoutineProgressEndpointTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="routine-progress@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+
+        today = timezone.localdate()
+        self.goal = Goal.objects.create(
+            user=self.user,
+            title="Progress Goal",
+            description="Progress endpoint test data",
+            primary_category="career",
+            status="in_progress",
+            target_date=today + timedelta(days=20),
+        )
+        milestone = Milestone.objects.create(
+            goal=self.goal,
+            title="Progress Milestone",
+            display_order=1,
+            status="in_progress",
+        )
+        subgoal = SubGoal.objects.create(
+            milestone=milestone,
+            title="Progress Subgoal",
+            display_order=1,
+            status="in_progress",
+        )
+        task = Task.objects.create(
+            subgoal=subgoal,
+            title="Progress Task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=45,
+            display_order=1,
+        )
+        task_list = DailyTaskList.objects.create(user=self.user, date=today)
+        DailyTaskItem.objects.create(
+            task_list=task_list,
+            item_type="goal_task",
+            goal_task=task,
+            related_goal=self.goal,
+            title=task.title,
+            description=task.description,
+            priority=task.priority,
+            estimated_minutes=task.estimated_duration_minutes,
+            display_order=0,
+        )
+        task_list.update_progress()
+
+    def test_progress_endpoint_rejects_invalid_date(self):
+        response = self.client.get("/routines/progress/?date=2026/03/04")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "Invalid date format. Use YYYY-MM-DD.")
+
+    def test_progress_endpoint_returns_expected_payload_shape(self):
+        response = self.client.get("/routines/progress/?period=month")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["timePeriod"], "month")
+        self.assertIn("overallStats", response.data)
+        self.assertIn("habitStats", response.data)
+        self.assertIn("categoryStats", response.data)
+        self.assertIn("weeklyData", response.data)
+        self.assertIn("milestones", response.data)
+        self.assertIn("activityHeatmap", response.data)
+        self.assertIn("todayTaskSheet", response.data)
+
+    def test_week_overview_endpoint_returns_seven_days(self):
+        response = self.client.get("/routines/week/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("week_start", response.data)
+        self.assertEqual(len(response.data["days"]), 7)
+
+    def test_streak_endpoint_returns_streak_payload(self):
+        response = self.client.get("/routines/streak/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("streak", response.data)
+        self.assertEqual(response.data["streak"]["current_streak_days"], 0)
