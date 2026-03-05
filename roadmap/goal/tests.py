@@ -1,10 +1,12 @@
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from authentication.models import CustomUser
+from ai.models import AIProcessingJob
 from goal.models import Goal, Milestone, SubGoal, Task
 
 
@@ -232,3 +234,54 @@ class TaskDetailOwnershipTests(APITestCase):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(str(response.data["id"]), str(self.task.id))
+
+
+class CreateGoalWithHierarchyConfigFallbackTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="goal-hierarchy-config@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.payload = {
+            "title": "Config fallback goal",
+            "description": "Should create goal even when AI env is missing",
+            "why_it_matters": ["Reliability"],
+            "primary_category": "career",
+            "priority": "medium",
+            "target_date": str(timezone.localdate() + timedelta(days=45)),
+            "commitment_confirmed": True,
+            "goal_attributes_input": "Learn machine learning fundamentals in 60 days",
+        }
+
+    def test_async_create_returns_failed_job_when_ai_runtime_not_configured(self):
+        with patch.dict("os.environ", {"OLLAMA_MODEL": "", "OLLAMA_HOST": ""}, clear=False):
+            response = self.client.post(
+                "/goal/create-with-hierarchy/",
+                data=self.payload,
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertIn("goal", response.data)
+        self.assertIn("job", response.data)
+        self.assertEqual(response.data["job"]["status"], "failed")
+        self.assertIn("AI runtime is not configured", response.data["job"]["error_message"])
+
+        job_id = response.data["job"]["id"]
+        job = AIProcessingJob.objects.get(id=job_id, user=self.user)
+        self.assertEqual(job.status, "failed")
+        self.assertIn("Missing environment variable(s): OLLAMA_HOST", job.error_message)
+
+    def test_sync_create_returns_created_goal_with_hierarchy_unavailable_message(self):
+        with patch.dict("os.environ", {"OLLAMA_MODEL": "", "OLLAMA_HOST": ""}, clear=False):
+            response = self.client.post(
+                "/goal/create-with-hierarchy/?sync=true",
+                data=self.payload,
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn("goal", response.data)
+        self.assertIn("hierarchy generation is unavailable", response.data["message"].lower())
+        self.assertIn("AI runtime is not configured", response.data["error"])

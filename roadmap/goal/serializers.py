@@ -1,4 +1,5 @@
 import logging
+from django.core.exceptions import ImproperlyConfigured
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -373,6 +374,18 @@ class GoalSerializer(serializers.ModelSerializer):
         allow_blank=True,
         help_text="Optional motivational commitment line captured at creation time.",
     )
+    why_do_i_want_this = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        help_text="Optional dedicated purpose statement for the goal.",
+    )
+    specific_measurable_target = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        help_text="Optional explicit measurable target for the goal.",
+    )
 
     class Meta:
         model = Goal
@@ -398,6 +411,8 @@ class GoalSerializer(serializers.ModelSerializer):
             "goal_attributes_input",
             "commitment_confirmed",
             "commitment_note",
+            "why_do_i_want_this",
+            "specific_measurable_target",
             "created_at",
             "updated_at",
         ]
@@ -476,6 +491,15 @@ class GoalSerializer(serializers.ModelSerializer):
             logger.info("GoalAttributes saved for goal %s", goal.id)
             return True
 
+        except ImproperlyConfigured:
+            from ai.config import build_ai_runtime_error_message
+
+            logger.warning(
+                "Skipping goal attribute extraction for goal %s: %s",
+                goal.id,
+                build_ai_runtime_error_message(),
+            )
+            return False
         except Exception:
             logger.exception("Failed to extract attributes for goal %s", goal.id)
             return False
@@ -486,6 +510,18 @@ class GoalSerializer(serializers.ModelSerializer):
         goal_attributes_input = validated_data.pop("goal_attributes_input", None)
         validated_data.pop("commitment_confirmed", None)
         validated_data.pop("commitment_note", None)
+        why_do_i_want_this = validated_data.pop("why_do_i_want_this", "").strip()
+        specific_measurable_target = validated_data.pop(
+            "specific_measurable_target", ""
+        ).strip()
+
+        if why_do_i_want_this or specific_measurable_target:
+            impact_dimensions = dict(validated_data.get("impact_dimensions") or {})
+            if why_do_i_want_this:
+                impact_dimensions["why_do_i_want_this"] = why_do_i_want_this
+            if specific_measurable_target:
+                impact_dimensions["specific_measurable_target"] = specific_measurable_target
+            validated_data["impact_dimensions"] = impact_dimensions
 
         # User-created goals are always marked as modified
         if not validated_data.get("is_ai_generated", False):
@@ -502,6 +538,18 @@ class GoalSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         # Attribute extraction only happens at create time
         validated_data.pop("goal_attributes_input", None)
+        why_do_i_want_this = validated_data.pop("why_do_i_want_this", "").strip()
+        specific_measurable_target = validated_data.pop(
+            "specific_measurable_target", ""
+        ).strip()
+
+        if why_do_i_want_this or specific_measurable_target:
+            impact_dimensions = dict(instance.impact_dimensions or {})
+            if why_do_i_want_this:
+                impact_dimensions["why_do_i_want_this"] = why_do_i_want_this
+            if specific_measurable_target:
+                impact_dimensions["specific_measurable_target"] = specific_measurable_target
+            validated_data["impact_dimensions"] = impact_dimensions
 
         # If a user edits an AI-generated goal, flag it
         if instance.is_ai_generated:

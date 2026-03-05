@@ -1,15 +1,11 @@
 from django.contrib import admin
-from .models import (
-    DailyTaskList, DailyTaskItem, HabitTracker,
-    HabitCompletion, DisciplineStreak
-)
 
+from .models import AdaptiveRoadmapState, DailyTaskItem, DailyTaskList, DisciplineStreak, HabitCompletion, HabitTracker
 
-# Register your models here.
 
 admin.site.register(DailyTaskList)
 admin.site.register(DailyTaskItem)
 admin.site.register(HabitTracker)
 admin.site.register(HabitCompletion)
 admin.site.register(DisciplineStreak)
-
+admin.site.register(AdaptiveRoadmapState)

@@ -2,6 +2,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from authentication.models import CustomUser
+from community.models import CommunityDiscussion
 
 
 class CommunityApiTests(APITestCase):
@@ -38,3 +39,18 @@ class CommunityApiTests(APITestCase):
         self.assertEqual(first.status_code, status.HTTP_200_OK)
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(second.data["likes"], first.data["likes"] + 1)
+
+        persisted = CommunityDiscussion.objects.get(id="1")
+        self.assertEqual(persisted.likes, second.data["likes"])
+
+    def test_overview_reads_persisted_discussions(self):
+        self.client.force_authenticate(self.user)
+        self.client.get("/community/overview/")
+        discussion = CommunityDiscussion.objects.get(id="1")
+        discussion.title = "Persisted Title"
+        discussion.save(update_fields=["title", "updated_at"])
+
+        response = self.client.get("/community/overview/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = {item["title"] for item in response.data["discussions"]}
+        self.assertIn("Persisted Title", titles)

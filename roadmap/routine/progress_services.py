@@ -6,7 +6,7 @@ from django.utils import timezone
 from goal.models import Goal, Milestone, Task
 from routine.models import DailyTaskItem, DailyTaskList, DisciplineStreak, HabitTracker
 from routine.serializers import DailyTaskListSummarySerializer, DisciplineStreakSerializer
-from routine.services import get_or_create_today_task_list
+from routine.services import get_or_create_today_task_list, build_weekly_friction_audit
 
 
 HABIT_STYLE_MAP = {
@@ -120,6 +120,121 @@ def resolve_period_window(period: str, target_date):
     return normalized_period, start_date
 
 
+def build_cross_goal_conflict_payload(selected_items) -> dict:
+    """
+    Detect cross-goal execution conflicts from a selected day task sheet and
+    return actionable feasibility suggestions.
+    """
+    goal_items = [item for item in selected_items if item.item_type == "goal_task" and item.related_goal_id]
+    if not goal_items:
+        return {
+            "summary": {
+                "total_conflicts": 0,
+                "conflict_score": 0,
+                "has_conflict": False,
+            },
+            "conflicts": [],
+            "feasibilitySuggestions": [],
+        }
+
+    active_items = [item for item in goal_items if not item.is_completed and not item.is_skipped]
+    total_minutes = sum(int(item.estimated_minutes or 0) for item in active_items)
+    unique_goal_ids = {str(item.related_goal_id) for item in active_items}
+
+    conflicts = []
+    suggestions: list[str] = []
+
+    if total_minutes >= 420:
+        conflicts.append(
+            {
+                "type": "overload",
+                "severity": "high",
+                "message": f"Planned load is {total_minutes} minutes across {len(unique_goal_ids)} goals.",
+                "evidence": {
+                    "total_minutes": total_minutes,
+                    "active_goal_count": len(unique_goal_ids),
+                },
+            }
+        )
+        suggestions.append("Cut or defer at least one low-impact task to keep total planned work under 360 minutes.")
+
+    slot_counts: dict[str, dict] = {}
+    for item in active_items:
+        slot = item.time_slot or "unscheduled"
+        bucket = slot_counts.setdefault(slot, {"count": 0, "minutes": 0, "goals": set(), "high_priority": 0})
+        bucket["count"] += 1
+        bucket["minutes"] += int(item.estimated_minutes or 0)
+        bucket["goals"].add(str(item.related_goal_id))
+        if item.priority == "high":
+            bucket["high_priority"] += 1
+
+    for slot, bucket in slot_counts.items():
+        if slot == "unscheduled":
+            continue
+        if len(bucket["goals"]) >= 2 and (bucket["count"] >= 3 or bucket["minutes"] >= 180):
+            conflicts.append(
+                {
+                    "type": "time_overlap",
+                    "severity": "high" if bucket["minutes"] >= 240 else "medium",
+                    "message": (
+                        f"{slot.capitalize()} has overlapping demand: {bucket['count']} tasks, "
+                        f"{bucket['minutes']} minutes, {len(bucket['goals'])} goals."
+                    ),
+                    "evidence": {
+                        "time_slot": slot,
+                        "task_count": bucket["count"],
+                        "minutes": bucket["minutes"],
+                        "goal_count": len(bucket["goals"]),
+                    },
+                }
+            )
+            suggestions.append(
+                f"Split {slot} workload by moving one task to another slot to avoid cross-goal overlap."
+            )
+
+        if slot in {"morning", "evening"} and bucket["high_priority"] >= 2 and bucket["minutes"] >= 150:
+            conflicts.append(
+                {
+                    "type": "energy_conflict",
+                    "severity": "medium",
+                    "message": (
+                        f"{slot.capitalize()} includes {bucket['high_priority']} high-priority tasks "
+                        f"({bucket['minutes']} minutes), likely causing energy drain."
+                    ),
+                    "evidence": {
+                        "time_slot": slot,
+                        "high_priority_count": bucket["high_priority"],
+                        "minutes": bucket["minutes"],
+                    },
+                }
+            )
+            suggestions.append(
+                f"Downgrade or break one high-intensity {slot} task into a shorter first step."
+            )
+
+    # Keep deterministic order and unique recommendations.
+    unique_suggestions = list(dict.fromkeys(suggestions))
+    severity_rank = {"high": 3, "medium": 2, "low": 1}
+    sorted_conflicts = sorted(
+        conflicts,
+        key=lambda c: (
+            -severity_rank.get(c.get("severity", "low"), 1),
+            c.get("type", ""),
+        ),
+    )
+    conflict_score = min(100, len(sorted_conflicts) * 20)
+
+    return {
+        "summary": {
+            "total_conflicts": len(sorted_conflicts),
+            "conflict_score": conflict_score,
+            "has_conflict": len(sorted_conflicts) > 0,
+        },
+        "conflicts": sorted_conflicts,
+        "feasibilitySuggestions": unique_suggestions[:5],
+    }
+
+
 def build_week_overview_payload(user, today=None):
     today = today or timezone.localdate()
     start_of_week = today - timedelta(days=today.weekday())
@@ -146,9 +261,16 @@ def build_week_overview_payload(user, today=None):
     return {"week_start": start_of_week.isoformat(), "days": week_data}
 
 
-def build_streak_payload(user):
+def build_streak_payload(user, interval_days: int = 1, as_of_date=None):
     streak, _ = DisciplineStreak.objects.get_or_create(user=user)
-    return {"streak": DisciplineStreakSerializer(streak).data}
+    interval_streak = streak.calculate_custom_interval_streak(
+        interval_days=interval_days,
+        as_of_date=as_of_date or timezone.localdate(),
+    )
+    return {
+        "streak": DisciplineStreakSerializer(streak).data,
+        "customIntervalStreak": interval_streak,
+    }
 
 
 def build_progress_overview_payload(
@@ -156,6 +278,7 @@ def build_progress_overview_payload(
     user,
     period: str,
     selected_date_str: str | None,
+    streak_interval_days: int = 1,
     today=None,
 ):
     today = today or timezone.localdate()
@@ -262,6 +385,10 @@ def build_progress_overview_payload(
     )
 
     streak, _ = DisciplineStreak.objects.get_or_create(user=user)
+    interval_streak = streak.calculate_custom_interval_streak(
+        interval_days=streak_interval_days,
+        as_of_date=target_date,
+    )
     days_active = streak.total_days_tracked or DailyTaskList.objects.filter(
         user=user, completed_tasks__gt=0
     ).values("date").distinct().count()
@@ -273,6 +400,9 @@ def build_progress_overview_payload(
         "successRate": success_rate,
         "currentStreak": streak.current_streak_days,
         "maxStreak": streak.longest_streak_days,
+        "streakIntervalDays": streak_interval_days,
+        "customIntervalCurrentStreak": interval_streak["current_streak_intervals"],
+        "customIntervalLongestStreak": interval_streak["longest_streak_intervals"],
         "daysActive": days_active,
     }
 
@@ -505,6 +635,8 @@ def build_progress_overview_payload(
             }
         )
 
+    cross_goal_conflicts = build_cross_goal_conflict_payload(selected_items)
+
     payload = {
         "timePeriod": normalized_period,
         "selectedDate": target_date.isoformat(),
@@ -522,6 +654,9 @@ def build_progress_overview_payload(
         "milestones": milestones_payload,
         "activityHeatmap": activity_heatmap,
         "todayTaskSheet": today_task_sheet,
+        "frictionAudit": build_weekly_friction_audit(user=user, target_date=target_date),
+        "crossGoalConflicts": cross_goal_conflicts,
+        "customIntervalStreak": interval_streak,
         "generatedAt": timezone.now().isoformat(),
     }
 

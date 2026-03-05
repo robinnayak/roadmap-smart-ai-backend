@@ -142,6 +142,54 @@ class TokenRefreshSerializer(serializers.Serializer):
     refresh = serializers.CharField()
 
 
+class ForgotPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    uid = serializers.CharField(required=True)
+    token = serializers.CharField(required=True)
+    new_password = serializers.CharField(required=True, write_only=True)
+
+    def validate_new_password(self, value):
+        if len(value) < 8:
+            raise serializers.ValidationError(
+                "Password must be at least 8 characters long."
+            )
+        if not any(char.isdigit() for char in value):
+            raise serializers.ValidationError(
+                "Password must contain at least one number."
+            )
+        return value
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(required=True, write_only=True)
+    new_password = serializers.CharField(required=True, write_only=True)
+    confirm_password = serializers.CharField(required=True, write_only=True)
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        current_password = attrs.get("current_password")
+        new_password = attrs.get("new_password")
+        confirm_password = attrs.get("confirm_password")
+
+        if not user.check_password(current_password):
+            raise serializers.ValidationError(
+                {"current_password": ["current password not matched."]},
+                code="invalid_current_password",
+            )
+
+        if new_password != confirm_password:
+            raise serializers.ValidationError(
+                {"confirm_password": ["New password and confirm password did not match."]},
+                code="password_mismatch",
+            )
+
+        validate_password(new_password, user=user)
+        return attrs
+
+
 # Profile Prefer Email and Username as read-only fields since they are tied to the user model and should not be changed through the profile endpoint. If you want to allow updates, you can remove the read_only=True and handle the updates in the view.
 
 

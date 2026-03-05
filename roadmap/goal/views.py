@@ -22,6 +22,7 @@
 
 
 from django.shortcuts import render
+from django.core.exceptions import ImproperlyConfigured
 from .serializers import UserCurrentSituationGoalSerializer
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
@@ -39,6 +40,11 @@ from .serializers import (
 )
 from django.utils import timezone
 from ai.models import AIProcessingJob
+from ai.config import (
+    build_ai_runtime_error_message,
+    get_missing_ai_env_vars,
+    get_ai_debug_enabled,
+)
 from ai.services.text_extraction import GoalAttributeExtractor
 from ai.services.GoalHierarchyGenerator import GoalHierarchyGenerator
 from rest_framework import status
@@ -287,6 +293,15 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
 
     permission_classes = [IsAuthenticated]
 
+    @staticmethod
+    def _extract_hierarchy_error(result: dict) -> str:
+        return (
+            result.get("message")
+            or result.get("error")
+            or result.get("error_message")
+            or "Unknown hierarchy generation error"
+        )
+
     def post(self, request):
         try:
             print(f"\n{'='*80}")
@@ -303,9 +318,19 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                 return Response(errors, status=status.HTTP_400_BAD_REQUEST)
 
             logger.info(f"Goal created: {goal.id} - {goal.title}")
-            print(f"✓ Goal created: {goal.id} - {goal.title}")
+            print(f"Goal created: {goal.id} - {goal.title}")
 
             sync_mode = str(request.query_params.get("sync", "false")).lower() == "true"
+            missing_ai_env_vars = get_missing_ai_env_vars()
+            ai_runtime_error_message = build_ai_runtime_error_message()
+            if get_ai_debug_enabled():
+                logger.info(
+                    "[AI_DEBUG] create-with-hierarchy request user_id=%s goal_id=%s sync=%s missing_ai_env=%s",
+                    request.user.id,
+                    goal.id,
+                    sync_mode,
+                    ",".join(missing_ai_env_vars) if missing_ai_env_vars else "none",
+                )
             if not sync_mode:
                 job = AIProcessingJob.objects.create(
                     user=request.user,
@@ -322,6 +347,30 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                     status="pending",
                     progress_percentage=0,
                 )
+
+                if missing_ai_env_vars:
+                    job.metadata = {
+                        **(job.metadata or {}),
+                        "progress_message": "Hierarchy generation unavailable: AI runtime is not configured.",
+                    }
+                    job.save(update_fields=["metadata", "updated_at"])
+                    job.mark_failed(ai_runtime_error_message)
+                    return Response(
+                        {
+                            "message": "Goal created, but hierarchy generation is unavailable until AI runtime is configured.",
+                            "goal": GoalSerializer(goal).data,
+                            "job": {
+                                "id": str(job.id),
+                                "status": job.status,
+                                "progress_percentage": job.progress_percentage,
+                                "progress_message": (job.metadata or {}).get("progress_message", ""),
+                                "poll_url": f"/ai/jobs/{job.id}/",
+                                "estimated_seconds": 0,
+                                "error_message": job.error_message,
+                            },
+                        },
+                        status=status.HTTP_202_ACCEPTED,
+                    )
 
                 estimated_seconds = self._estimate_generation_seconds(goal)
                 worker = threading.Thread(
@@ -354,6 +403,15 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
             goal_data = build_goal_seed_data(goal)
             # Get user context
             user_context = self._get_user_context(request.user)
+            if missing_ai_env_vars:
+                return Response(
+                    {
+                        "message": "Goal created, but hierarchy generation is unavailable until AI runtime is configured.",
+                        "goal": GoalSerializer(goal).data,
+                        "error": ai_runtime_error_message,
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
             # 2. Generate Complete Hierarchy
             generator = GoalHierarchyGenerator()
 
@@ -365,16 +423,17 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
 
 
             if hierarchy_result.get("status") != "success":
+                hierarchy_error = self._extract_hierarchy_error(hierarchy_result)
                 logger.warning(
                     "Hierarchy generation failed for goal %s: %s",
                     goal.id,
-                    hierarchy_result.get("message"),
+                    hierarchy_error,
                 )
                 return Response(
                     {
                         "message": "Goal created, but hierarchy generation failed.",
                         "goal": GoalSerializer(goal).data,
-                        "error": hierarchy_result.get("message"),
+                        "error": hierarchy_error,
                     },
                     status=status.HTTP_201_CREATED,
                 )
@@ -442,10 +501,11 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
             )
 
             if hierarchy_result.get("status") != "success":
+                hierarchy_error = self._extract_hierarchy_error(hierarchy_result)
                 logger.warning(
                     "Async hierarchy generation failed for goal %s: %s",
                     goal.id,
-                    hierarchy_result.get("message"),
+                    hierarchy_error,
                 )
                 return
 
@@ -459,6 +519,20 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                 saved_counts["subgoals"],
                 saved_counts["tasks"],
             )
+        except ImproperlyConfigured:
+            logger.warning(
+                "Async hierarchy generation skipped for goal %s: %s",
+                goal_id,
+                build_ai_runtime_error_message(),
+            )
+            try:
+                failed_job = AIProcessingJob.objects.get(id=job_id, user_id=user_id)
+                failed_job.mark_failed(build_ai_runtime_error_message())
+            except Exception:
+                logger.exception(
+                    "Could not mark async job as failed for missing AI runtime config: %s",
+                    job_id,
+                )
         except Exception:
             logger.exception("Async hierarchy worker failed for goal %s", goal_id)
             try:
@@ -528,7 +602,7 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
         saved = {"milestones": 0, "subgoals": 0, "tasks": 0}
 
         milestones_data = hierarchy_data.get("milestones", [])
-        print(f"\n📊 SAVING HIERARCHY TO DATABASE")
+        print("\nSAVING HIERARCHY TO DATABASE")
         print(f"Total milestones to process: {len(milestones_data)}")
 
         for m_idx, milestone_entry in enumerate(hierarchy_data.get("milestones", []), 1):
@@ -1089,6 +1163,7 @@ class CommitmentContractAPIView(APIView):
 
 
     
+
 
 
 

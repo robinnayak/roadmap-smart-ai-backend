@@ -8,6 +8,13 @@ Views for user registration, authentication, profile management, and token opera
 import logging
 from django.utils import timezone
 from django.contrib.auth import authenticate
+from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import PasswordResetTokenGenerator
+from django.conf import settings
+from django.core.mail import send_mail
+from django.utils.encoding import force_bytes
+from django.utils.encoding import force_str
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.shortcuts import get_object_or_404
 
 
@@ -35,6 +42,9 @@ from .serializers import (
     ProfileSerializer,
     UserPersonalDetailsSerializer,
     NotificationSettingsSerializer,
+    ForgotPasswordSerializer,
+    ResetPasswordSerializer,
+    ChangePasswordSerializer,
 )
 from .models import Profile, NotificationSettings, UserPersonalDetails
 
@@ -42,6 +52,7 @@ from .models import Profile, NotificationSettings, UserPersonalDetails
 from .core.response import success_response, error_response, created_response
 
 logger = logging.getLogger(__name__)
+User = get_user_model()
 
 
 class ProductionApiView(APIView):
@@ -220,6 +231,133 @@ class UserLoginView(ProductionApiView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+class ForgotPasswordView(ProductionApiView):
+    permission_classes = [AllowAny]
+    throttle_classes = [AnonRateThrottle]
+
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid forgot-password payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        email = serializer.validated_data["email"]
+        user = User.objects.filter(email__iexact=email).first()
+
+        if user:
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            token = PasswordResetTokenGenerator().make_token(user)
+            reset_base_url = getattr(settings, "PASSWORD_RESET_URL", "").strip()
+            if reset_base_url:
+                separator = "&" if "?" in reset_base_url else "?"
+                reset_link = f"{reset_base_url}{separator}uid={uid}&token={token}"
+                try:
+                    send_mail(
+                        subject="Reset your password",
+                        message=(
+                            "You requested a password reset.\n\n"
+                            f"Use this link to reset your password:\n{reset_link}\n\n"
+                            "If you did not request this, you can ignore this message."
+                        ),
+                        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                        recipient_list=[user.email],
+                        fail_silently=True,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Forgot-password email dispatch failed for user %s", user.id
+                    )
+
+        return success_response(
+            message=(
+                "If an account exists for this email, a password reset link has been sent."
+            ),
+            status=status.HTTP_200_OK,
+        )
+
+
+class ResetPasswordView(ProductionApiView):
+    permission_classes = [AllowAny]
+    throttle_classes = [AnonRateThrottle]
+
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid reset-password payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        uid = serializer.validated_data["uid"]
+        token = serializer.validated_data["token"]
+        new_password = serializer.validated_data["new_password"]
+
+        try:
+            user_id = force_str(urlsafe_base64_decode(uid))
+            user = User.objects.get(pk=user_id)
+        except Exception:
+            return error_response(
+                message="Invalid reset token or user.",
+                errors={"uid": ["Invalid uid."]},
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token_generator = PasswordResetTokenGenerator()
+        if not token_generator.check_token(user, token):
+            return error_response(
+                message="Invalid reset token or user.",
+                errors={"token": ["Invalid or expired token."]},
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+        return success_response(
+            message="Password reset successful.",
+            status=status.HTTP_200_OK,
+        )
+
+
+class ChangePasswordView(ProductionApiView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data, context={"request": request})
+        if not serializer.is_valid():
+            error_code = serializer.errors.get("current_password")
+            return error_response(
+                message=(
+                    "current password not matched."
+                    if error_code and "current password not matched." in error_code
+                    else "Invalid password change data."
+                ),
+                errors=serializer.errors,
+                code=(
+                    "invalid_current_password"
+                    if error_code and "current password not matched." in error_code
+                    else "invalid_data"
+                ),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request.user.set_password(serializer.validated_data["new_password"])
+        request.user.save(update_fields=["password"])
+        logger.info("Password changed successfully for user: %s", request.user.email)
+        return success_response(
+            message="Password updated successfully.",
+            status=status.HTTP_200_OK,
+        )
+
+
 class UserLogoutView(ProductionApiView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [AnonRateThrottle]
@@ -290,8 +428,7 @@ class CustomTokenRefreshView(TokenRefreshView):
         except (InvalidToken, TokenError):
             return Response(
                 {
-                    "error": "Token is invalid or expired",
-                    "code": "token_not_valid",
+                    "error": "session_expired",
                 },
                 status=status.HTTP_401_UNAUTHORIZED,
             )
@@ -387,6 +524,20 @@ class ProfileDetailView(ProductionApiView):
             - 400: Invalid update data
             - 404: Profile not found
         """
+        if any(
+            field in request.data
+            for field in ("current_password", "new_password", "confirm_password")
+        ):
+            return error_response(
+                message="Use /auth/change-password/ endpoint for password updates.",
+                errors={
+                    "non_field_errors": [
+                        "Password updates are not supported on /auth/profile/."
+                    ]
+                },
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             profile = Profile.objects.get(user=request.user)

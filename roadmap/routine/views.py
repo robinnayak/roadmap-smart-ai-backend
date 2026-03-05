@@ -10,7 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from routine.models import DailyTaskItem, HabitTracker
+from routine.models import DailyTaskItem, HabitTracker, DailyTaskList
 from routine.serializers import (
     DailyTaskListSerializer,
     DailyTaskItemSerializer,
@@ -26,6 +26,18 @@ from routine.progress_services import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_interval_days(value: str | None) -> int:
+    if value in (None, ""):
+        return 1
+    try:
+        interval_days = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid interval_days. Use an integer between 1 and 30.") from exc
+    if interval_days < 1 or interval_days > 30:
+        raise ValueError("Invalid interval_days. Use an integer between 1 and 30.")
+    return interval_days
 
 
 class TodayTaskListAPIView(APIView):
@@ -75,6 +87,28 @@ class GenerateDailyTaskListAPIView(APIView):
         )
         response_status = http_status.HTTP_201_CREATED if created else http_status.HTTP_200_OK
         return Response({"message": message, "task_list": serializer.data}, status=response_status)
+
+
+class RoutineDetailAPIView(APIView):
+    """
+    DELETE /routines/<routine_id>/
+    Deletes a specific daily routine list if owned by the requesting user.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, routine_id):
+        routine = DailyTaskList.objects.filter(id=routine_id).first()
+        if not routine:
+            return Response({"error": "Routine not found."}, status=http_status.HTTP_404_NOT_FOUND)
+        if routine.user_id != request.user.id:
+            return Response(
+                {"error": "You do not have permission to delete this routine."},
+                status=http_status.HTTP_403_FORBIDDEN,
+            )
+
+        routine.delete()
+        return Response(status=http_status.HTTP_204_NO_CONTENT)
 
 
 class CompleteTaskItemAPIView(APIView):
@@ -188,12 +222,15 @@ class ProgressOverviewAPIView(APIView):
     def get(self, request):
         period = request.query_params.get("period", "week").lower()
         selected_date_str = request.query_params.get("date")
+        interval_days_str = request.query_params.get("streak_interval_days")
 
         try:
+            streak_interval_days = _parse_interval_days(interval_days_str)
             payload = build_progress_overview_payload(
                 user=request.user,
                 period=period,
                 selected_date_str=selected_date_str,
+                streak_interval_days=streak_interval_days,
             )
         except ValueError as exc:
             return Response({"error": str(exc)}, status=http_status.HTTP_400_BAD_REQUEST)
@@ -207,7 +244,11 @@ class DisciplineStreakAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        payload = build_streak_payload(request.user)
+        try:
+            interval_days = _parse_interval_days(request.query_params.get("interval_days"))
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=http_status.HTTP_400_BAD_REQUEST)
+        payload = build_streak_payload(request.user, interval_days=interval_days)
         return Response(payload, status=http_status.HTTP_200_OK)
 
 

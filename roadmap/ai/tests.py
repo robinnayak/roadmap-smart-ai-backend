@@ -3,7 +3,8 @@ from django.test import TestCase
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ImproperlyConfigured
 from django.urls import reverse
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
+import httpx
 
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -220,19 +221,94 @@ class OllamaProviderEnvConfigTests(TestCase):
                 OllamaProvider()
 
     @patch("ai.providers.ollama_provider.Client")
-    def test_provider_requires_ollama_model_env_when_model_is_not_passed(self, _mock_client):
+    def test_provider_uses_default_model_when_model_env_is_not_passed(self, mock_client):
         with patch.dict(os.environ, {"OLLAMA_HOST": "http://localhost:11434", "OLLAMA_MODEL": ""}, clear=False):
-            with self.assertRaises(ImproperlyConfigured):
-                OllamaProvider()
+            provider = OllamaProvider()
+
+        mock_client.assert_called_once()
+        called_kwargs = mock_client.call_args.kwargs
+        self.assertEqual(called_kwargs["host"], "http://localhost:11434")
+        self.assertEqual(called_kwargs["timeout"], 180.0)
+        self.assertFalse(called_kwargs["trust_env"])
+        self.assertEqual(provider.model, "gpt-oss:120b-cloud")
 
     @patch("ai.providers.ollama_provider.Client")
     def test_provider_allows_explicit_host_and_model_overrides(self, mock_client):
         with patch.dict(os.environ, {"OLLAMA_HOST": "", "OLLAMA_MODEL": ""}, clear=False):
             provider = OllamaProvider(host="http://custom-host:11434", model="custom-model")
 
-        mock_client.assert_called_once_with(host="http://custom-host:11434")
+        mock_client.assert_called_once()
+        called_kwargs = mock_client.call_args.kwargs
+        self.assertEqual(called_kwargs["host"], "http://custom-host:11434")
+        self.assertEqual(called_kwargs["timeout"], 180.0)
+        self.assertFalse(called_kwargs["trust_env"])
         self.assertEqual(provider.host, "http://custom-host:11434")
         self.assertEqual(provider.model, "custom-model")
+
+    @patch("ai.providers.ollama_provider.Client")
+    def test_provider_respects_ollama_transport_env_overrides(self, mock_client):
+        with patch.dict(
+            os.environ,
+            {
+                "OLLAMA_HOST": "http://localhost:11434",
+                "OLLAMA_MODEL": "demo-model",
+                "OLLAMA_REQUEST_TIMEOUT_SECONDS": "42",
+                "OLLAMA_TRUST_ENV": "true",
+            },
+            clear=False,
+        ):
+            OllamaProvider()
+
+        called_kwargs = mock_client.call_args.kwargs
+        self.assertEqual(called_kwargs["timeout"], 42.0)
+        self.assertTrue(called_kwargs["trust_env"])
+
+
+class OllamaProviderRetryTests(TestCase):
+    def setUp(self):
+        self.env = {
+            "OLLAMA_HOST": "http://localhost:11434",
+            "OLLAMA_MODEL": "demo-model",
+            "OLLAMA_MAX_RETRIES": "2",
+            "OLLAMA_RETRY_BACKOFF_SECONDS": "0",
+        }
+
+    @patch("ai.providers.ollama_provider.time.sleep")
+    @patch("ai.providers.ollama_provider.Client")
+    def test_generate_response_retries_on_read_error_and_succeeds(self, mock_client, _mock_sleep):
+        first_client = MagicMock()
+        second_client = MagicMock()
+        third_client = MagicMock()
+        first_client.chat.side_effect = httpx.ReadError("winerror 10054")
+        second_client.chat.side_effect = httpx.ReadError("connection reset by peer")
+        third_client.chat.return_value = {"message": {"content": "ok"}}
+        mock_client.side_effect = [first_client, second_client, third_client]
+
+        with patch.dict(os.environ, self.env, clear=False):
+            provider = OllamaProvider()
+            response = provider.generate_response(prompt="hello")
+
+        self.assertEqual(response.content, "ok")
+        self.assertEqual(mock_client.call_count, 3)
+
+    @patch("ai.providers.ollama_provider.time.sleep")
+    @patch("ai.providers.ollama_provider.Client")
+    def test_generate_response_raises_after_retry_budget_exhausted(self, mock_client, _mock_sleep):
+        first_client = MagicMock()
+        second_client = MagicMock()
+        third_client = MagicMock()
+        first_client.chat.side_effect = httpx.ReadError("winerror 10054")
+        second_client.chat.side_effect = httpx.ReadError("winerror 10054")
+        third_client.chat.side_effect = httpx.ReadError("winerror 10054")
+        mock_client.side_effect = [first_client, second_client, third_client]
+
+        with patch.dict(os.environ, self.env, clear=False):
+            provider = OllamaProvider()
+            with self.assertRaises(RuntimeError) as exc:
+                provider.generate_response(prompt="hello")
+
+        self.assertIn("Ollama generation failed", str(exc.exception))
+        self.assertEqual(mock_client.call_count, 3)
 
 
 class AIHealthCheckConfigTests(APITestCase):
@@ -252,3 +328,28 @@ class AIHealthCheckConfigTests(APITestCase):
         self.assertEqual(response.data["status"], "unhealthy")
         self.assertEqual(response.data["service"], "ollama")
         self.assertIn("Missing required environment variable", response.data["error"])
+
+    @patch("ai.views.OllamaProvider.health_check", autospec=True)
+    def test_health_check_uses_default_model_when_ollama_model_is_missing(self, mock_health_check):
+        def _healthy(provider_instance):
+            return {
+                "status": "healthy",
+                "service": "ollama",
+                "host": provider_instance.host,
+                "model": provider_instance.model,
+                "error": None,
+            }
+
+        mock_health_check.side_effect = _healthy
+
+        with patch.dict(
+            os.environ,
+            {"OLLAMA_HOST": "http://localhost:11434", "OLLAMA_MODEL": ""},
+            clear=False,
+        ):
+            response = self.client.get(reverse("ai-health-check"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "healthy")
+        self.assertEqual(response.data["service"], "ollama")
+        self.assertEqual(response.data["model"], "gpt-oss:120b-cloud")
