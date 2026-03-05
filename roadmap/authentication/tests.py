@@ -16,7 +16,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.core.cache import cache
 from rest_framework import status 
 
-from authentication.models import UserPersonalDetails
+from authentication.models import NotificationSettings, UserPersonalDetails
 
 User = get_user_model()
 
@@ -368,6 +368,7 @@ class ProfilePersonalNotificationEndpointTests(APITestCase):
             email="profiletest@example.com",
             password="StrongPass123!",
         )
+        self.notification_url = reverse("user-notification")
         self.client.force_authenticate(user=self.user)
 
     def test_personal_details_put_without_existing_record_returns_404_envelope(self):
@@ -392,8 +393,7 @@ class ProfilePersonalNotificationEndpointTests(APITestCase):
         self.assertEqual(response.data["code"], "details_not_found")
 
     def test_notification_get_uses_standard_success_envelope(self):
-        url = reverse("user-notification")
-        response = self.client.get(url)
+        response = self.client.get(self.notification_url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["success"])
@@ -401,9 +401,8 @@ class ProfilePersonalNotificationEndpointTests(APITestCase):
         self.assertIn("notifications_enabled", response.data["data"])
 
     def test_notification_put_invalid_payload_returns_standard_error_envelope(self):
-        url = reverse("user-notification")
         response = self.client.put(
-            url,
+            self.notification_url,
             data={"notifications_enabled": "not-a-boolean"},
             format="json",
         )
@@ -411,6 +410,55 @@ class ProfilePersonalNotificationEndpointTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(response.data["success"])
         self.assertEqual(response.data["code"], "invalid_data")
+        self.assertIn("errors", response.data)
+
+    def test_notification_get_requires_authentication_returns_401(self):
+        self.client.force_authenticate(user=None)
+        response = self.client.get(self.notification_url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_notification_put_requires_authentication_returns_401(self):
+        self.client.force_authenticate(user=None)
+        response = self.client.put(
+            self.notification_url,
+            data={"notifications_enabled": False},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_notification_put_success_updates_settings_and_returns_success_envelope(self):
+        payload = {
+            "notifications_enabled": False,
+            "routine_remainders": False,
+            "streak_warnings": False,
+            "personalize_assistant": False,
+            "push_notifications": False,
+            "email_notifications": True,
+        }
+        response = self.client.put(self.notification_url, data=payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertIn("data", response.data)
+        for key, value in payload.items():
+            self.assertEqual(response.data["data"][key], value)
+
+        notification = NotificationSettings.objects.get(user=self.user)
+        self.assertEqual(notification.notifications_enabled, payload["notifications_enabled"])
+        self.assertEqual(notification.routine_remainders, payload["routine_remainders"])
+        self.assertEqual(notification.streak_warnings, payload["streak_warnings"])
+        self.assertEqual(notification.personalize_assistant, payload["personalize_assistant"])
+        self.assertEqual(notification.push_notifications, payload["push_notifications"])
+        self.assertEqual(notification.email_notifications, payload["email_notifications"])
+
+    @patch("authentication.views.NotificationSettings.objects.get_or_create")
+    def test_notification_get_failure_returns_retrieval_error_contract(self, get_or_create_mock):
+        get_or_create_mock.side_effect = Exception("boom")
+        response = self.client.get(self.notification_url)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "notification_retrieval_error")
         self.assertIn("errors", response.data)
 
     def test_profile_password_change_with_invalid_current_password_returns_error(self):
