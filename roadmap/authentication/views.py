@@ -7,11 +7,11 @@ Views for user registration, authentication, profile management, and token opera
 
 import logging
 from django.utils import timezone
-from django.contrib.auth import authenticate
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.conf import settings
 from django.core.mail import send_mail
+from django.core import signing
 from django.utils.encoding import force_bytes
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
@@ -42,6 +42,7 @@ from .serializers import (
     ProfileSerializer,
     UserPersonalDetailsSerializer,
     NotificationSettingsSerializer,
+    UserReactivateSerializer,
     ForgotPasswordSerializer,
     ResetPasswordSerializer,
     ChangePasswordSerializer,
@@ -53,6 +54,24 @@ from .core.response import success_response, error_response, created_response
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+REACTIVATION_TOKEN_SALT = "authentication.reactivation"
+REACTIVATION_TOKEN_MAX_AGE_SECONDS = getattr(
+    settings, "REACTIVATION_TOKEN_MAX_AGE_SECONDS", 900
+)
+
+
+def _build_reactivation_token(user):
+    signer = signing.TimestampSigner(salt=REACTIVATION_TOKEN_SALT)
+    payload = f"{user.id}:{user.email.lower()}"
+    return signer.sign(payload)
+
+
+def _build_reactivation_path_payload(reactivation_token):
+    return {
+        "reactivation_token": reactivation_token,
+        "expires_in_seconds": REACTIVATION_TOKEN_MAX_AGE_SECONDS,
+        "reactivate_endpoint": "/auth/user-reactivate/",
+    }
 
 
 class ProductionApiView(APIView):
@@ -196,39 +215,36 @@ class UserLoginView(ProductionApiView):
     def post(self, request):
         serializer = UserLoginSerializer(data=request.data)
 
-        if serializer.is_valid():
-            email = serializer.validated_data.get("email")
-            password = serializer.validated_data.get("password")
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid login payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            # Authenticate user
-            user = authenticate(request, email=email, password=password)
+        user = serializer.validated_data["user"]
+        if not user.is_active:
+            reactivation_token = _build_reactivation_token(user)
+            return error_response(
+                message=(
+                    "This account is deactivated. Reactivate your account to continue."
+                ),
+                code="account_deactivated",
+                status=status.HTTP_403_FORBIDDEN,
+                extra={"reactivation": _build_reactivation_path_payload(reactivation_token)},
+            )
 
-            if user is not None:
-                if user.is_active:
-                    # Generate tokens
-                    refresh = RefreshToken.for_user(user)
-
-                    response_data = {
-                        "message": "Login successful",
-                        "tokens": {
-                            "access": str(refresh.access_token),
-                            "refresh": str(refresh),
-                        },
-                        "user": UserProfileSerializer(user).data,
-                    }
-                    return Response(response_data, status=status.HTTP_200_OK)
-                else:
-                    return Response(
-                        {"error": "Account is not active"},
-                        status=status.HTTP_401_UNAUTHORIZED,
-                    )
-            else:
-                return Response(
-                    {"error": "Invalid credentials"},
-                    status=status.HTTP_401_UNAUTHORIZED,
-                )
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        refresh = RefreshToken.for_user(user)
+        response_data = {
+            "message": "Login successful",
+            "tokens": {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+            },
+            "user": UserProfileSerializer(user).data,
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 class ForgotPasswordView(ProductionApiView):
@@ -453,22 +469,20 @@ class UserDeactivateView(ProductionApiView):
     throttle_classes = [AnonRateThrottle]
 
     def post(self, request):
-        """
-        Delete (deactivate) the user's account. This is a soft delete that sets is_active to False.
-        Returns:
-            - 200: Account deactivated successfully
-            - 400: Invalid data
-        """
-        deactivate = request.data.get("deactivate", True)
         try:
             user = request.user
-            user.is_active = deactivate
-            user.save()
-            logger.info(
-                f"Account {'activated' if not deactivate else 'deactivated'} successfully for user: {user.email}"
-            )
+            if not user.is_active:
+                return error_response(
+                    message="Account is already deactivated.",
+                    code="already_deactivated",
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            user.is_active = False
+            user.save(update_fields=["is_active"])
+            logger.info("Account deactivated successfully for user: %s", user.email)
             return success_response(
-                message=f"Account {'activated' if not deactivate else 'deactivated'} successfully"
+                message="Account deactivated successfully. You can reactivate it at any time."
             )
         except Exception as e:
             logger.error(f"Error updating account status: {str(e)}", exc_info=True)
@@ -479,6 +493,71 @@ class UserDeactivateView(ProductionApiView):
                 status=status.HTTP_400_BAD_REQUEST,
                 errors=[str(e)],
             )
+
+
+class UserReactivateView(ProductionApiView):
+    permission_classes = [AllowAny]
+    throttle_classes = [AnonRateThrottle]
+
+    def post(self, request):
+        serializer = UserReactivateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid reactivation payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token = serializer.validated_data["reactivation_token"]
+        signer = signing.TimestampSigner(salt=REACTIVATION_TOKEN_SALT)
+        try:
+            payload = signer.unsign(token, max_age=REACTIVATION_TOKEN_MAX_AGE_SECONDS)
+        except signing.SignatureExpired:
+            return error_response(
+                message="Reactivation token is invalid or expired.",
+                code="invalid_or_expired_token",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors={"reactivation_token": ["Token has expired."]},
+            )
+        except signing.BadSignature:
+            return error_response(
+                message="Reactivation token is invalid or expired.",
+                code="invalid_or_expired_token",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors={"reactivation_token": ["Token is invalid."]},
+            )
+
+        try:
+            user_id, email = payload.split(":", 1)
+            user = User.objects.get(id=user_id, email__iexact=email)
+        except (ValueError, User.DoesNotExist):
+            return error_response(
+                message="Unauthorized reactivation attempt.",
+                code="unauthorized_reactivation_attempt",
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        if user.is_active:
+            return error_response(
+                message="Account is already active.",
+                code="already_active",
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        user.is_active = True
+        user.save(update_fields=["is_active"])
+        refresh = RefreshToken.for_user(user)
+        return success_response(
+            message="Account reactivated successfully.",
+            data={
+                "tokens": {
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
+                },
+                "user": UserProfileSerializer(user).data,
+            },
+        )
 
 
 class ProfileDetailView(ProductionApiView):

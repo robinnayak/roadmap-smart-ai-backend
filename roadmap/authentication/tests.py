@@ -7,6 +7,7 @@ from django.utils import timezone
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 from django.core.serializers.json import DjangoJSONEncoder
+from django.core import signing
 from rest_framework.test import APITestCase
 from django.urls import reverse
 # from django.test import Client
@@ -205,6 +206,159 @@ class UserRegistrationTestCase(APITestCase):
                 self.assertIn('error', response.data)
                 break
         # self.assertTrue(rate_limited, "Rate limiting was not triggered within the expected number of requests")
+
+
+class AccountActivationLifecycleTests(APITestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(
+            email="lifecycle@example.com",
+            password="StrongPass123!",
+            username="lifecycle",
+        )
+        self.login_url = reverse("user-login")
+        self.deactivate_url = reverse("user-profile-deactivate")
+        self.reactivate_url = reverse("user-profile-reactivate")
+
+    def _login(self):
+        return self.client.post(
+            self.login_url,
+            data={"email": self.user.email, "password": "StrongPass123!"},
+            format="json",
+        )
+
+    def _login_for_access_token(self):
+        response = self._login()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data["tokens"]["access"]
+
+    def test_deactivate_success_sets_user_inactive(self):
+        access = self._login_for_access_token()
+        response = self.client.post(
+            self.deactivate_url,
+            data={},
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {access}",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertIn("deactivated", response.data["message"].lower())
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.is_active)
+
+    def test_deactivate_requires_authentication(self):
+        response = self.client.post(self.deactivate_url, data={}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_deactivate_when_already_deactivated_returns_conflict(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            self.deactivate_url,
+            data={},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "already_deactivated")
+        self.client.force_authenticate(user=None)
+
+    def test_login_for_deactivated_user_returns_reactivation_path(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+        response = self._login()
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "account_deactivated")
+        self.assertIn("reactivation", response.data)
+        self.assertIn("reactivation_token", response.data["reactivation"])
+
+    def test_reactivate_success_for_deactivated_user(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+        login_response = self._login()
+        token = login_response.data["reactivation"]["reactivation_token"]
+
+        response = self.client.post(
+            self.reactivate_url,
+            data={"reactivation_token": token},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertIn("tokens", response.data["data"])
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.is_active)
+
+    def test_reactivate_with_invalid_token_returns_error(self):
+        response = self.client.post(
+            self.reactivate_url,
+            data={"reactivation_token": "bad-token"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "invalid_or_expired_token")
+
+    @patch("authentication.views.signing.TimestampSigner.unsign")
+    def test_reactivate_with_expired_token_returns_error(self, unsign_mock):
+        unsign_mock.side_effect = signing.SignatureExpired("expired")
+        response = self.client.post(
+            self.reactivate_url,
+            data={"reactivation_token": "expired-token"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "invalid_or_expired_token")
+
+    def test_reactivate_when_already_active_returns_conflict(self):
+        login_response = self._login()
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+        deactivated_login = self._login()
+        token = deactivated_login.data["reactivation"]["reactivation_token"]
+        self.client.post(self.reactivate_url, data={"reactivation_token": token}, format="json")
+
+        active_response = self.client.post(
+            self.reactivate_url,
+            data={"reactivation_token": token},
+            format="json",
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(active_response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(active_response.data["code"], "already_active")
+
+    def test_deactivate_reactivate_lifecycle_allows_login_again(self):
+        access = self._login_for_access_token()
+        deactivate_response = self.client.post(
+            self.deactivate_url,
+            data={},
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {access}",
+        )
+        self.assertEqual(deactivate_response.status_code, status.HTTP_200_OK)
+
+        blocked_login = self._login()
+        self.assertEqual(blocked_login.status_code, status.HTTP_403_FORBIDDEN)
+        token = blocked_login.data["reactivation"]["reactivation_token"]
+
+        reactivate_response = self.client.post(
+            self.reactivate_url,
+            data={"reactivation_token": token},
+            format="json",
+        )
+        self.assertEqual(reactivate_response.status_code, status.HTTP_200_OK)
+
+        final_login = self._login()
+        self.assertEqual(final_login.status_code, status.HTTP_200_OK)
+        self.assertIn("tokens", final_login.data)
 
 
 class ProfilePersonalNotificationEndpointTests(APITestCase):

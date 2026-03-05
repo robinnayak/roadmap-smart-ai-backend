@@ -138,6 +138,10 @@ class UserLogoutSerializer(serializers.Serializer):
     refresh_token = serializers.CharField(required=True)
 
 
+class UserReactivateSerializer(serializers.Serializer):
+    reactivation_token = serializers.CharField(required=True)
+
+
 class TokenRefreshSerializer(serializers.Serializer):
     refresh = serializers.CharField()
 
