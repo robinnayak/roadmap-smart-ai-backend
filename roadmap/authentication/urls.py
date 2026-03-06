@@ -9,14 +9,22 @@ from .views import (
     NotificationDetailView,
     UserPersonalDetailsAPIView,
     UserDeactivateView,
-    UserView
+    UserReactivateView,
+    UserView,
+    ForgotPasswordView,
+    ResetPasswordView,
+    ChangePasswordView,
 )
 
 urlpatterns = [
     path("register/", UserRegistrationView.as_view(), name="user-register"),
     path("login/", UserLoginView.as_view(), name="user-login"),
+    path("forgot-password/", ForgotPasswordView.as_view(), name="forgot-password"),
+    path("reset-password/", ResetPasswordView.as_view(), name="reset-password"),
+    path("change-password/", ChangePasswordView.as_view(), name="change-password"),
     path("logout/", UserLogoutView.as_view(), name="user-logout"),
     path("user-deactivate/", UserDeactivateView.as_view(), name="user-profile-deactivate"),
+    path("user-reactivate/", UserReactivateView.as_view(), name="user-profile-reactivate"),
     path("profile/", ProfileDetailView.as_view(), name="user-profile"),
     path("personal-details/", UserPersonalDetailsAPIView.as_view(), name="user-personal-details"),
     path("notification/", NotificationDetailView.as_view(), name="user-notification"),

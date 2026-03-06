@@ -245,7 +245,7 @@ The API uses JWT (JSON Web Tokens) for authentication. Include the token in the 
     "status": "AI service is healthy",
     "service": "ollama",
     "host": "localhost:11434",
-    "model": "llama3.2"
+    "model": "gpt-oss:120b-cloud"
   }
   ```
 

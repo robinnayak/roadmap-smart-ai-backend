@@ -9,6 +9,7 @@ Add to your routines/urls.py
 from django.urls import path
 from .views import (
     GenerateDailyTaskListAPIView,
+    RoutineDetailAPIView,
     TodayTaskListAPIView,
     CompleteTaskItemAPIView,
     SkipTaskItemAPIView,
@@ -22,6 +23,9 @@ from .views import (
 urlpatterns = [
     # Generate AI-powered task list
     path('generate/', GenerateDailyTaskListAPIView.as_view(), name='generate-task-list'),
+
+    # Delete a specific routine list
+    path('<uuid:routine_id>/', RoutineDetailAPIView.as_view(), name='routine-detail'),
     
     # Get today's task list (auto-generates if missing)
     path('today/', TodayTaskListAPIView.as_view(), name='today-task-list'),

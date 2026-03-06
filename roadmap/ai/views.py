@@ -11,6 +11,15 @@ from .models import AIProcessingJob
 from ai.services.text_extraction import GoalAttributeExtractor
 from ai.services.GoalHierarchyGenerator import GoalHierarchyGenerator
 from django.shortcuts import get_object_or_404
+from django.http import Http404
+from django.core.exceptions import (
+    ImproperlyConfigured,
+    ObjectDoesNotExist,
+    ValidationError as DjangoValidationError,
+)
+from django.db import DatabaseError
+import logging
+from common.ownership import get_owned_object_or_404
 
 # from django.contrib.auth import get_user_model
 # User = get_user_model()
@@ -20,10 +29,25 @@ from django.shortcuts import get_object_or_404
 from .services.current_situation_generator import CurrentSituationGenerator
 from .providers.ollama_provider import OllamaProvider
 
+logger = logging.getLogger(__name__)
+
 
 class AIApiView(APIView):
     def get(self, request):
-        return Response({"message": "AI endpoint is working!"})
+        return Response(
+            {
+                "status": "ok",
+                "message": "AI endpoints are available.",
+                "endpoints": [
+                    "/ai/health-check/",
+                    "/ai/process-text-data-current-situation/",
+                    "/ai/goal-attribute-extractor/",
+                    "/ai/generate-milestones/<uuid:goal_id>/",
+                    "/ai/jobs/<uuid:job_id>/",
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class AIProcessTextDataCurrentSituation(APIView):
@@ -85,43 +109,56 @@ class AIProcessTextDataCurrentSituation(APIView):
 
         except ValueError as ve:
             return Response({"error": str(ve)}, status=400)
-
-        except Exception as e:
+        except (TypeError, KeyError, AttributeError, DjangoValidationError) as exc:
+            logger.warning("Invalid AI current-situation payload for user %s: %s", request.user.id, exc)
             return Response(
-                {"error": "Internal server error", "details": str(e)}, status=500
+                {"error": "Invalid AI response payload", "details": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except (
+            AIProcessingJob.DoesNotExist,
+            ObjectDoesNotExist,
+            ImproperlyConfigured,
+            DatabaseError,
+            RuntimeError,
+            OSError,
+        ) as exc:
+            logger.exception("AI current-situation persistence failed for user %s", request.user.id)
+            return Response(
+                {"error": "Internal server error", "details": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
 class AIHealthCheckView(APIView):
     def get(self, request):
         try:
-            print("Running Ollama provider test...")
-
-            provider = OllamaProvider(model="llama3.2")
+            provider = OllamaProvider()
             health_status = provider.health_check()
+            is_healthy = health_status.get("status") == "healthy"
+            payload = {
+                "status": "healthy" if is_healthy else "unhealthy",
+                "service": "ollama",
+                "host": health_status.get("host"),
+                "model": health_status.get("model"),
+                "error": health_status.get("error"),
+            }
 
-            if health_status["status"] == "healthy":
-                return Response(
-                    {
-                        "status": "AI service is healthy",
-                        "service": "ollama",
-                        "host": health_status.get("host"),
-                        "model": health_status.get("model"),
-                    },
-                    status=status.HTTP_200_OK,
-                )
-            else:
-                return Response(
-                    {
-                        "status": "AI service is unhealthy",
-                        "error": health_status.get("error"),
-                    },
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-
-        except Exception as e:
             return Response(
-                {"status": "AI service is unhealthy", "error": str(e)},
+                payload,
+                status=status.HTTP_200_OK if is_healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        except (ImproperlyConfigured, RuntimeError, OSError, ConnectionError, ValueError) as e:
+            logger.warning("AI health-check failed: %s", e)
+            return Response(
+                {
+                    "status": "unhealthy",
+                    "service": "ollama",
+                    "host": None,
+                    "model": None,
+                    "error": str(e),
+                },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
@@ -131,27 +168,56 @@ class GoalAttributeExtractorAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response({"message": "Goal Attribute Extraction endpoint is working!"})
+        return Response(
+            {"status": "ok", "message": "Goal Attribute Extraction endpoint is working!"},
+            status=status.HTTP_200_OK,
+        )
 
     def post(self, request):
-        print("creating data...")
         try:
             goal_attribute_extractor = GoalAttributeExtractor()
             user_input = request.data.get("user_input")
+            goal_id = request.data.get("goal_id")
             user = request.user
             if not user_input:
-                return Response({"error": "user_input is required"}, status=400)
-            print("extracting data...")
-            result = goal_attribute_extractor.extract_goal_attributes(user_input, user)
+                return Response(
+                    {"status": "error", "message": "user_input is required"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not goal_id:
+                return Response(
+                    {"status": "error", "message": "goal_id is required"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            goal = get_object_or_404(Goal, id=goal_id, user=user)
+            result = goal_attribute_extractor.extract_goal_attributes(
+                user_input=user_input,
+                user=user,
+                goal_id=str(goal.id),
+                primary_category=goal.primary_category,
+            )
+
+            if result.get("status") == "error":
+                return Response(
+                    {
+                        "status": "error",
+                        "message": result.get("message", "Goal attribute extraction failed."),
+                        "job_id": result.get("job_id"),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             return Response(result, status=200)
         except ValueError as ve:
-            return Response({"error": str(ve)}, status=400)
-        except KeyError:
-            pass
-        except Exception as e:
+            return Response({"status": "error", "message": str(ve)}, status=400)
+        except Http404:
+            return Response({"status": "error", "message": "Goal not found."}, status=404)
+        except (TypeError, KeyError, ImproperlyConfigured, RuntimeError, OSError, DjangoValidationError) as e:
+            logger.exception("Goal attribute extraction failed for user %s", request.user.id)
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"status": "error", "message": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
@@ -164,11 +230,6 @@ class GoalEnhancementAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        try:
-            pass
-        except Exception as e:
-            return Response({"message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
         return Response({"message": "Goal Enhancement endpoint is working!"})
 
 class GenerateMileStonesAPIView(APIView):
@@ -176,46 +237,88 @@ class GenerateMileStonesAPIView(APIView):
     
     def get(self, request, goal_id):
         try:
-            print(type(goal_id))
-            print(goal_id)
-            return Response({"message": f"Generate Milestones endpoint is working! with goal id {goal_id}"})
-        except Exception as e:
-            return Response({"message": str(e)}, status= status.HTTP_400_BAD_REQUEST)
+            goal = get_owned_object_or_404(Goal, id=goal_id, user=request.user)
+            milestone_count = goal.milestones.count()
+            return Response(
+                {
+                    "status": "ok",
+                    "goal_id": str(goal.id),
+                    "milestone_count": milestone_count,
+                    "can_generate": milestone_count == 0,
+                    "message": (
+                        "Goal is ready for milestone generation."
+                        if milestone_count == 0
+                        else "Goal already has milestones. Use regenerate endpoint."
+                    ),
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Http404:
+            return Response({"status": "error", "message": "Goal not found."}, status=status.HTTP_404_NOT_FOUND)
+        except (ValueError, TypeError) as e:
+            logger.warning("Milestone readiness check failed for goal %s: %s", goal_id, e)
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
     def post(self, request, goal_id):
         try:
             if not goal_id:
                 return Response({"message": "goal_id is required"}, status= status.HTTP_400_BAD_REQUEST)
             
-            goal = get_object_or_404(Goal, id=goal_id)
-            print("=="*20)
-            print("goal")
-            print(goal)
-            print("=="*20)
-            
+            goal = get_owned_object_or_404(Goal, id=goal_id, user=request.user)
             if goal.milestones.exists():
                 return Response({
+                    "status": "error",
                     "message": "Goal already has milestones. Use regenerate endpoint."
                 }, status= status.HTTP_202_ACCEPTED)
-            
-            print("till here working...")       
+
             generator = GoalHierarchyGenerator()
-            result = generator.generate_milestones(goal)
-            print("=="*20)
-            print(result)
-            print("=="*20)
+            result = generator.generate_complete_hierarchy(
+                goal_data={
+                    "id": str(goal.id),
+                    "title": goal.title,
+                    "description": goal.description,
+                    "why_it_matters": goal.why_it_matters,
+                    "primary_category": goal.primary_category,
+                    "impact_dimensions": goal.impact_dimensions,
+                    "start_date": goal.start_date,
+                    "target_date": goal.target_date,
+                },
+                user=request.user,
+                user_context=None,
+            )
             
             if result.get('status') == 'error':
                 return Response(
-                    {'error': result.get('message')},
+                    {
+                        "status": "error",
+                        "message": result.get("message", "Milestone generation failed."),
+                        "job_id": result.get("job_id"),
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            return Response(result, status=status.HTTP_200_OK)
+            return Response(
+                {
+                    "status": "success",
+                    "message": result.get("message", "Milestones generated successfully."),
+                    "data": result.get("data", {}),
+                    "job_id": result.get("job_id"),
+                },
+                status=status.HTTP_200_OK,
+            )
 
             
-        except Exception as e:
-            return Response({"message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Http404:
+            return Response(
+                {"status": "error", "message": "Goal not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except (ImproperlyConfigured, RuntimeError, ValueError, TypeError, OSError, DatabaseError) as e:
+            logger.exception("Milestone generation failed for goal %s and user %s", goal_id, request.user.id)
+            return Response(
+                {"status": "error", "message": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class AIJobStatusAPIView(APIView):

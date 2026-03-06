@@ -1,12 +1,14 @@
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from authentication.models import CustomUser
+from events.models import Event
 from goal.models import Goal, Milestone, SubGoal, Task
-from routine.models import DailyTaskList, DailyTaskItem, HabitTracker
+from journal.models import JournalEntry
+from routine.models import AdaptiveRoadmapState, DailyTaskList, DailyTaskItem, HabitTracker
 from routine.services import get_or_create_today_task_list
 
 
@@ -85,6 +87,136 @@ class RoutineCompletionCascadeTests(APITestCase):
         self.assertEqual(milestone.status, "completed")
         self.assertEqual(goal.status, "completed")
         self.assertEqual(goal.progress_percentage, 100)
+
+    def test_event_task_item_supports_complete_and_skip_without_goal_habit_cascade(self):
+        target_date = timezone.localdate()
+        event = Event.objects.create(
+            user=self.user,
+            title="Client Call",
+            description="Planned sync",
+            event_type="one_time",
+            start_at=datetime.fromisoformat(f"{target_date.isoformat()}T10:00:00+00:00"),
+            end_at=datetime.fromisoformat(f"{target_date.isoformat()}T11:00:00+00:00"),
+            is_all_day=False,
+            timezone="UTC",
+            recurrence=None,
+            routine_constraint={"constraint_mode": "hard", "routine_policy": "block"},
+        )
+
+        task_list = DailyTaskList.objects.create(user=self.user, date=target_date)
+        complete_item = DailyTaskItem.objects.create(
+            task_list=task_list,
+            item_type="event",
+            event=event,
+            title=event.title,
+            description=event.description,
+            priority="high",
+            estimated_minutes=60,
+            display_order=0,
+        )
+        skip_item = DailyTaskItem.objects.create(
+            task_list=task_list,
+            item_type="event",
+            event=event,
+            title="Client Call Follow-up",
+            description="Prep and context notes",
+            priority="medium",
+            estimated_minutes=30,
+            display_order=1,
+        )
+        task_list.update_progress()
+
+        complete_response = self.client.post(f"/routines/tasks/{complete_item.id}/complete/", data={})
+        self.assertEqual(complete_response.status_code, status.HTTP_200_OK)
+        complete_item.refresh_from_db()
+        self.assertTrue(complete_item.is_completed)
+
+        skip_response = self.client.post(
+            f"/routines/tasks/{skip_item.id}/skip/",
+            data={"reason": "Rescheduled"},
+        )
+        self.assertEqual(skip_response.status_code, status.HTTP_200_OK)
+        skip_item.refresh_from_db()
+        self.assertTrue(skip_item.is_skipped)
+
+        task_list.refresh_from_db()
+        self.assertEqual(task_list.total_tasks, 2)
+        self.assertEqual(task_list.completed_tasks, 1)
+
+
+class RoutineWriteValidationTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="routine-validation@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Validation Goal",
+            description="Validation coverage test",
+            primary_category="career",
+            status="in_progress",
+            target_date=timezone.localdate() + timedelta(days=20),
+        )
+        milestone = Milestone.objects.create(
+            goal=goal,
+            title="Validation Milestone",
+            display_order=1,
+            status="in_progress",
+        )
+        subgoal = SubGoal.objects.create(
+            milestone=milestone,
+            title="Validation Subgoal",
+            display_order=1,
+            status="in_progress",
+        )
+        goal_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Validation Task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=45,
+            display_order=1,
+        )
+        task_list = DailyTaskList.objects.create(
+            user=self.user,
+            date=timezone.localdate(),
+        )
+        self.daily_item = DailyTaskItem.objects.create(
+            task_list=task_list,
+            item_type="goal_task",
+            goal_task=goal_task,
+            related_goal=goal,
+            title=goal_task.title,
+            description=goal_task.description,
+            priority=goal_task.priority,
+            estimated_minutes=goal_task.estimated_duration_minutes,
+            display_order=0,
+        )
+
+    def test_generate_endpoint_rejects_invalid_date_via_serializer(self):
+        response = self.client.post("/routines/generate/", data={"date": "2026/01/31"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "Invalid date format. Use YYYY-MM-DD.")
+
+    def test_complete_endpoint_rejects_invalid_actual_minutes(self):
+        response = self.client.post(
+            f"/routines/tasks/{self.daily_item.id}/complete/",
+            data={"actual_minutes": "not-a-number"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("actual_minutes", response.data)
+
+    def test_skip_endpoint_rejects_invalid_reason_type(self):
+        response = self.client.post(
+            f"/routines/tasks/{self.daily_item.id}/skip/",
+            data={"reason": {"unexpected": "object"}},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("reason", response.data)
 
 
 class DailyTaskGenerationTests(APITestCase):
@@ -317,3 +449,683 @@ class DailyTaskGenerationTests(APITestCase):
         habit_item_day_two = day_two_list.tasks.filter(item_type="habit", habit=habit).first()
         self.assertIsNotNone(habit_item_day_two)
         self.assertFalse(habit_item_day_two.is_completed)
+
+    def test_generation_applies_weekly_friction_adjustments_from_skip_reasons(self):
+        day_one = timezone.localdate()
+        target_date = day_one + timedelta(days=1)
+
+        goal, subgoal = self._create_goal_with_subgoal("Friction Goal", priority="high", status="in_progress")
+        task = Task.objects.create(
+            subgoal=subgoal,
+            title="Deep focus implementation",
+            description="Ship the implementation",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=100,
+            display_order=1,
+        )
+
+        day_one_list = DailyTaskList.objects.create(user=self.user, date=day_one)
+        skipped_item = DailyTaskItem.objects.create(
+            task_list=day_one_list,
+            item_type="goal_task",
+            goal_task=task,
+            related_goal=goal,
+            title="Previous attempt",
+            description="Attempted but skipped",
+            priority="high",
+            estimated_minutes=100,
+            display_order=0,
+        )
+        skipped_item.mark_skipped(reason="No time due to meetings and overload")
+
+        # Add another skipped item to cross the 2-skip threshold.
+        extra_skipped = DailyTaskItem.objects.create(
+            task_list=day_one_list,
+            item_type="goal_task",
+            related_goal=goal,
+            title="Secondary task",
+            description="Skipped due to schedule",
+            priority="medium",
+            estimated_minutes=60,
+            display_order=1,
+        )
+        extra_skipped.mark_skipped(reason="Busy work schedule")
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+
+        generated_item = task_list.tasks.filter(item_type="goal_task", goal_task=task).first()
+        self.assertIsNotNone(generated_item)
+        # 100 minutes with time-pressure multiplier (0.85) becomes 85.
+        self.assertEqual(generated_item.estimated_minutes, 85)
+
+    def test_generation_uses_negative_journal_signals_to_reduce_load_and_tone(self):
+        day_one = timezone.localdate()
+        target_date = day_one + timedelta(days=1)
+
+        goal, subgoal = self._create_goal_with_subgoal("Journal Recovery Goal", priority="high", status="in_progress")
+        task = Task.objects.create(
+            subgoal=subgoal,
+            title="Ship sprint draft",
+            description="Draft and submit sprint deliverable",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=100,
+            display_order=1,
+        )
+
+        JournalEntry.objects.create(
+            user=self.user,
+            entry_date=day_one - timedelta(days=1),
+            reflection_raw="I felt overwhelmed and distracted.",
+            struggle_raw="I procrastinated and spent too much time on social media.",
+            tomorrow_priority_raw="Just do a small first step.",
+            gratitude_raw="Grateful for rest.",
+            sentiment_label=JournalEntry.SENTIMENT_NEGATIVE,
+            sentiment_score=-0.6,
+            tags=["procrastination", "doomscrolling"],
+            locked_at=timezone.now() + timedelta(days=1),
+        )
+        JournalEntry.objects.create(
+            user=self.user,
+            entry_date=day_one,
+            reflection_raw="Energy was low and focus was difficult.",
+            struggle_raw="I delayed important work again.",
+            tomorrow_priority_raw="Keep tasks simple tomorrow.",
+            gratitude_raw="Grateful for another chance.",
+            sentiment_label=JournalEntry.SENTIMENT_NEGATIVE,
+            sentiment_score=-0.4,
+            tags=["distraction"],
+            locked_at=timezone.now() + timedelta(days=1),
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+
+        generated_item = task_list.tasks.filter(item_type="goal_task", goal_task=task).first()
+        self.assertIsNotNone(generated_item)
+        self.assertEqual(generated_item.priority, "medium")
+        self.assertEqual(generated_item.estimated_minutes, 81)
+        self.assertIn("Friction adjustment: start with a 15-minute first step.", generated_item.description)
+        self.assertIn("Journal tone: keep today gentle and momentum-focused.", generated_item.description)
+
+    def test_generation_uses_positive_journal_signals_for_challenge_tone(self):
+        day_one = timezone.localdate()
+        target_date = day_one + timedelta(days=1)
+
+        _, subgoal = self._create_goal_with_subgoal("Journal Momentum Goal", priority="high", status="in_progress")
+        task = Task.objects.create(
+            subgoal=subgoal,
+            title="Prepare investor update",
+            description="Summarize progress for stakeholders",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=100,
+            display_order=1,
+        )
+
+        JournalEntry.objects.create(
+            user=self.user,
+            entry_date=day_one - timedelta(days=1),
+            reflection_raw="I made great progress and felt focused.",
+            struggle_raw="Minor blocker but resolved quickly.",
+            tomorrow_priority_raw="Push the next meaningful milestone.",
+            gratitude_raw="Grateful and motivated.",
+            sentiment_label=JournalEntry.SENTIMENT_POSITIVE,
+            sentiment_score=0.5,
+            tags=["momentum"],
+            locked_at=timezone.now() + timedelta(days=1),
+        )
+        JournalEntry.objects.create(
+            user=self.user,
+            entry_date=day_one,
+            reflection_raw="Strong execution day with confident decisions.",
+            struggle_raw="No major blockers.",
+            tomorrow_priority_raw="Take a stretch step tomorrow.",
+            gratitude_raw="Happy with progress.",
+            sentiment_label=JournalEntry.SENTIMENT_POSITIVE,
+            sentiment_score=0.4,
+            tags=["confidence"],
+            locked_at=timezone.now() + timedelta(days=1),
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+
+        generated_item = task_list.tasks.filter(item_type="goal_task", goal_task=task).first()
+        self.assertIsNotNone(generated_item)
+        self.assertEqual(generated_item.priority, "high")
+        self.assertEqual(generated_item.estimated_minutes, 105)
+        self.assertIn("Journal tone: push slightly beyond comfort with focus.", generated_item.description)
+
+    def test_generation_triggers_five_day_miss_recovery(self):
+        target_date = timezone.localdate()
+        if target_date.weekday() == 6:
+            target_date = target_date + timedelta(days=1)
+        goal, subgoal = self._create_goal_with_subgoal(
+            "Adaptive Recovery Goal",
+            priority="high",
+            status="in_progress",
+        )
+        task = Task.objects.create(
+            subgoal=subgoal,
+            title="Important recovery task",
+            description="Complete a focused recovery step",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=100,
+            display_order=1,
+        )
+
+        for offset in range(1, 6):
+            missed_date = target_date - timedelta(days=offset)
+            DailyTaskList.objects.create(
+                user=self.user,
+                date=missed_date,
+                total_tasks=3,
+                completed_tasks=0,
+                completion_percentage=0,
+                is_fully_completed=False,
+                status="pending",
+            )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+
+        generated_item = task_list.tasks.filter(item_type="goal_task", goal_task=task).first()
+        self.assertIsNotNone(generated_item)
+        self.assertEqual(generated_item.estimated_minutes, 71)
+        self.assertEqual(generated_item.priority, "medium")
+
+        adaptive_state = AdaptiveRoadmapState.objects.get(user=self.user)
+        self.assertEqual(adaptive_state.consecutive_miss_days, 5)
+
+    def test_generation_triggers_sunday_rebuild_once_per_sunday(self):
+        today = timezone.localdate()
+        days_until_sunday = (6 - today.weekday()) % 7
+        target_date = today + timedelta(days=days_until_sunday)
+
+        _, subgoal = self._create_goal_with_subgoal(
+            "Sunday Rebuild Goal",
+            priority="high",
+            status="in_progress",
+        )
+        task = Task.objects.create(
+            subgoal=subgoal,
+            title="Sunday intensity task",
+            description="Planned task for Sunday generation",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=100,
+            display_order=1,
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+        generated_item = task_list.tasks.filter(item_type="goal_task", goal_task=task).first()
+        self.assertIsNotNone(generated_item)
+        self.assertEqual(generated_item.estimated_minutes, 90)
+
+        adaptive_state = AdaptiveRoadmapState.objects.get(user=self.user)
+        self.assertEqual(adaptive_state.last_sunday_rebuild_date, target_date)
+
+    def test_generation_progressive_and_reversible_scaling_levels(self):
+        target_date = timezone.localdate()
+        if target_date.weekday() == 6:
+            target_date = target_date + timedelta(days=1)
+
+        # Build consecutive success run (3 days) to increase scale level.
+        for offset in range(1, 4):
+            success_date = target_date - timedelta(days=offset)
+            DailyTaskList.objects.create(
+                user=self.user,
+                date=success_date,
+                total_tasks=3,
+                completed_tasks=3,
+                completion_percentage=100,
+                is_fully_completed=True,
+                status="completed",
+            )
+
+        _, subgoal = self._create_goal_with_subgoal(
+            "Scaling Goal",
+            priority="high",
+            status="in_progress",
+        )
+        scaling_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Scaling candidate",
+            description="Track adaptive scale changes",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=100,
+            display_order=1,
+        )
+
+        first_list, first_created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(first_created)
+        first_item = first_list.tasks.filter(item_type="goal_task", goal_task=scaling_task).first()
+        self.assertIsNotNone(first_item)
+        self.assertEqual(first_item.estimated_minutes, 105)
+
+        adaptive_state = AdaptiveRoadmapState.objects.get(user=self.user)
+        self.assertEqual(adaptive_state.current_scale_level, 1)
+
+        # Build consecutive miss run to reverse scale on a later date.
+        reverse_date = target_date + timedelta(days=3)
+        if reverse_date.weekday() == 6:
+            reverse_date = reverse_date + timedelta(days=1)
+        for offset in range(1, 4):
+            missed_date = reverse_date - timedelta(days=offset)
+            DailyTaskList.objects.update_or_create(
+                user=self.user,
+                date=missed_date,
+                defaults={
+                    "total_tasks": 3,
+                    "completed_tasks": 0,
+                    "completion_percentage": 0,
+                    "is_fully_completed": False,
+                    "status": "pending",
+                },
+            )
+
+        reverse_list, reverse_created = get_or_create_today_task_list(self.user, reverse_date)
+        self.assertTrue(reverse_created)
+        reverse_item = reverse_list.tasks.filter(item_type="goal_task", goal_task=scaling_task).first()
+        self.assertIsNotNone(reverse_item)
+        self.assertEqual(reverse_item.estimated_minutes, 100)
+
+        adaptive_state.refresh_from_db()
+        self.assertEqual(adaptive_state.current_scale_level, 0)
+
+
+class RoutineProgressEndpointTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="routine-progress@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+
+        today = timezone.localdate()
+        self.goal = Goal.objects.create(
+            user=self.user,
+            title="Progress Goal",
+            description="Progress endpoint test data",
+            primary_category="career",
+            status="in_progress",
+            target_date=today + timedelta(days=20),
+        )
+        milestone = Milestone.objects.create(
+            goal=self.goal,
+            title="Progress Milestone",
+            display_order=1,
+            status="in_progress",
+        )
+        subgoal = SubGoal.objects.create(
+            milestone=milestone,
+            title="Progress Subgoal",
+            display_order=1,
+            status="in_progress",
+        )
+        task = Task.objects.create(
+            subgoal=subgoal,
+            title="Progress Task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=45,
+            display_order=1,
+        )
+        task_list = DailyTaskList.objects.create(user=self.user, date=today)
+        DailyTaskItem.objects.create(
+            task_list=task_list,
+            item_type="goal_task",
+            goal_task=task,
+            related_goal=self.goal,
+            title=task.title,
+            description=task.description,
+            priority=task.priority,
+            estimated_minutes=task.estimated_duration_minutes,
+            display_order=0,
+        )
+        task_list.update_progress()
+
+    def test_progress_endpoint_rejects_invalid_date(self):
+        response = self.client.get("/routines/progress/?date=2026/03/04")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "Invalid date format. Use YYYY-MM-DD.")
+
+    def test_progress_endpoint_returns_expected_payload_shape(self):
+        response = self.client.get("/routines/progress/?period=month")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["timePeriod"], "month")
+        self.assertIn("overallStats", response.data)
+        self.assertIn("habitStats", response.data)
+        self.assertIn("categoryStats", response.data)
+        self.assertIn("weeklyData", response.data)
+        self.assertIn("milestones", response.data)
+        self.assertIn("activityHeatmap", response.data)
+        self.assertIn("todayTaskSheet", response.data)
+        self.assertIn("frictionAudit", response.data)
+        self.assertIn("dominant_reason", response.data["frictionAudit"])
+        self.assertIn("crossGoalConflicts", response.data)
+        self.assertIn("summary", response.data["crossGoalConflicts"])
+        self.assertIn("conflicts", response.data["crossGoalConflicts"])
+        self.assertIn("feasibilitySuggestions", response.data["crossGoalConflicts"])
+        self.assertIn("customIntervalStreak", response.data)
+        self.assertIn("customIntervalCurrentStreak", response.data["overallStats"])
+        self.assertIn("streakIntervalDays", response.data["overallStats"])
+
+    def test_progress_endpoint_detects_cross_goal_conflicts(self):
+        today = timezone.localdate()
+
+        second_goal = Goal.objects.create(
+            user=self.user,
+            title="Second Goal",
+            description="Cross-goal conflict scenario",
+            primary_category="financial",
+            status="in_progress",
+            priority="high",
+            target_date=today + timedelta(days=45),
+        )
+        second_milestone = Milestone.objects.create(
+            goal=second_goal,
+            title="Second Milestone",
+            display_order=1,
+            status="in_progress",
+        )
+        second_subgoal = SubGoal.objects.create(
+            milestone=second_milestone,
+            title="Second Subgoal",
+            display_order=1,
+            status="in_progress",
+        )
+        second_task = Task.objects.create(
+            subgoal=second_subgoal,
+            title="High-focus finance task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=210,
+            preferred_time_slot="morning",
+            display_order=1,
+        )
+
+        task_list = DailyTaskList.objects.get(user=self.user, date=today)
+        # Update existing item to create overlap + energy conflict conditions.
+        first_item = task_list.tasks.filter(item_type="goal_task").first()
+        first_item.priority = "high"
+        first_item.time_slot = "morning"
+        first_item.estimated_minutes = 220
+        first_item.save(update_fields=["priority", "time_slot", "estimated_minutes", "updated_at"])
+
+        DailyTaskItem.objects.create(
+            task_list=task_list,
+            item_type="goal_task",
+            goal_task=second_task,
+            related_goal=second_goal,
+            title=second_task.title,
+            description=second_task.description,
+            priority=second_task.priority,
+            estimated_minutes=second_task.estimated_duration_minutes,
+            time_slot="morning",
+            display_order=1,
+        )
+        task_list.update_progress()
+
+        response = self.client.get("/routines/progress/?period=week")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        conflict_payload = response.data["crossGoalConflicts"]
+        summary = conflict_payload["summary"]
+        self.assertTrue(summary["has_conflict"])
+        self.assertGreaterEqual(summary["total_conflicts"], 2)
+        conflict_types = {entry["type"] for entry in conflict_payload["conflicts"]}
+        self.assertIn("overload", conflict_types)
+        self.assertIn("time_overlap", conflict_types)
+        self.assertTrue(len(conflict_payload["feasibilitySuggestions"]) > 0)
+
+    def test_week_overview_endpoint_returns_seven_days(self):
+        response = self.client.get("/routines/week/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("week_start", response.data)
+        self.assertEqual(len(response.data["days"]), 7)
+
+    def test_streak_endpoint_returns_streak_payload(self):
+        response = self.client.get("/routines/streak/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("streak", response.data)
+        self.assertIn("customIntervalStreak", response.data)
+        self.assertEqual(response.data["streak"]["current_streak_days"], 0)
+
+    def test_streak_endpoint_supports_custom_interval_days(self):
+        today = timezone.localdate()
+        task_list = DailyTaskList.objects.get(user=self.user, date=today)
+        task_list.status = "completed"
+        task_list.total_tasks = 1
+        task_list.completed_tasks = 1
+        task_list.completion_percentage = 100
+        task_list.is_fully_completed = True
+        task_list.save(
+            update_fields=[
+                "status",
+                "total_tasks",
+                "completed_tasks",
+                "completion_percentage",
+                "is_fully_completed",
+                "updated_at",
+            ]
+        )
+
+        for days_back in (3, 6):
+            DailyTaskList.objects.create(
+                user=self.user,
+                date=today - timedelta(days=days_back),
+                status="completed",
+                total_tasks=1,
+                completed_tasks=1,
+                completion_percentage=100,
+                is_fully_completed=True,
+            )
+
+        response = self.client.get("/routines/streak/?interval_days=3")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["customIntervalStreak"]["interval_days"], 3)
+        self.assertGreaterEqual(
+            response.data["customIntervalStreak"]["current_streak_intervals"],
+            3,
+        )
+
+        progress_response = self.client.get("/routines/progress/?period=week&streak_interval_days=3")
+        self.assertEqual(progress_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(progress_response.data["overallStats"]["streakIntervalDays"], 3)
+        self.assertEqual(progress_response.data["customIntervalStreak"]["interval_days"], 3)
+
+
+class RoutineDeleteEndpointTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="routine-delete-owner@test.com",
+            password="Password@123",
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="routine-delete-other@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+
+        self.owner_routine = DailyTaskList.objects.create(
+            user=self.user,
+            date=timezone.localdate(),
+        )
+        self.other_routine = DailyTaskList.objects.create(
+            user=self.other_user,
+            date=timezone.localdate(),
+        )
+
+    def test_owner_can_delete_own_routine(self):
+        response = self.client.delete(f"/routines/{self.owner_routine.id}/")
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(DailyTaskList.objects.filter(id=self.owner_routine.id).exists())
+
+    def test_non_owner_delete_returns_403(self):
+        response = self.client.delete(f"/routines/{self.other_routine.id}/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(DailyTaskList.objects.filter(id=self.other_routine.id).exists())
+
+    def test_delete_missing_routine_returns_404(self):
+        DailyTaskList.objects.filter(id=self.owner_routine.id).delete()
+        response = self.client.delete(f"/routines/{self.owner_routine.id}/")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class RoutineEventConstraintIntegrationTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="routine-events@test.com",
+            password="Password@123",
+        )
+
+    def _create_goal_task(self, *, title: str, preferred_time_slot: str = "afternoon", estimated_minutes: int = 60):
+        goal = Goal.objects.create(
+            user=self.user,
+            title=f"{title} Goal",
+            description="Goal for event integration tests",
+            primary_category="career",
+            priority="high",
+            target_date=timezone.localdate() + timedelta(days=30),
+            status="in_progress",
+        )
+        milestone = Milestone.objects.create(
+            goal=goal,
+            title=f"{title} Milestone",
+            display_order=1,
+            priority="high",
+            status="in_progress",
+        )
+        subgoal = SubGoal.objects.create(
+            milestone=milestone,
+            title=f"{title} Subgoal",
+            display_order=1,
+            priority="high",
+            status="in_progress",
+        )
+        Task.objects.create(
+            subgoal=subgoal,
+            title=title,
+            status="pending",
+            priority="high",
+            preferred_time_slot=preferred_time_slot,
+            estimated_duration_minutes=estimated_minutes,
+            display_order=1,
+        )
+
+    def test_recurring_office_event_injects_constraints_metadata(self):
+        target_date = date(2026, 3, 10)  # Tuesday
+        self._create_goal_task(title="Deep Work Task", preferred_time_slot="afternoon")
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Morning Journal",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=20,
+            priority="medium",
+        )
+        Event.objects.create(
+            user=self.user,
+            title="Office Hours",
+            description="Mon-Fri office",
+            event_type="recurring",
+            start_at=datetime.fromisoformat("2026-03-09T09:00:00+05:45"),
+            end_at=datetime.fromisoformat("2026-03-09T17:00:00+05:45"),
+            is_all_day=False,
+            timezone="Asia/Katmandu",
+            recurrence={
+                "frequency": "weekly",
+                "interval": 1,
+                "by_weekday": ["MON", "TUE", "WED", "THU", "FRI"],
+                "until_date": "2026-12-31",
+                "count": None,
+            },
+            routine_constraint={
+                "constraint_mode": "hard",
+                "buffer_before_minutes": 15,
+                "buffer_after_minutes": 15,
+                "routine_policy": "block",
+            },
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+        constraints = task_list.schedule_constraints
+        self.assertEqual(constraints["timezone"], "Asia/Katmandu")
+        self.assertGreaterEqual(len(constraints["occupied_windows"]), 1)
+        self.assertIn(constraints["fit_summary"]["fit_status"], {"fit", "partial_fit"})
+        event_item = task_list.tasks.filter(item_type="event").first()
+        self.assertIsNotNone(event_item)
+        self.assertEqual(event_item.time_slot, "afternoon")
+        first_item = task_list.tasks.order_by("display_order").first()
+        self.assertIsNotNone(first_item)
+        self.assertEqual(first_item.item_type, "event")
+
+    def test_ad_hoc_meeting_shifts_tasks_out_of_blocked_slot(self):
+        target_date = date(2026, 3, 14)
+        self._create_goal_task(title="Meeting Day Task", preferred_time_slot="afternoon")
+        Event.objects.create(
+            user=self.user,
+            title="Ad-hoc Meeting",
+            description="Blocks full afternoon",
+            event_type="one_time",
+            start_at=datetime.fromisoformat("2026-03-14T12:00:00+05:45"),
+            end_at=datetime.fromisoformat("2026-03-14T18:00:00+05:45"),
+            is_all_day=False,
+            timezone="Asia/Katmandu",
+            recurrence=None,
+            routine_constraint={
+                "constraint_mode": "hard",
+                "buffer_before_minutes": 0,
+                "buffer_after_minutes": 0,
+                "routine_policy": "shift",
+            },
+        )
+
+        task_list, _ = get_or_create_today_task_list(self.user, target_date)
+        goal_item = task_list.tasks.filter(item_type="goal_task").first()
+        self.assertIsNotNone(goal_item)
+        self.assertNotEqual(goal_item.time_slot, "afternoon")
+        self.assertEqual(task_list.schedule_constraints["fit_summary"]["fallback_strategy"], "none")
+
+    def test_multi_day_travel_forces_partial_strategy(self):
+        target_date = date(2026, 4, 11)
+        self._create_goal_task(title="Travel Task", preferred_time_slot="morning")
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Travel Habit",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=30,
+            priority="medium",
+        )
+        Event.objects.create(
+            user=self.user,
+            title="Travel",
+            description="Multi-day full coverage",
+            event_type="multi_day",
+            start_at=datetime.fromisoformat("2026-04-10T00:00:00+05:45"),
+            end_at=datetime.fromisoformat("2026-04-13T23:59:00+05:45"),
+            is_all_day=True,
+            timezone="Asia/Katmandu",
+            recurrence=None,
+            routine_constraint={
+                "constraint_mode": "hard",
+                "buffer_before_minutes": 0,
+                "buffer_after_minutes": 0,
+                "routine_policy": "reduce_load",
+            },
+        )
+
+        task_list, _ = get_or_create_today_task_list(self.user, target_date)
+        self.assertEqual(task_list.tasks.exclude(item_type="event").count(), 0)
+        self.assertGreaterEqual(task_list.tasks.filter(item_type="event").count(), 1)
+        self.assertEqual(task_list.schedule_constraints["fit_summary"]["fallback_strategy"], "partial")
+        self.assertEqual(task_list.schedule_constraints["fit_summary"]["fit_status"], "partial_fit")

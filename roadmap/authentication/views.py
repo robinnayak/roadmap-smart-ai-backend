@@ -7,7 +7,14 @@ Views for user registration, authentication, profile management, and token opera
 
 import logging
 from django.utils import timezone
-from django.contrib.auth import authenticate
+from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import PasswordResetTokenGenerator
+from django.conf import settings
+from django.core.mail import send_mail
+from django.core import signing
+from django.utils.encoding import force_bytes
+from django.utils.encoding import force_str
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.shortcuts import get_object_or_404
 
 
@@ -35,6 +42,10 @@ from .serializers import (
     ProfileSerializer,
     UserPersonalDetailsSerializer,
     NotificationSettingsSerializer,
+    UserReactivateSerializer,
+    ForgotPasswordSerializer,
+    ResetPasswordSerializer,
+    ChangePasswordSerializer,
 )
 from .models import Profile, NotificationSettings, UserPersonalDetails
 
@@ -42,6 +53,25 @@ from .models import Profile, NotificationSettings, UserPersonalDetails
 from .core.response import success_response, error_response, created_response
 
 logger = logging.getLogger(__name__)
+User = get_user_model()
+REACTIVATION_TOKEN_SALT = "authentication.reactivation"
+REACTIVATION_TOKEN_MAX_AGE_SECONDS = getattr(
+    settings, "REACTIVATION_TOKEN_MAX_AGE_SECONDS", 900
+)
+
+
+def _build_reactivation_token(user):
+    signer = signing.TimestampSigner(salt=REACTIVATION_TOKEN_SALT)
+    payload = f"{user.id}:{user.email.lower()}"
+    return signer.sign(payload)
+
+
+def _build_reactivation_path_payload(reactivation_token):
+    return {
+        "reactivation_token": reactivation_token,
+        "expires_in_seconds": REACTIVATION_TOKEN_MAX_AGE_SECONDS,
+        "reactivate_endpoint": "/auth/user-reactivate/",
+    }
 
 
 class ProductionApiView(APIView):
@@ -185,39 +215,163 @@ class UserLoginView(ProductionApiView):
     def post(self, request):
         serializer = UserLoginSerializer(data=request.data)
 
-        if serializer.is_valid():
-            email = serializer.validated_data.get("email")
-            password = serializer.validated_data.get("password")
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid login payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            # Authenticate user
-            user = authenticate(request, email=email, password=password)
+        user = serializer.validated_data["user"]
+        if not user.is_active:
+            reactivation_token = _build_reactivation_token(user)
+            return error_response(
+                message=(
+                    "This account is deactivated. Reactivate your account to continue."
+                ),
+                code="account_deactivated",
+                status=status.HTTP_403_FORBIDDEN,
+                extra={"reactivation": _build_reactivation_path_payload(reactivation_token)},
+            )
 
-            if user is not None:
-                if user.is_active:
-                    # Generate tokens
-                    refresh = RefreshToken.for_user(user)
+        refresh = RefreshToken.for_user(user)
+        response_data = {
+            "message": "Login successful",
+            "tokens": {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+            },
+            "user": UserProfileSerializer(user).data,
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
 
-                    response_data = {
-                        "message": "Login successful",
-                        "tokens": {
-                            "access": str(refresh.access_token),
-                            "refresh": str(refresh),
-                        },
-                        "user": UserProfileSerializer(user).data,
-                    }
-                    return Response(response_data, status=status.HTTP_200_OK)
-                else:
-                    return Response(
-                        {"error": "Account is not active"},
-                        status=status.HTTP_401_UNAUTHORIZED,
+
+class ForgotPasswordView(ProductionApiView):
+    permission_classes = [AllowAny]
+    throttle_classes = [AnonRateThrottle]
+
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid forgot-password payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        email = serializer.validated_data["email"]
+        user = User.objects.filter(email__iexact=email).first()
+
+        if user:
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            token = PasswordResetTokenGenerator().make_token(user)
+            reset_base_url = getattr(settings, "PASSWORD_RESET_URL", "").strip()
+            if reset_base_url:
+                separator = "&" if "?" in reset_base_url else "?"
+                reset_link = f"{reset_base_url}{separator}uid={uid}&token={token}"
+                try:
+                    send_mail(
+                        subject="Reset your password",
+                        message=(
+                            "You requested a password reset.\n\n"
+                            f"Use this link to reset your password:\n{reset_link}\n\n"
+                            "If you did not request this, you can ignore this message."
+                        ),
+                        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                        recipient_list=[user.email],
+                        fail_silently=True,
                     )
-            else:
-                return Response(
-                    {"error": "Invalid credentials"},
-                    status=status.HTTP_401_UNAUTHORIZED,
-                )
+                except Exception:
+                    logger.exception(
+                        "Forgot-password email dispatch failed for user %s", user.id
+                    )
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return success_response(
+            message=(
+                "If an account exists for this email, a password reset link has been sent."
+            ),
+            status=status.HTTP_200_OK,
+        )
+
+
+class ResetPasswordView(ProductionApiView):
+    permission_classes = [AllowAny]
+    throttle_classes = [AnonRateThrottle]
+
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid reset-password payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        uid = serializer.validated_data["uid"]
+        token = serializer.validated_data["token"]
+        new_password = serializer.validated_data["new_password"]
+
+        try:
+            user_id = force_str(urlsafe_base64_decode(uid))
+            user = User.objects.get(pk=user_id)
+        except Exception:
+            return error_response(
+                message="Invalid reset token or user.",
+                errors={"uid": ["Invalid uid."]},
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token_generator = PasswordResetTokenGenerator()
+        if not token_generator.check_token(user, token):
+            return error_response(
+                message="Invalid reset token or user.",
+                errors={"token": ["Invalid or expired token."]},
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+        return success_response(
+            message="Password reset successful.",
+            status=status.HTTP_200_OK,
+        )
+
+
+class ChangePasswordView(ProductionApiView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data, context={"request": request})
+        if not serializer.is_valid():
+            error_code = serializer.errors.get("current_password")
+            return error_response(
+                message=(
+                    "current password not matched."
+                    if error_code and "current password not matched." in error_code
+                    else "Invalid password change data."
+                ),
+                errors=serializer.errors,
+                code=(
+                    "invalid_current_password"
+                    if error_code and "current password not matched." in error_code
+                    else "invalid_data"
+                ),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request.user.set_password(serializer.validated_data["new_password"])
+        request.user.save(update_fields=["password"])
+        logger.info("Password changed successfully for user: %s", request.user.email)
+        return success_response(
+            message="Password updated successfully.",
+            status=status.HTTP_200_OK,
+        )
 
 
 class UserLogoutView(ProductionApiView):
@@ -290,8 +444,7 @@ class CustomTokenRefreshView(TokenRefreshView):
         except (InvalidToken, TokenError):
             return Response(
                 {
-                    "error": "Token is invalid or expired",
-                    "code": "token_not_valid",
+                    "error": "session_expired",
                 },
                 status=status.HTTP_401_UNAUTHORIZED,
             )
@@ -316,22 +469,20 @@ class UserDeactivateView(ProductionApiView):
     throttle_classes = [AnonRateThrottle]
 
     def post(self, request):
-        """
-        Delete (deactivate) the user's account. This is a soft delete that sets is_active to False.
-        Returns:
-            - 200: Account deactivated successfully
-            - 400: Invalid data
-        """
-        deactivate = request.data.get("deactivate", True)
         try:
             user = request.user
-            user.is_active = deactivate
-            user.save()
-            logger.info(
-                f"Account {'activated' if not deactivate else 'deactivated'} successfully for user: {user.email}"
-            )
+            if not user.is_active:
+                return error_response(
+                    message="Account is already deactivated.",
+                    code="already_deactivated",
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            user.is_active = False
+            user.save(update_fields=["is_active"])
+            logger.info("Account deactivated successfully for user: %s", user.email)
             return success_response(
-                message=f"Account {'activated' if not deactivate else 'deactivated'} successfully"
+                message="Account deactivated successfully. You can reactivate it at any time."
             )
         except Exception as e:
             logger.error(f"Error updating account status: {str(e)}", exc_info=True)
@@ -342,6 +493,71 @@ class UserDeactivateView(ProductionApiView):
                 status=status.HTTP_400_BAD_REQUEST,
                 errors=[str(e)],
             )
+
+
+class UserReactivateView(ProductionApiView):
+    permission_classes = [AllowAny]
+    throttle_classes = [AnonRateThrottle]
+
+    def post(self, request):
+        serializer = UserReactivateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid reactivation payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token = serializer.validated_data["reactivation_token"]
+        signer = signing.TimestampSigner(salt=REACTIVATION_TOKEN_SALT)
+        try:
+            payload = signer.unsign(token, max_age=REACTIVATION_TOKEN_MAX_AGE_SECONDS)
+        except signing.SignatureExpired:
+            return error_response(
+                message="Reactivation token is invalid or expired.",
+                code="invalid_or_expired_token",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors={"reactivation_token": ["Token has expired."]},
+            )
+        except signing.BadSignature:
+            return error_response(
+                message="Reactivation token is invalid or expired.",
+                code="invalid_or_expired_token",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors={"reactivation_token": ["Token is invalid."]},
+            )
+
+        try:
+            user_id, email = payload.split(":", 1)
+            user = User.objects.get(id=user_id, email__iexact=email)
+        except (ValueError, User.DoesNotExist):
+            return error_response(
+                message="Unauthorized reactivation attempt.",
+                code="unauthorized_reactivation_attempt",
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        if user.is_active:
+            return error_response(
+                message="Account is already active.",
+                code="already_active",
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        user.is_active = True
+        user.save(update_fields=["is_active"])
+        refresh = RefreshToken.for_user(user)
+        return success_response(
+            message="Account reactivated successfully.",
+            data={
+                "tokens": {
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
+                },
+                "user": UserProfileSerializer(user).data,
+            },
+        )
 
 
 class ProfileDetailView(ProductionApiView):
@@ -387,6 +603,20 @@ class ProfileDetailView(ProductionApiView):
             - 400: Invalid update data
             - 404: Profile not found
         """
+        if any(
+            field in request.data
+            for field in ("current_password", "new_password", "confirm_password")
+        ):
+            return error_response(
+                message="Use /auth/change-password/ endpoint for password updates.",
+                errors={
+                    "non_field_errors": [
+                        "Password updates are not supported on /auth/profile/."
+                    ]
+                },
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             profile = Profile.objects.get(user=request.user)
@@ -511,17 +741,25 @@ class UserPersonalDetailsAPIView(ProductionApiView):
         Full update of personal details
         """
 
-        try:
-            details = self.get_object(request.user)
-            serializer = UserPersonalDetailsSerializer(details, data=request.data)
-            if not serializer.is_valid():
-                return error_response(
-                    message="Invalid personal details data.",
-                    errors=serializer.errors,
-                    code="invalid_data",
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        details = self.get_object(request.user)
+        if details is None:
+            return error_response(
+                message="Personal details not found.",
+                code="details_not_found",
+                status=status.HTTP_404_NOT_FOUND,
+                errors=[str("Personal details not found.")],
+            )
 
+        serializer = UserPersonalDetailsSerializer(details, data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid personal details data.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
             serializer.save()
             logger.info(
                 f"Personal details updated successfully for user: {request.user.email}"
@@ -532,29 +770,21 @@ class UserPersonalDetailsAPIView(ProductionApiView):
                 message="Personal details updated successfully",
                 status=status.HTTP_200_OK,
             )
-
-        except UserPersonalDetails.DoesNotExist:
+        except Exception as e:
+            logger.error(f"Error updating personal details: {str(e)}", exc_info=True)
             return error_response(
-                message="Personal details not found.",
-                code="details_not_found",
-                status=status.HTTP_404_NOT_FOUND,
-                errors=[str("Personal details not found.")],
+                message="An error occurred while updating personal details.",
+                code="details_update_error",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors=[str(e)],
             )
 
     def delete(self, request):
         """
         Delete personal details of the logged-in user
         """
-        try:
-            details = self.get_object(request.user)
-            user_email = request.user.email
-            details.delete()
-            logger.info(f"Personal details deleted successfully for user: {user_email}")
-            return success_response(
-                message="Personal details deleted successfully",
-                status=status.HTTP_204_NO_CONTENT,
-            )
-        except UserPersonalDetails.DoesNotExist:
+        details = self.get_object(request.user)
+        if details is None:
             return error_response(
                 message="Personal details not found.",
                 code="details_not_found",
@@ -562,31 +792,59 @@ class UserPersonalDetailsAPIView(ProductionApiView):
                 errors=[str("Personal details not found.")],
             )
 
+        user_email = request.user.email
+        details.delete()
+        logger.info(f"Personal details deleted successfully for user: {user_email}")
+        return success_response(
+            message="Personal details deleted successfully",
+            status=status.HTTP_204_NO_CONTENT,
+        )
 
-class NotificationDetailView(APIView):
+
+class NotificationDetailView(ProductionApiView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
 
     def get(self, request):
-        print("==" * 70)
-        print("user", request.user)
-
-        # Get or create profile
-        notification, created = NotificationSettings.objects.get_or_create(
-            user=request.user
-        )
-        print(f"profile: {notification}, created: {created}")
-
-        # For GET requests, just serialize the instance
-        serializer = NotificationSettingsSerializer(notification)
-        print(f"serializer data: {serializer.data}")
-        print("==" * 70)
-        # Return the serialized data
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        try:
+            notification, _ = NotificationSettings.objects.get_or_create(user=request.user)
+            serializer = NotificationSettingsSerializer(notification)
+            return success_response(
+                data=serializer.data,
+                message="Notification settings retrieved successfully",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.error(f"Error retrieving notification settings: {str(e)}", exc_info=True)
+            return error_response(
+                message="An error occurred while retrieving notification settings.",
+                code="notification_retrieval_error",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors=[str(e)],
+            )
 
     def put(self, request):
-        profile, created = NotificationSettings.objects.get_or_create(user=request.user)
-        serializer = NotificationSettingsSerializer(profile, data=request.data)
-        if serializer.is_valid():
+        try:
+            notification, _ = NotificationSettings.objects.get_or_create(user=request.user)
+            serializer = NotificationSettingsSerializer(notification, data=request.data)
+            if not serializer.is_valid():
+                return error_response(
+                    message="Invalid notification settings data.",
+                    errors=serializer.errors,
+                    code="invalid_data",
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return success_response(
+                data=serializer.data,
+                message="Notification settings updated successfully",
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.error(f"Error updating notification settings: {str(e)}", exc_info=True)
+            return error_response(
+                message="An error occurred while updating notification settings.",
+                code="notification_update_error",
+                status=status.HTTP_400_BAD_REQUEST,
+                errors=[str(e)],
+            )

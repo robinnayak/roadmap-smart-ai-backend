@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from datetime import date
 from typing import Any
 
 from django.core.files.base import ContentFile
+from django.core.exceptions import ImproperlyConfigured, ObjectDoesNotExist
 from django.http import FileResponse, HttpResponse, JsonResponse
 from django.urls import reverse
 from rest_framework import status
@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet
 
+from ai.config import get_journeybook_model
 from journeybook.models import BookAsset, BookChapter, DerivedMilestone, JourneyBook
 from journeybook.serializers import (
     BookEligibilitySerializer,
@@ -111,8 +112,8 @@ class JourneyBookViewSet(ModelViewSet):
 
         try:
             self._generate_sync(book=book, data=collected_data, metrics=metrics)
-        except Exception:
-            pass
+        except (ImproperlyConfigured, RuntimeError, ValueError, OSError, ObjectDoesNotExist) as exc:
+            logger.exception("JourneyBook sync generation failed for book %s: %s", book.id, exc)
 
         output = JourneyBookSerializer(book, context={"request": request})
         return Response(output.data, status=status.HTTP_201_CREATED)
@@ -152,8 +153,16 @@ class JourneyBookViewSet(ModelViewSet):
         book = self.get_object()
         if not book.pdf_file:
             return Response({"error": "Book not ready"}, status=status.HTTP_404_NOT_FOUND)
-
-        response = FileResponse(book.pdf_file.open("rb"), content_type="application/pdf")
+        try:
+            response = FileResponse(book.pdf_file.open("rb"), content_type="application/pdf")
+        except (FileNotFoundError, OSError, ValueError):
+            return Response(
+                self._export_error_payload(
+                    error_type=self.ERROR_TYPE_STORAGE_ERROR,
+                    fallback_available=book.status == JourneyBook.STATUS_FAILED,
+                ),
+                status=status.HTTP_404_NOT_FOUND,
+            )
         response["Content-Disposition"] = (
             f'attachment; filename="journey_book_{str(book.id)[:8]}.pdf"'
         )
@@ -179,8 +188,8 @@ class JourneyBookViewSet(ModelViewSet):
                 status=status.HTTP_200_OK,
             )
 
-        try:
-            if should_export_demo:
+        if should_export_demo:
+            try:
                 self._build_and_store_demo_pdf(book)
                 return Response(
                     self._export_response_payload(
@@ -192,7 +201,24 @@ class JourneyBookViewSet(ModelViewSet):
                     ),
                     status=status.HTTP_200_OK,
                 )
+            except RuntimeError:
+                return Response(
+                    self._export_error_payload(
+                        error_type=self.ERROR_TYPE_PDF_ENGINE_ERROR,
+                        fallback_available=False,
+                    ),
+                    status=status.HTTP_200_OK,
+                )
+            except (OSError, ValueError):
+                return Response(
+                    self._export_error_payload(
+                        error_type=self.ERROR_TYPE_STORAGE_ERROR,
+                        fallback_available=False,
+                    ),
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
+        try:
             self._build_and_store_real_pdf(book)
             return Response(
                 self._export_response_payload(
@@ -205,31 +231,49 @@ class JourneyBookViewSet(ModelViewSet):
                 status=status.HTTP_200_OK,
             )
         except RuntimeError:
-            # PDF engine is unavailable in this runtime. Return a typed payload so
-            # clients can render a warning state instead of surfacing a generic 500.
-            return Response(
-                {
-                    "status": "error",
-                    "pdf_url": None,
-                    "demo_pdf_url": None,
-                    "is_demo_pdf": False,
-                    "error_type": self.ERROR_TYPE_PDF_ENGINE_ERROR,
-                    "fallback_available": True,
-                },
-                status=status.HTTP_200_OK,
-            )
-        except Exception:
-            return Response(
-                {
-                    "status": "error",
-                    "pdf_url": None,
-                    "demo_pdf_url": None,
-                    "is_demo_pdf": False,
-                    "error_type": self.ERROR_TYPE_STORAGE_ERROR,
-                    "fallback_available": True,
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            # Real export failed due to PDF runtime dependency, try demo fallback.
+            try:
+                self._build_and_store_demo_pdf(book)
+                return Response(
+                    self._export_response_payload(
+                        request=request,
+                        book=book,
+                        is_demo_pdf=True,
+                        error_type=self.ERROR_TYPE_PDF_ENGINE_ERROR,
+                        fallback_available=False,
+                    ),
+                    status=status.HTTP_200_OK,
+                )
+            except (RuntimeError, OSError, ValueError):
+                return Response(
+                    self._export_error_payload(
+                        error_type=self.ERROR_TYPE_PDF_ENGINE_ERROR,
+                        fallback_available=True,
+                    ),
+                    status=status.HTTP_200_OK,
+                )
+        except (OSError, ValueError):
+            # Storage/runtime write failed, attempt demo fallback before returning hard error.
+            try:
+                self._build_and_store_demo_pdf(book)
+                return Response(
+                    self._export_response_payload(
+                        request=request,
+                        book=book,
+                        is_demo_pdf=True,
+                        error_type=self.ERROR_TYPE_STORAGE_ERROR,
+                        fallback_available=False,
+                    ),
+                    status=status.HTTP_200_OK,
+                )
+            except (RuntimeError, OSError, ValueError):
+                return Response(
+                    self._export_error_payload(
+                        error_type=self.ERROR_TYPE_STORAGE_ERROR,
+                        fallback_available=True,
+                    ),
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
     @action(detail=True, methods=["get"])
     def preview(self, request, pk=None):
@@ -251,7 +295,7 @@ class JourneyBookViewSet(ModelViewSet):
             structure = self._get_structure(book.book_type)
 
             chapters_text: list[str] = []
-            ai_model_used = os.getenv("JOURNEYBOOK_MODEL", "gpt-oss:20b-cloud")
+            ai_model_used = get_journeybook_model()
 
             for idx, chapter in enumerate(structure["chapters"], start=1):
                 start = time.time()
@@ -286,8 +330,8 @@ class JourneyBookViewSet(ModelViewSet):
                 images["milestone"] = img_gen.generate_milestone_timeline(
                     metrics.get("derived_milestones") or []
                 )
-            except Exception:
-                pass
+            except (RuntimeError, ValueError, OSError) as exc:
+                logger.warning("JourneyBook chart generation failed for book %s: %s", book.id, exc)
 
             pdf_builder = PDFBuilder(data, metrics, book.book_type)
             pdf_bytes = pdf_builder.build(chapters_text, motivational_text, images)
@@ -333,7 +377,7 @@ class JourneyBookViewSet(ModelViewSet):
                 "images_generated": len(images),
             }
             book.mark_ready(metadata=metadata)
-        except Exception as exc:
+        except (ImproperlyConfigured, RuntimeError, ValueError, OSError, ObjectDoesNotExist) as exc:
             book.mark_failed(str(exc))
             raise
 
@@ -344,7 +388,7 @@ class JourneyBookViewSet(ModelViewSet):
 
         try:
             collected_data, metrics = self._collect_preview_metrics(book)
-        except Exception:
+        except (RuntimeError, ValueError, OSError, ObjectDoesNotExist):
             collected_data = {"profile": {"name": str(book.user.email)}, "goal": {}}
             metrics = {"journey_overview": {"start_date": book.data_start_date, "end_date": book.data_end_date}}
 
@@ -388,6 +432,17 @@ class JourneyBookViewSet(ModelViewSet):
             "pdf_url": download_url,
             "demo_pdf_url": download_url if is_demo_pdf else None,
             "is_demo_pdf": is_demo_pdf,
+            "error_type": error_type,
+            "fallback_available": fallback_available,
+        }
+
+    @staticmethod
+    def _export_error_payload(error_type: str, fallback_available: bool) -> dict[str, Any]:
+        return {
+            "status": "error",
+            "pdf_url": None,
+            "demo_pdf_url": None,
+            "is_demo_pdf": False,
             "error_type": error_type,
             "fallback_available": fallback_available,
         }
@@ -479,7 +534,7 @@ class JourneyBookViewSet(ModelViewSet):
                 "sections": fallback_sections,
                 "stats": self._preview_stats(book, metrics=metrics),
             }
-        except Exception:
+        except (RuntimeError, ValueError, OSError, ObjectDoesNotExist):
             return {
                 **payload,
                 "source": "fallback_template",
@@ -549,7 +604,7 @@ class JourneyBookViewSet(ModelViewSet):
         try:
             _, metrics = self._collect_preview_metrics(book)
             return self._preview_stats(book, metrics=metrics)
-        except Exception:
+        except (RuntimeError, ValueError, OSError, ObjectDoesNotExist):
             return self._preview_stats(book)
 
     @staticmethod

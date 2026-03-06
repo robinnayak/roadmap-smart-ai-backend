@@ -3,6 +3,7 @@
 # ==============================================================================
 
 import uuid
+from datetime import timedelta
 from django.db import models
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -43,6 +44,11 @@ class DailyTaskList(models.Model):
 
     daily_motivation = models.TextField(blank=True)
     daily_mantra = models.CharField(max_length=255, blank=True)
+    schedule_constraints = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Event-aware scheduling metadata for routine-fit explanation.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -118,6 +124,7 @@ class DailyTaskItem(models.Model):
     ITEM_TYPE_CHOICES = [
         ('habit',     'Daily Habit'),
         ('goal_task', 'Goal Task'),
+        ('event',     'Event'),
     ]
     PRIORITY_CHOICES = [
         ('high',   'High'),
@@ -146,6 +153,12 @@ class DailyTaskItem(models.Model):
     )
     habit = models.ForeignKey(
         'HabitTracker',
+        on_delete=models.CASCADE,
+        null=True, blank=True,
+        related_name='daily_items',
+    )
+    event = models.ForeignKey(
+        'events.Event',
         on_delete=models.CASCADE,
         null=True, blank=True,
         related_name='daily_items',
@@ -260,6 +273,8 @@ class DailyTaskItem(models.Model):
     def primary_category(self) -> str:
         if self.related_goal:
             return self.related_goal.primary_category
+        if self.event_id:
+            return 'Event'
         return ''
 
 
@@ -497,3 +512,116 @@ class DisciplineStreak(models.Model):
             'total_perfect_days', 'total_days_tracked', 'last_tracked_date',
             'updated_at',
         ])
+
+    def calculate_custom_interval_streak(self, interval_days: int = 1, as_of_date=None) -> dict:
+        """
+        Calculate streak continuity over custom intervals (N-day windows).
+
+        Rule:
+        - A window is counted as successful if at least one perfect day
+          (DailyTaskList.is_fully_completed=True) exists in that interval.
+        - `current_streak_intervals` counts consecutive successful windows
+          from `as_of_date` backward.
+        """
+        interval_days = max(1, min(int(interval_days or 1), 30))
+        as_of_date = as_of_date or timezone.localdate()
+
+        perfect_dates = list(
+            DailyTaskList.objects.filter(
+                user=self.user,
+                is_fully_completed=True,
+                date__lte=as_of_date,
+            )
+            .values_list("date", flat=True)
+            .distinct()
+            .order_by("date")
+        )
+        if not perfect_dates:
+            return {
+                "interval_days": interval_days,
+                "current_streak_intervals": 0,
+                "longest_streak_intervals": 0,
+                "successful_intervals": 0,
+            }
+
+        perfect_date_set = set(perfect_dates)
+        earliest_date = perfect_dates[0]
+        interval_hits: list[bool] = []
+
+        window_index = 0
+        while True:
+            window_end = as_of_date - timedelta(days=(interval_days * window_index))
+            if window_end < earliest_date:
+                break
+            window_start = window_end - timedelta(days=interval_days - 1)
+            has_hit = any(
+                (window_start + timedelta(days=offset)) in perfect_date_set
+                for offset in range(interval_days)
+            )
+            interval_hits.append(has_hit)
+            window_index += 1
+
+        current = 0
+        for hit in interval_hits:
+            if not hit:
+                break
+            current += 1
+
+        longest = 0
+        running = 0
+        for hit in interval_hits:
+            if hit:
+                running += 1
+                if running > longest:
+                    longest = running
+            else:
+                running = 0
+
+        return {
+            "interval_days": interval_days,
+            "current_streak_intervals": current,
+            "longest_streak_intervals": longest,
+            "successful_intervals": sum(1 for hit in interval_hits if hit),
+        }
+
+
+# ==============================================================================
+# 6. AdaptiveRoadmapState
+# ==============================================================================
+
+class AdaptiveRoadmapState(models.Model):
+    """
+    Persisted adaptive roadmap state used by routine generation triggers.
+
+    This model stores rolling miss/success counters and scaling control values
+    so adaptive behavior remains deterministic across process restarts.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        "authentication.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="adaptive_roadmap_state",
+    )
+
+    current_scale_level = models.IntegerField(default=0)
+    consecutive_miss_days = models.IntegerField(default=0)
+    consecutive_success_days = models.IntegerField(default=0)
+    weekly_miss_days = models.IntegerField(default=0)
+
+    last_evaluated_date = models.DateField(null=True, blank=True)
+    last_scale_change_date = models.DateField(null=True, blank=True)
+    weekly_reset_anchor = models.DateField(null=True, blank=True)
+    last_sunday_rebuild_date = models.DateField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "adaptive_roadmap_states"
+
+    def __str__(self):
+        return (
+            f"{self.user.email} - scale={self.current_scale_level}, "
+            f"miss={self.consecutive_miss_days}, success={self.consecutive_success_days}"
+        )
