@@ -4,13 +4,140 @@
 
 import uuid
 from datetime import timedelta
+from django.apps import apps
 from django.db import models
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 
 
 # ==============================================================================
-# 1. DailyTaskList
+# 1. HealthProfile
+# ==============================================================================
+
+class HealthProfile(models.Model):
+    JOB_TYPE_CHOICES = [
+        ('desk', 'Desk/Office'),
+        ('physical', 'Physical/Field'),
+        ('creative', 'Creative'),
+        ('healthcare', 'Healthcare'),
+        ('student', 'Student'),
+        ('freelance', 'Freelance'),
+        ('other', 'Other'),
+    ]
+    SLEEP_PATTERN_CHOICES = [
+        ('early_riser', 'Early Riser'),
+        ('night_owl', 'Night Owl'),
+        ('irregular', 'Irregular'),
+        ('shift_based', 'Shift-based'),
+    ]
+    BUDGET_CHOICES = [
+        ('minimal', 'Minimal (free only)'),
+        ('low', 'Low ($1-20/mo)'),
+        ('medium', 'Medium'),
+        ('flexible', 'Flexible'),
+    ]
+    MOTIVATION_STYLE_CHOICES = [
+        ('reward', 'Reward-driven'),
+        ('progress', 'Progress tracking'),
+        ('accountability', 'Accountability partner'),
+        ('intrinsic', 'Intrinsic'),
+    ]
+    WILLPOWER_CHOICES = [
+        ('low', 'Low - need tiny habits'),
+        ('medium', 'Medium'),
+        ('high', 'High - push me'),
+    ]
+    STRESS_LEVEL_CHOICES = [
+        ('low', 'Low'),
+        ('moderate', 'Moderate'),
+        ('high', 'High'),
+        ('burnout', 'Burnout'),
+    ]
+    FITNESS_LEVEL_CHOICES = [
+        ('sedentary', 'Sedentary'),
+        ('light', 'Light activity'),
+        ('moderate', 'Moderate'),
+        ('active', 'Active'),
+        ('athletic', 'Athletic'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        'authentication.CustomUser',
+        on_delete=models.CASCADE,
+        related_name='health_profiles',
+    )
+
+    bad_habits = models.JSONField(default=list)
+    conditions = models.JSONField(default=list)
+    on_medication = models.BooleanField(default=False)
+    condition_duration = models.CharField(max_length=20, blank=True)
+
+    job_type = models.CharField(max_length=20, choices=JOB_TYPE_CHOICES, blank=True)
+    job_type_other = models.CharField(max_length=100, blank=True)
+    work_hours = models.CharField(max_length=50, blank=True)
+    sleep_pattern = models.CharField(max_length=20, choices=SLEEP_PATTERN_CHOICES, blank=True)
+    climate = models.CharField(max_length=50, blank=True)
+    budget_level = models.CharField(max_length=10, choices=BUDGET_CHOICES, default='minimal')
+
+    age_range = models.CharField(max_length=10, blank=True)
+    gender = models.CharField(max_length=30, blank=True)
+    weight_goal = models.CharField(max_length=30, blank=True)
+
+    motivation_style = models.CharField(max_length=20, choices=MOTIVATION_STYLE_CHOICES, blank=True)
+    willpower_level = models.CharField(max_length=10, choices=WILLPOWER_CHOICES, default='medium')
+    stress_level = models.CharField(max_length=10, choices=STRESS_LEVEL_CHOICES, default='moderate')
+    past_failures = models.JSONField(default=list)
+
+    fitness_level = models.CharField(max_length=15, choices=FITNESS_LEVEL_CHOICES, default='sedentary')
+    diet_type = models.CharField(max_length=50, blank=True)
+    food_restrictions = models.TextField(blank=True)
+    existing_habits = models.JSONField(default=list)
+
+    primary_goal = models.CharField(max_length=100, blank=True)
+    goal_timeframe = models.CharField(max_length=20, blank=True)
+    daily_time_available = models.CharField(max_length=20, blank=True)
+
+    commitment_words = models.TextField(blank=True)
+    commitment_person = models.CharField(max_length=100, blank=True)
+    commitment_emoji = models.CharField(max_length=10, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'health_profiles'
+
+    def __str__(self):
+        return f"{self.user.email} - health profile"
+
+    def as_ai_context(self) -> dict:
+        return {
+            'bad_habits': self.bad_habits,
+            'conditions': self.conditions,
+            'on_medication': self.on_medication,
+            'job_type': self.job_type,
+            'job_type_other': self.job_type_other,
+            'sleep_pattern': self.sleep_pattern,
+            'budget_level': self.budget_level,
+            'age_range': self.age_range,
+            'fitness_level': self.fitness_level,
+            'willpower_level': self.willpower_level,
+            'stress_level': self.stress_level,
+            'motivation_style': self.motivation_style,
+            'primary_goal': self.primary_goal,
+            'goal_timeframe': self.goal_timeframe,
+            'daily_time': self.daily_time_available,
+            'existing_habits': self.existing_habits,
+            'diet_type': self.diet_type,
+            'food_restrictions': self.food_restrictions,
+            'commitment_words': self.commitment_words,
+            'commitment_person': self.commitment_person,
+        }
+
+
+# ==============================================================================
+# 2. DailyTaskList
 # ==============================================================================
 
 class DailyTaskList(models.Model):
@@ -116,7 +243,7 @@ class DailyTaskList(models.Model):
 
 
 # ==============================================================================
-# 2. DailyTaskItem
+# 3. DailyTaskItem
 # ==============================================================================
 
 class DailyTaskItem(models.Model):
@@ -279,7 +406,7 @@ class DailyTaskItem(models.Model):
 
 
 # ==============================================================================
-# 3. HabitTracker
+# 4. HabitTracker
 # ==============================================================================
 
 class HabitTracker(models.Model):
@@ -294,6 +421,15 @@ class HabitTracker(models.Model):
         ('medium', 'Medium'),
         ('low',    'Low'),
     ]
+    CATEGORY_CHOICES = [
+        ('hydration', 'Hydration'),
+        ('movement', 'Movement'),
+        ('nutrition', 'Nutrition'),
+        ('breathing', 'Breathing'),
+        ('mental', 'Mental/Mindfulness'),
+        ('sleep', 'Sleep'),
+        ('other', 'Other'),
+    ]
 
     id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -305,7 +441,13 @@ class HabitTracker(models.Model):
     name         = models.CharField(max_length=255)
     description  = models.TextField(blank=True)
     icon         = models.CharField(max_length=10, default='⭐')
+    category     = models.CharField(max_length=15, choices=CATEGORY_CHOICES, default='other')
     why_important = models.TextField(blank=True)
+    reason_headline = models.CharField(max_length=200, blank=True)
+    reason_body = models.TextField(blank=True)
+    science_badge = models.CharField(max_length=100, blank=True)
+    rewards = models.JSONField(default=list)
+    proof_metric_name = models.CharField(max_length=100, blank=True)
 
     frequency    = models.CharField(max_length=15, choices=FREQUENCY_CHOICES, default='daily')
     custom_days  = models.JSONField(
@@ -313,6 +455,7 @@ class HabitTracker(models.Model):
         help_text="List of weekday ints [0–6] where 0=Monday. Used when frequency='custom'.",
     )
     estimated_minutes = models.IntegerField(default=30)
+    suggested_time = models.TimeField(null=True, blank=True)
     priority    = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default='medium')
 
     linked_goal = models.ForeignKey(
@@ -321,6 +464,7 @@ class HabitTracker(models.Model):
         null=True, blank=True,
         related_name='habits',
     )
+    ai_suggested = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
 
     # Streak counters — updated by record_completion()
@@ -392,9 +536,278 @@ class HabitTracker(models.Model):
             'total_completions', 'last_completed_date', 'updated_at',
         ])
 
+    def get_current_proof(self) -> dict | None:
+        if not self.linked_goal_id or not self.proof_metric_name:
+            return None
+
+        try:
+            goal_progress_entry_model = apps.get_model('routine', 'GoalProgressEntry')
+        except LookupError:
+            return None
+
+        entries = goal_progress_entry_model.objects.filter(
+            goal_id=self.linked_goal_id,
+            metric_name=self.proof_metric_name,
+        ).order_by('date')
+
+        if not entries.exists():
+            return None
+
+        first_entry = entries.first()
+        latest_entry = entries.last()
+        return {
+            'metric_name': self.proof_metric_name,
+            'start_value': first_entry.metric_value,
+            'current_value': latest_entry.metric_value,
+            'target_value': latest_entry.metric_target,
+            'unit': latest_entry.metric_unit,
+            'direction': latest_entry.metric_direction,
+            'progress_pct': latest_entry.progress_percentage,
+            'days_tracked': entries.count(),
+        }
+
 
 # ==============================================================================
-# 4. HabitCompletion
+# 5. HabitRecommendation
+# ==============================================================================
+
+class HabitRecommendation(models.Model):
+    STATUS_CHOICES = [
+        ('pending', 'Pending review'),
+        ('accepted', 'Accepted'),
+        ('rejected', 'Rejected'),
+        ('snoozed', 'Snoozed'),
+    ]
+    CATEGORY_CHOICES = [
+        ('hydration', 'Hydration'),
+        ('movement', 'Movement'),
+        ('nutrition', 'Nutrition'),
+        ('breathing', 'Breathing'),
+        ('mental', 'Mental/Mindfulness'),
+        ('sleep', 'Sleep'),
+        ('other', 'Other'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        'authentication.CustomUser',
+        on_delete=models.CASCADE,
+        related_name='habit_recommendations',
+    )
+    suggested_for_goal = models.ForeignKey(
+        'goal.Goal',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='habit_recommendations',
+    )
+    source_health_profile = models.ForeignKey(
+        'HealthProfile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='habit_recommendations',
+    )
+
+    name = models.CharField(max_length=255)
+    icon = models.CharField(max_length=10, default='⭐')
+    category = models.CharField(max_length=15, choices=CATEGORY_CHOICES, default='other')
+    estimated_minutes = models.IntegerField(default=30)
+    suggested_time = models.TimeField(null=True, blank=True)
+    frequency = models.CharField(max_length=15, default='daily')
+
+    reason_headline = models.CharField(max_length=200, blank=True)
+    reason_body = models.TextField(blank=True)
+    science_badge = models.CharField(max_length=100, blank=True)
+    rewards = models.JSONField(default=list)
+    proof_metric_name = models.CharField(max_length=100, blank=True)
+
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    snooze_until = models.DateField(null=True, blank=True)
+    habit_tracker = models.OneToOneField(
+        'HabitTracker',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='from_recommendation',
+    )
+
+    ai_model_used = models.CharField(max_length=50, blank=True)
+    generation_batch = models.UUIDField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'habit_recommendations'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['user', 'suggested_for_goal']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.icon} {self.name} [{self.status}]"
+
+    def accept(self) -> HabitTracker:
+        if self.status == 'accepted' and self.habit_tracker:
+            return self.habit_tracker
+
+        tracker = HabitTracker.objects.create(
+            user=self.user,
+            name=self.name,
+            icon=self.icon,
+            category=self.category,
+            estimated_minutes=self.estimated_minutes,
+            suggested_time=self.suggested_time,
+            frequency=self.frequency,
+            reason_headline=self.reason_headline,
+            reason_body=self.reason_body,
+            science_badge=self.science_badge,
+            rewards=self.rewards,
+            proof_metric_name=self.proof_metric_name,
+            linked_goal=self.suggested_for_goal,
+            ai_suggested=True,
+        )
+        self.status = 'accepted'
+        self.habit_tracker = tracker
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=['status', 'habit_tracker', 'reviewed_at', 'updated_at'])
+        return tracker
+
+    def reject(self):
+        self.status = 'rejected'
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=['status', 'reviewed_at', 'updated_at'])
+
+    def snooze(self, until_date):
+        self.status = 'snoozed'
+        self.snooze_until = until_date
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=['status', 'snooze_until', 'reviewed_at', 'updated_at'])
+
+
+# ==============================================================================
+# 6. GoalProgressEntry
+# ==============================================================================
+
+class GoalProgressEntry(models.Model):
+    METRIC_DIRECTION_CHOICES = [
+        ('up', 'Higher is better'),
+        ('down', 'Lower is better'),
+    ]
+    DOMAIN_CHOICES = [
+        ('physical', 'Physical'),
+        ('mental', 'Mental'),
+        ('lifestyle', 'Lifestyle'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    goal = models.ForeignKey(
+        'goal.Goal',
+        on_delete=models.CASCADE,
+        related_name='progress_entries',
+    )
+    user = models.ForeignKey(
+        'authentication.CustomUser',
+        on_delete=models.CASCADE,
+        related_name='goal_progress_entries',
+    )
+
+    date = models.DateField()
+    metric_name = models.CharField(max_length=100)
+    metric_value = models.FloatField()
+    metric_unit = models.CharField(max_length=20)
+    metric_direction = models.CharField(
+        max_length=5,
+        choices=METRIC_DIRECTION_CHOICES,
+        default='up',
+    )
+    domain = models.CharField(
+        max_length=15,
+        choices=DOMAIN_CHOICES,
+        default='physical',
+    )
+    metric_start = models.FloatField(help_text="Day 1 value - denormalized for fast reads")
+    metric_target = models.FloatField()
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'goal_progress_entries'
+        unique_together = ['goal', 'date', 'metric_name']
+        ordering = ['goal', 'date']
+        indexes = [
+            models.Index(fields=['user', 'date']),
+            models.Index(fields=['goal', 'date']),
+            models.Index(fields=['goal', 'metric_name']),
+        ]
+
+    def __str__(self):
+        return f"{self.goal} - {self.metric_name}: {self.metric_value}{self.metric_unit} ({self.date})"
+
+    @property
+    def progress_percentage(self) -> int:
+        span = abs(self.metric_target - self.metric_start)
+        if span == 0:
+            return 100
+        pct = (
+            (self.metric_value - self.metric_start) / span
+            if self.metric_direction == 'up'
+            else (self.metric_start - self.metric_value) / span
+        )
+        return max(0, min(100, int(pct * 100)))
+
+
+# ==============================================================================
+# 7. DailyBrief
+# ==============================================================================
+
+class DailyBrief(models.Model):
+    TRACK_STATUS_CHOICES = [
+        ('on_track', 'On Track'),
+        ('behind', 'Slightly Behind'),
+        ('struggling', 'Struggling'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        'authentication.CustomUser',
+        on_delete=models.CASCADE,
+        related_name='daily_briefs',
+    )
+    date = models.DateField()
+    brief_text = models.TextField()
+
+    habit_completion_yesterday = models.FloatField(default=0.0)
+    missed_habits_yesterday = models.JSONField(default=list)
+    goal_metrics_snapshot = models.JSONField(default=dict)
+    upcoming_events_today = models.JSONField(default=list)
+    streak_at_generation = models.IntegerField(default=0)
+
+    track_status = models.CharField(max_length=15, choices=TRACK_STATUS_CHOICES, blank=True)
+    track_status_set_at = models.DateTimeField(null=True, blank=True)
+
+    generated_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'daily_briefs'
+        unique_together = ['user', 'date']
+        ordering = ['-date']
+
+    def __str__(self):
+        return f"{self.user.email} - brief {self.date}"
+
+    def set_track_status(self, status: str):
+        self.track_status = status
+        self.track_status_set_at = timezone.now()
+        self.save(update_fields=['track_status', 'track_status_set_at', 'updated_at'])
+
+
+# ==============================================================================
+# 8. HabitCompletion
 # ==============================================================================
 
 class HabitCompletion(models.Model):
@@ -426,7 +839,7 @@ class HabitCompletion(models.Model):
 
 
 # ==============================================================================
-# 5. DisciplineStreak
+# 9. DisciplineStreak
 # ==============================================================================
 
 class DisciplineStreak(models.Model):
@@ -586,7 +999,7 @@ class DisciplineStreak(models.Model):
 
 
 # ==============================================================================
-# 6. AdaptiveRoadmapState
+# 10. AdaptiveRoadmapState
 # ==============================================================================
 
 class AdaptiveRoadmapState(models.Model):

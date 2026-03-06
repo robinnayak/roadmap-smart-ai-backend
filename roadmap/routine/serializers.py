@@ -4,8 +4,8 @@
 
 from rest_framework import serializers
 from routine.models import (
-    DailyTaskList, DailyTaskItem, HabitTracker,
-    HabitCompletion, DisciplineStreak,
+    DailyTaskList, DailyTaskItem, HabitTracker, HealthProfile, HabitRecommendation,
+    GoalProgressEntry, DailyBrief, HabitCompletion, DisciplineStreak,
 )
 
 
@@ -27,21 +27,155 @@ class SkipTaskItemRequestSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True, default="")
 
 
+class HealthProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HealthProfile
+        fields = [
+            'id',
+            'bad_habits',
+            'conditions',
+            'on_medication',
+            'condition_duration',
+            'job_type',
+            'job_type_other',
+            'work_hours',
+            'sleep_pattern',
+            'climate',
+            'budget_level',
+            'age_range',
+            'gender',
+            'weight_goal',
+            'motivation_style',
+            'willpower_level',
+            'stress_level',
+            'past_failures',
+            'fitness_level',
+            'diet_type',
+            'food_restrictions',
+            'existing_habits',
+            'primary_goal',
+            'goal_timeframe',
+            'daily_time_available',
+            'commitment_words',
+            'commitment_person',
+            'commitment_emoji',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class HabitSuggestionRequestSerializer(serializers.Serializer):
+    goal_id = serializers.UUIDField(required=False)
+    profile_id = serializers.UUIDField(required=False)
+
+
+class HabitSuggestionSnoozeRequestSerializer(serializers.Serializer):
+    until_date = serializers.DateField(required=True)
+
+
+class HabitRecommendationSerializer(serializers.ModelSerializer):
+    habit_tracker_id = serializers.UUIDField(source='habit_tracker.id', read_only=True)
+    suggested_for_goal_id = serializers.UUIDField(source='suggested_for_goal.id', read_only=True)
+    source_health_profile_id = serializers.UUIDField(source='source_health_profile.id', read_only=True)
+
+    class Meta:
+        model = HabitRecommendation
+        fields = [
+            'id',
+            'name',
+            'icon',
+            'category',
+            'estimated_minutes',
+            'suggested_time',
+            'frequency',
+            'reason_headline',
+            'reason_body',
+            'science_badge',
+            'rewards',
+            'proof_metric_name',
+            'status',
+            'reviewed_at',
+            'snooze_until',
+            'habit_tracker_id',
+            'suggested_for_goal_id',
+            'source_health_profile_id',
+            'ai_model_used',
+            'generation_batch',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class GoalProgressEntrySerializer(serializers.ModelSerializer):
+    progress_percentage = serializers.IntegerField(read_only=True)
+    date = serializers.DateField(required=False)
+
+    class Meta:
+        model = GoalProgressEntry
+        fields = [
+            'id',
+            'date',
+            'metric_name',
+            'metric_value',
+            'metric_unit',
+            'metric_direction',
+            'domain',
+            'metric_start',
+            'metric_target',
+            'note',
+            'progress_percentage',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'progress_percentage', 'created_at']
+
+
+class DailyBriefSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DailyBrief
+        fields = [
+            'id',
+            'date',
+            'brief_text',
+            'habit_completion_yesterday',
+            'missed_habits_yesterday',
+            'goal_metrics_snapshot',
+            'upcoming_events_today',
+            'streak_at_generation',
+            'track_status',
+            'track_status_set_at',
+            'generated_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class TrackStatusRequestSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        choices=['on_track', 'behind', 'struggling'],
+        required=True,
+    )
+
+
 class HabitTrackerSerializer(serializers.ModelSerializer):
     """
     FIX: linked_goal now returns a summary dict instead of a raw UUID,
          so the frontend can display the goal name without a second API call.
     """
     linked_goal_info = serializers.SerializerMethodField()
-    category = serializers.SerializerMethodField()
+    current_proof = serializers.SerializerMethodField()
 
     class Meta:
         model = HabitTracker
         fields = [
             'id', 'name', 'description', 'icon',
-            'why_important', 'frequency', 'custom_days',
-            'estimated_minutes', 'priority', 'category',
+            'category', 'why_important',
+            'reason_headline', 'reason_body', 'science_badge', 'rewards',
+            'proof_metric_name', 'ai_suggested',
+            'frequency', 'custom_days', 'estimated_minutes', 'suggested_time', 'priority',
             'linked_goal', 'linked_goal_info',          # raw FK + summary
+            'current_proof',
             'is_active', 'current_streak', 'longest_streak',
             'total_completions', 'last_completed_date',
             'created_at', 'updated_at',
@@ -49,7 +183,7 @@ class HabitTrackerSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'current_streak', 'longest_streak',
             'total_completions', 'last_completed_date',
-            'created_at', 'updated_at', 'category',
+            'created_at', 'updated_at', 'current_proof',
         ]
 
     def get_linked_goal_info(self, obj):
@@ -61,11 +195,8 @@ class HabitTrackerSerializer(serializers.ModelSerializer):
             }
         return None
 
-    def get_category(self, obj):
-        """Return category from linked goal or a static 'Habit' category."""
-        if obj.linked_goal_id:
-            return obj.linked_goal.primary_category
-        return 'Habit'
+    def get_current_proof(self, obj):
+        return obj.get_current_proof()
 
 
 class DailyTaskItemSerializer(serializers.ModelSerializer):

@@ -18,6 +18,16 @@ from .views import (
     DisciplineStreakAPIView,
     HabitTrackerAPIView,
     HabitDetailAPIView,
+    HealthProfileView,
+    HealthProfileDetailView,
+    HabitSuggestView,
+    HabitSuggestionListView,
+    HabitSuggestionAcceptView,
+    HabitSuggestionRejectView,
+    HabitSuggestionSnoozeView,
+    ProgressDashboardView,
+    DailyBriefView,
+    TrackStatusView,
 )
 
 urlpatterns = [
@@ -41,6 +51,7 @@ urlpatterns = [
 
     # Progress analytics report
     path('progress/', ProgressOverviewAPIView.as_view(), name='progress-overview'),
+    path('progress/dashboard/', ProgressDashboardView.as_view(), name='progress-dashboard'),
     
     # Discipline streak
     path('streak/', DisciplineStreakAPIView.as_view(), name='discipline-streak'),
@@ -50,4 +61,19 @@ urlpatterns = [
     
     # Habit detail
     path('habits/<uuid:habit_id>/', HabitDetailAPIView.as_view(), name='habit-detail'),
+
+    # Health profile
+    path('health-profile/', HealthProfileView.as_view(), name='health-profile'),
+    path('health-profile/<uuid:profile_id>/', HealthProfileDetailView.as_view(), name='health-profile-detail'),
+
+    # Habit suggestions
+    path('habits/suggest/', HabitSuggestView.as_view(), name='habit-suggest'),
+    path('habits/suggestions/', HabitSuggestionListView.as_view(), name='habit-suggestion-list'),
+    path('habits/suggestions/<uuid:suggestion_id>/accept/', HabitSuggestionAcceptView.as_view(), name='habit-suggestion-accept'),
+    path('habits/suggestions/<uuid:suggestion_id>/reject/', HabitSuggestionRejectView.as_view(), name='habit-suggestion-reject'),
+    path('habits/suggestions/<uuid:suggestion_id>/snooze/', HabitSuggestionSnoozeView.as_view(), name='habit-suggestion-snooze'),
+
+    # Daily brief
+    path('brief/today/', DailyBriefView.as_view(), name='daily-brief-today'),
+    path('brief/track-status/', TrackStatusView.as_view(), name='daily-brief-track-status'),
 ]

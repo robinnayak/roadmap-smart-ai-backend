@@ -1,4 +1,6 @@
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.utils import timezone
 from rest_framework import status
@@ -8,8 +10,20 @@ from authentication.models import CustomUser
 from events.models import Event
 from goal.models import Goal, Milestone, SubGoal, Task
 from journal.models import JournalEntry
-from routine.models import AdaptiveRoadmapState, DailyTaskList, DailyTaskItem, HabitTracker
+from routine.models import (
+    AdaptiveRoadmapState,
+    DailyTaskList,
+    DailyTaskItem,
+    HabitTracker,
+    HealthProfile,
+    GoalProgressEntry,
+    DailyBrief,
+)
 from routine.services import get_or_create_today_task_list
+from routine.habit_recommendation_service import (
+    _build_habit_prompt,
+    generate_habit_recommendations_for_user,
+)
 
 
 class RoutineCompletionCascadeTests(APITestCase):
@@ -1129,3 +1143,704 @@ class RoutineEventConstraintIntegrationTests(APITestCase):
         self.assertGreaterEqual(task_list.tasks.filter(item_type="event").count(), 1)
         self.assertEqual(task_list.schedule_constraints["fit_summary"]["fallback_strategy"], "partial")
         self.assertEqual(task_list.schedule_constraints["fit_summary"]["fit_status"], "partial_fit")
+
+
+class HabitTrackerMotivationFieldsTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="habit-motivation@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.goal = Goal.objects.create(
+            user=self.user,
+            title="Breathing Goal",
+            description="Improve breathing capacity",
+            primary_category="health",
+            status="in_progress",
+            target_date=timezone.localdate() + timedelta(days=30),
+        )
+
+    def test_habit_endpoints_serialize_new_fields_with_safe_defaults(self):
+        habit = HabitTracker.objects.create(
+            user=self.user,
+            name="Morning Breathwork",
+            frequency="daily",
+            linked_goal=self.goal,
+        )
+
+        list_response = self.client.get("/routines/habits/")
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        serialized_habit = list_response.data["habits"][0]
+
+        self.assertEqual(serialized_habit["category"], "other")
+        self.assertEqual(serialized_habit["reason_headline"], "")
+        self.assertEqual(serialized_habit["reason_body"], "")
+        self.assertEqual(serialized_habit["science_badge"], "")
+        self.assertEqual(serialized_habit["rewards"], [])
+        self.assertEqual(serialized_habit["proof_metric_name"], "")
+        self.assertFalse(serialized_habit["ai_suggested"])
+        self.assertIsNone(serialized_habit["suggested_time"])
+        self.assertIsNone(serialized_habit["current_proof"])
+
+        detail_response = self.client.get(f"/routines/habits/{habit.id}/")
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        detail_payload = detail_response.data["habit"]
+        self.assertEqual(detail_payload["category"], "other")
+        self.assertEqual(detail_payload["rewards"], [])
+        self.assertIsNone(detail_payload["current_proof"])
+
+    def test_get_current_proof_returns_none_when_not_configured(self):
+        habit = HabitTracker.objects.create(
+            user=self.user,
+            name="Hydration Habit",
+            frequency="daily",
+        )
+
+        self.assertIsNone(habit.get_current_proof())
+
+    @patch("routine.models.apps.get_model")
+    def test_get_current_proof_returns_metric_payload_when_entries_exist(self, mock_get_model):
+        habit = HabitTracker.objects.create(
+            user=self.user,
+            name="Breath Hold Practice",
+            frequency="daily",
+            linked_goal=self.goal,
+            proof_metric_name="Lung Capacity",
+        )
+
+        first_entry = SimpleNamespace(metric_value=42.0)
+        latest_entry = SimpleNamespace(
+            metric_value=61.0,
+            metric_target=85.0,
+            metric_unit="%",
+            metric_direction="up",
+            progress_percentage=43,
+        )
+
+        queryset = mock_get_model.return_value.objects.filter.return_value.order_by.return_value
+        queryset.exists.return_value = True
+        queryset.first.return_value = first_entry
+        queryset.last.return_value = latest_entry
+        queryset.count.return_value = 8
+
+        proof = habit.get_current_proof()
+
+        self.assertEqual(proof, {
+            "metric_name": "Lung Capacity",
+            "start_value": 42.0,
+            "current_value": 61.0,
+            "target_value": 85.0,
+            "unit": "%",
+            "direction": "up",
+            "progress_pct": 43,
+            "days_tracked": 8,
+        })
+
+
+class HealthProfileEndpointTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="health-profile@test.com",
+            password="Password@123",
+        )
+        self.url = "/routines/health-profile/"
+
+    def test_unauthenticated_access_returns_401(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_get_before_profile_exists_returns_404(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_post_creates_profile_and_returns_201(self):
+        self.client.force_authenticate(self.user)
+        payload = {
+            "bad_habits": ["smoking"],
+            "conditions": ["asthma"],
+            "on_medication": True,
+            "budget_level": "low",
+            "willpower_level": "medium",
+            "stress_level": "moderate",
+            "fitness_level": "light",
+            "commitment_words": "I choose my health every day",
+        }
+        response = self.client.post(self.url, data=payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["health_profile"]["bad_habits"], ["smoking"])
+        self.assertTrue(HealthProfile.objects.filter(user=self.user).exists())
+
+    def test_post_allows_multiple_profiles_per_user(self):
+        self.client.force_authenticate(self.user)
+        HealthProfile.objects.create(user=self.user, bad_habits=["sleeping_late"])
+        response = self.client.post(self.url, data={"bad_habits": ["smoking"]}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(HealthProfile.objects.filter(user=self.user).count(), 2)
+
+    def test_patch_updates_only_supplied_fields(self):
+        self.client.force_authenticate(self.user)
+        profile = HealthProfile.objects.create(
+            user=self.user,
+            bad_habits=["smoking"],
+            stress_level="high",
+            commitment_words="Original words",
+        )
+        response = self.client.patch(
+            self.url,
+            data={"stress_level": "low"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        profile.refresh_from_db()
+        self.assertEqual(profile.stress_level, "low")
+        self.assertEqual(profile.bad_habits, ["smoking"])
+        self.assertEqual(profile.commitment_words, "Original words")
+
+    def test_job_type_other_roundtrip(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.post(
+            self.url,
+            data={
+                "bad_habits": ["smoking"],
+                "conditions": ["none"],
+                "job_type": "other",
+                "job_type_other": "Delivery rider",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["health_profile"]["job_type"], "other")
+        self.assertEqual(response.data["health_profile"]["job_type_other"], "Delivery rider")
+
+        patch_response = self.client.patch(
+            self.url,
+            data={"job_type_other": "Marine engineer"},
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data["health_profile"]["job_type_other"], "Marine engineer")
+
+    def test_get_returns_full_profile_after_creation(self):
+        self.client.force_authenticate(self.user)
+        HealthProfile.objects.create(
+            user=self.user,
+            bad_habits=["smoking", "sleeping_late"],
+            conditions=["anxiety"],
+            on_medication=False,
+            commitment_person="My daughter",
+        )
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        profile_payload = response.data["health_profile"]
+        self.assertEqual(profile_payload["bad_habits"], ["smoking", "sleeping_late"])
+        self.assertEqual(profile_payload["conditions"], ["anxiety"])
+        self.assertEqual(profile_payload["commitment_person"], "My daughter")
+
+
+class HabitRecommendationServiceTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="habit-service@test.com",
+            password="Password@123",
+        )
+        HealthProfile.objects.create(
+            user=self.user,
+            bad_habits=["smoking"],
+            conditions=["asthma"],
+            job_type="desk",
+            sleep_pattern="irregular",
+            budget_level="low",
+            willpower_level="medium",
+            stress_level="high",
+            motivation_style="progress",
+        )
+
+    def test_build_prompt_mentions_all_required_sections(self):
+        profile = HealthProfile.objects.filter(user=self.user).first()
+        prompt = _build_habit_prompt(profile.as_ai_context(), goal=None)
+        self.assertIn("habits_to_break", prompt)
+        self.assertIn("health_conditions", prompt)
+        self.assertIn("lifestyle", prompt)
+        self.assertIn("psychology", prompt)
+        self.assertIn("Analyze and combine", prompt)
+
+    @patch("routine.habit_recommendation_service.ResponseParser")
+    @patch("routine.habit_recommendation_service.OllamaProvider")
+    def test_generation_skips_pending_duplicates(self, mock_provider_cls, mock_parser_cls):
+        from routine.models import HabitRecommendation
+
+        HabitRecommendation.objects.create(
+            user=self.user,
+            name="Box breathing",
+            icon="*",
+            category="breathing",
+            estimated_minutes=10,
+            frequency="daily",
+            status="pending",
+        )
+
+        mock_provider = mock_provider_cls.return_value
+        mock_provider.generate_response.return_value = SimpleNamespace(content="{}")
+
+        mock_parser = mock_parser_cls.return_value
+        mock_parser.parse_json.return_value = {
+            "habits": [
+                {
+                    "name": "Box breathing",
+                    "category": "breathing",
+                    "estimated_minutes": 10,
+                    "frequency": "daily",
+                },
+                {
+                    "name": "Turmeric milk",
+                    "category": "nutrition",
+                    "estimated_minutes": 5,
+                    "frequency": "daily",
+                },
+            ]
+        }
+
+        generated = generate_habit_recommendations_for_user(self.user)
+        self.assertEqual(len(generated), 1)
+        self.assertEqual(generated[0].name, "Turmeric milk")
+        self.assertEqual(
+            HabitRecommendation.objects.filter(user=self.user, status="pending").count(),
+            2,
+        )
+
+
+class HabitRecommendationEndpointTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="habit-suggestions@test.com",
+            password="Password@123",
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="habit-suggestions-other@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.goal = Goal.objects.create(
+            user=self.user,
+            title="Improve cardio",
+            description="Cardio consistency",
+            primary_category="health",
+            status="in_progress",
+            target_date=timezone.localdate() + timedelta(days=90),
+        )
+        self.suggest_url = "/routines/habits/suggest/"
+        self.list_url = "/routines/habits/suggestions/"
+        self.profile_a = HealthProfile.objects.create(user=self.user, bad_habits=["smoking"])
+        self.profile_b = HealthProfile.objects.create(user=self.user, bad_habits=["junk_food"])
+
+    def _create_recommendation(self, **overrides):
+        defaults = {
+            "user": self.user,
+            "suggested_for_goal": self.goal,
+            "source_health_profile": self.profile_a,
+            "name": "Brisk walk",
+            "icon": "🚶",
+            "category": "movement",
+            "estimated_minutes": 15,
+            "frequency": "daily",
+            "status": "pending",
+        }
+        defaults.update(overrides)
+        from routine.models import HabitRecommendation
+        return HabitRecommendation.objects.create(**defaults)
+
+    def test_suggest_without_health_profile_returns_400(self):
+        response = self.client.post(self.suggest_url, data={"goal_id": str(self.goal.id)}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "Complete your health profile first.")
+
+    @patch("routine.views.generate_habit_recommendations_for_user")
+    def test_suggest_creates_pending_recommendations_and_not_habits(self, mock_generate):
+        HealthProfile.objects.create(user=self.user, existing_habits=[])
+
+        def _factory(user, goal_id=None):
+            rec1 = self._create_recommendation(name="Morning hydration")
+            rec2 = self._create_recommendation(name="Evening breathing")
+            return [rec1, rec2]
+
+        mock_generate.side_effect = _factory
+
+        response = self.client.post(self.suggest_url, data={"goal_id": str(self.goal.id)}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(response.data["suggestions"]), 2)
+
+        from routine.models import HabitRecommendation
+        self.assertEqual(HabitRecommendation.objects.filter(user=self.user, status="pending").count(), 2)
+        self.assertEqual(HabitTracker.objects.filter(user=self.user).count(), 0)
+
+    def test_accept_creates_habit_tracker_and_returns_it(self):
+        recommendation = self._create_recommendation(
+            name="Box breathing",
+            reason_headline="Calm nervous system",
+            reason_body="Helps reduce stress load.",
+            science_badge="Backed by breathing studies",
+            proof_metric_name="Resting Heart Rate",
+            rewards=[{"icon": "💨", "label": "Calmer focus", "sub": "feel grounded"}],
+        )
+        response = self.client.post(f"/routines/habits/suggestions/{recommendation.id}/accept/", data={})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        recommendation.refresh_from_db()
+        self.assertEqual(recommendation.status, "accepted")
+        self.assertIsNotNone(recommendation.habit_tracker_id)
+        self.assertEqual(HabitTracker.objects.filter(user=self.user, name="Box breathing").count(), 1)
+
+    def test_accept_is_idempotent(self):
+        recommendation = self._create_recommendation(name="Hydration reminder")
+        first_response = self.client.post(f"/routines/habits/suggestions/{recommendation.id}/accept/", data={})
+        second_response = self.client.post(f"/routines/habits/suggestions/{recommendation.id}/accept/", data={})
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        recommendation.refresh_from_db()
+        self.assertEqual(HabitTracker.objects.filter(user=self.user, name="Hydration reminder").count(), 1)
+        self.assertEqual(str(first_response.data["habit"]["id"]), str(recommendation.habit_tracker_id))
+        self.assertEqual(str(second_response.data["habit"]["id"]), str(recommendation.habit_tracker_id))
+
+    def test_reject_sets_status(self):
+        recommendation = self._create_recommendation()
+        response = self.client.post(f"/routines/habits/suggestions/{recommendation.id}/reject/", data={})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        recommendation.refresh_from_db()
+        self.assertEqual(recommendation.status, "rejected")
+        self.assertIsNotNone(recommendation.reviewed_at)
+
+    def test_snooze_sets_status_and_date(self):
+        recommendation = self._create_recommendation()
+        target_date = timezone.localdate() + timedelta(days=3)
+        response = self.client.post(
+            f"/routines/habits/suggestions/{recommendation.id}/snooze/",
+            data={"until_date": str(target_date)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        recommendation.refresh_from_db()
+        self.assertEqual(recommendation.status, "snoozed")
+        self.assertEqual(recommendation.snooze_until, target_date)
+
+    def test_list_filters_by_status(self):
+        self._create_recommendation(status="pending", name="A")
+        self._create_recommendation(status="rejected", name="B")
+        response = self.client.get(f"{self.list_url}?status=pending")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["suggestions"]), 1)
+        self.assertEqual(response.data["suggestions"][0]["name"], "A")
+
+    def test_list_filters_by_profile_id(self):
+        self._create_recommendation(name="A", source_health_profile=self.profile_a)
+        self._create_recommendation(name="B", source_health_profile=self.profile_b)
+        response = self.client.get(f"{self.list_url}?profile_id={self.profile_b.id}")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["suggestions"]), 1)
+        self.assertEqual(response.data["suggestions"][0]["name"], "B")
+
+    def test_cannot_accept_other_users_recommendation(self):
+        from routine.models import HabitRecommendation
+        recommendation = HabitRecommendation.objects.create(
+            user=self.other_user,
+            name="Other user habit",
+            icon="⭐",
+            category="other",
+            estimated_minutes=20,
+            frequency="daily",
+            status="pending",
+        )
+        response = self.client.post(f"/routines/habits/suggestions/{recommendation.id}/accept/", data={})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class GoalProgressEntryAPITests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="goal-progress@test.com",
+            password="Password@123",
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="goal-progress-other@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.goal = Goal.objects.create(
+            user=self.user,
+            title="Improve VO2 Max",
+            description="Track cardio improvements",
+            primary_category="health",
+            status="in_progress",
+            target_date=timezone.localdate() + timedelta(days=90),
+        )
+        self.other_goal = Goal.objects.create(
+            user=self.other_user,
+            title="Other goal",
+            description="Other user goal",
+            primary_category="health",
+            status="in_progress",
+            target_date=timezone.localdate() + timedelta(days=90),
+        )
+        self.progress_url = f"/goal/goals/{self.goal.id}/progress/"
+
+    def test_post_creates_entry_and_returns_progress_percentage(self):
+        response = self.client.post(
+            self.progress_url,
+            data={
+                "metric_name": "Lung Capacity",
+                "metric_value": 61,
+                "metric_unit": "%",
+                "metric_direction": "up",
+                "domain": "physical",
+                "metric_start": 38,
+                "metric_target": 85,
+                "date": str(timezone.localdate()),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["entry"]["progress_percentage"], 48)
+        self.assertEqual(GoalProgressEntry.objects.filter(user=self.user).count(), 1)
+
+    def test_post_upserts_existing_entry(self):
+        target_date = timezone.localdate()
+        GoalProgressEntry.objects.create(
+            goal=self.goal,
+            user=self.user,
+            date=target_date,
+            metric_name="Lung Capacity",
+            metric_value=50,
+            metric_unit="%",
+            metric_direction="up",
+            domain="physical",
+            metric_start=38,
+            metric_target=85,
+        )
+
+        response = self.client.post(
+            self.progress_url,
+            data={
+                "metric_name": "Lung Capacity",
+                "metric_value": 62,
+                "metric_unit": "%",
+                "metric_direction": "up",
+                "domain": "physical",
+                "metric_start": 38,
+                "metric_target": 85,
+                "date": str(target_date),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(GoalProgressEntry.objects.filter(goal=self.goal, date=target_date, metric_name="Lung Capacity").count(), 1)
+        entry = GoalProgressEntry.objects.get(goal=self.goal, date=target_date, metric_name="Lung Capacity")
+        self.assertEqual(entry.metric_value, 62)
+
+    def test_get_history_returns_entries_in_ascending_date_order(self):
+        base_date = timezone.localdate()
+        GoalProgressEntry.objects.create(
+            goal=self.goal,
+            user=self.user,
+            date=base_date + timedelta(days=2),
+            metric_name="Lung Capacity",
+            metric_value=60,
+            metric_unit="%",
+            metric_direction="up",
+            domain="physical",
+            metric_start=38,
+            metric_target=85,
+        )
+        GoalProgressEntry.objects.create(
+            goal=self.goal,
+            user=self.user,
+            date=base_date,
+            metric_name="Lung Capacity",
+            metric_value=50,
+            metric_unit="%",
+            metric_direction="up",
+            domain="physical",
+            metric_start=38,
+            metric_target=85,
+        )
+
+        response = self.client.get(self.progress_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        dates = [entry["date"] for entry in response.data["entries"]]
+        self.assertEqual(dates, sorted(dates))
+
+    def test_dashboard_returns_domain_grouping_and_sparkline(self):
+        base_date = timezone.localdate() - timedelta(days=8)
+        for idx in range(9):
+            GoalProgressEntry.objects.create(
+                goal=self.goal,
+                user=self.user,
+                date=base_date + timedelta(days=idx),
+                metric_name="Lung Capacity",
+                metric_value=40 + idx,
+                metric_unit="%",
+                metric_direction="up",
+                domain="physical",
+                metric_start=38,
+                metric_target=85,
+            )
+
+        response = self.client.get("/routines/progress/dashboard/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        physical_metrics = response.data["dashboard"]["physical"]
+        self.assertEqual(len(physical_metrics), 1)
+        metric = physical_metrics[0]
+        self.assertEqual(metric["goal_id"], str(self.goal.id))
+        self.assertEqual(metric["metric_name"], "Lung Capacity")
+        self.assertEqual(len(metric["sparkline"]), 7)
+        self.assertEqual(response.data["dashboard"]["mental"], [])
+        self.assertEqual(response.data["dashboard"]["lifestyle"], [])
+
+    def test_progress_percentage_handles_up_down_and_clamp_edges(self):
+        up_entry = GoalProgressEntry(
+            goal=self.goal,
+            user=self.user,
+            date=timezone.localdate(),
+            metric_name="Energy",
+            metric_value=120,
+            metric_unit="pts",
+            metric_direction="up",
+            domain="mental",
+            metric_start=20,
+            metric_target=100,
+        )
+        down_entry = GoalProgressEntry(
+            goal=self.goal,
+            user=self.user,
+            date=timezone.localdate(),
+            metric_name="Stress",
+            metric_value=45,
+            metric_unit="pts",
+            metric_direction="down",
+            domain="mental",
+            metric_start=80,
+            metric_target=40,
+        )
+        equal_entry = GoalProgressEntry(
+            goal=self.goal,
+            user=self.user,
+            date=timezone.localdate(),
+            metric_name="Baseline",
+            metric_value=10,
+            metric_unit="pts",
+            metric_direction="up",
+            domain="lifestyle",
+            metric_start=10,
+            metric_target=10,
+        )
+        negative_entry = GoalProgressEntry(
+            goal=self.goal,
+            user=self.user,
+            date=timezone.localdate(),
+            metric_name="Sleep Debt",
+            metric_value=120,
+            metric_unit="min",
+            metric_direction="down",
+            domain="lifestyle",
+            metric_start=60,
+            metric_target=30,
+        )
+
+        self.assertEqual(up_entry.progress_percentage, 100)
+        self.assertEqual(down_entry.progress_percentage, 87)
+        self.assertEqual(equal_entry.progress_percentage, 100)
+        self.assertEqual(negative_entry.progress_percentage, 0)
+
+    def test_progress_endpoints_are_owner_scoped(self):
+        response = self.client.post(
+            f"/goal/goals/{self.other_goal.id}/progress/",
+            data={
+                "metric_name": "Lung Capacity",
+                "metric_value": 60,
+                "metric_unit": "%",
+                "metric_start": 40,
+                "metric_target": 85,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        response = self.client.get(f"/goal/goals/{self.other_goal.id}/progress/")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class DailyBriefAPITests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="daily-brief@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.today_url = "/routines/brief/today/"
+        self.track_status_url = "/routines/brief/track-status/"
+
+    @patch("routine.daily_brief_service.OllamaProvider")
+    def test_get_generates_brief_when_missing(self, mock_provider_cls):
+        mock_provider = mock_provider_cls.return_value
+        mock_provider.generate_response.return_value = SimpleNamespace(
+            content="Sentence one. Sentence two. Sentence three."
+        )
+
+        response = self.client.get(self.today_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(DailyBrief.objects.filter(user=self.user, date=timezone.localdate()).exists())
+        self.assertIn("brief", response.data)
+        self.assertIn("Sentence one", response.data["brief"]["brief_text"])
+
+    @patch("routine.daily_brief_service.OllamaProvider")
+    def test_get_returns_cached_brief_on_second_call(self, mock_provider_cls):
+        mock_provider = mock_provider_cls.return_value
+        mock_provider.generate_response.return_value = SimpleNamespace(
+            content="Cached brief line one. Line two. Line three."
+        )
+
+        first_response = self.client.get(self.today_url)
+        second_response = self.client.get(self.today_url)
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(DailyBrief.objects.filter(user=self.user, date=timezone.localdate()).count(), 1)
+        self.assertEqual(mock_provider.generate_response.call_count, 1)
+        self.assertEqual(first_response.data["brief"]["id"], second_response.data["brief"]["id"])
+
+    def test_post_track_status_sets_status_and_timestamp(self):
+        DailyBrief.objects.create(
+            user=self.user,
+            date=timezone.localdate(),
+            brief_text="Today you continue steadily.",
+            habit_completion_yesterday=40.0,
+            missed_habits_yesterday=["Hydration"],
+            goal_metrics_snapshot={},
+            upcoming_events_today=[],
+            streak_at_generation=2,
+        )
+
+        response = self.client.post(
+            self.track_status_url,
+            data={"status": "on_track"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        brief = DailyBrief.objects.get(user=self.user, date=timezone.localdate())
+        self.assertEqual(brief.track_status, "on_track")
+        self.assertIsNotNone(brief.track_status_set_at)
+
+    def test_post_track_status_invalid_value_returns_400(self):
+        response = self.client.post(
+            self.track_status_url,
+            data={"status": "invalid"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+
+    def test_unauthenticated_returns_401(self):
+        self.client.force_authenticate(user=None)
+        today_response = self.client.get(self.today_url)
+        track_response = self.client.post(self.track_status_url, data={"status": "on_track"}, format="json")
+        self.assertEqual(today_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(track_response.status_code, status.HTTP_401_UNAUTHORIZED)

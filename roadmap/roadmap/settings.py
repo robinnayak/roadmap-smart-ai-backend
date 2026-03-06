@@ -8,13 +8,28 @@ from decouple import config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def bool_env(name: str, default: bool = False) -> bool:
+    """Parse truthy/falsy env values with support for deployment aliases."""
+    raw = config(name, default=str(default))
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw).strip().lower()
+    truthy = {"1", "true", "t", "yes", "y", "on", "debug", "dev", "development"}
+    falsy = {"0", "false", "f", "no", "n", "off", "prod", "production", "release"}
+    if value in truthy:
+        return True
+    if value in falsy:
+        return False
+    raise ValueError(f"Invalid boolean value for {name}: {raw!r}")
+
 # =============================================================================
 # BASIC SECURITY & DEBUG
 # =============================================================================
 
 SECRET_KEY = config('DJANGO_SECRET_KEY', default='django-insecure-...change-me...')
 
-DEBUG = config('DEBUG', default=True, cast=bool)
+DEBUG = bool_env('DEBUG', default=True)
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '::1'] + config('ALLOWED_HOSTS', default='').split(',')
 
@@ -244,7 +259,7 @@ EMAIL_BACKEND = config(
 )
 EMAIL_HOST = config("EMAIL_HOST", default="")
 EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
-EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
+EMAIL_USE_TLS = bool_env("EMAIL_USE_TLS", default=True)
 EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@example.com")
