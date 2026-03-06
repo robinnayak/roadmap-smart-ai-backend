@@ -44,6 +44,11 @@ class DailyTaskList(models.Model):
 
     daily_motivation = models.TextField(blank=True)
     daily_mantra = models.CharField(max_length=255, blank=True)
+    schedule_constraints = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Event-aware scheduling metadata for routine-fit explanation.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -119,6 +124,7 @@ class DailyTaskItem(models.Model):
     ITEM_TYPE_CHOICES = [
         ('habit',     'Daily Habit'),
         ('goal_task', 'Goal Task'),
+        ('event',     'Event'),
     ]
     PRIORITY_CHOICES = [
         ('high',   'High'),
@@ -147,6 +153,12 @@ class DailyTaskItem(models.Model):
     )
     habit = models.ForeignKey(
         'HabitTracker',
+        on_delete=models.CASCADE,
+        null=True, blank=True,
+        related_name='daily_items',
+    )
+    event = models.ForeignKey(
+        'events.Event',
         on_delete=models.CASCADE,
         null=True, blank=True,
         related_name='daily_items',
@@ -261,6 +273,8 @@ class DailyTaskItem(models.Model):
     def primary_category(self) -> str:
         if self.related_goal:
             return self.related_goal.primary_category
+        if self.event_id:
+            return 'Event'
         return ''
 
 

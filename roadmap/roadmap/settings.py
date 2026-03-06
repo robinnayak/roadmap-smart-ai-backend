@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'journeybook.apps.JourneybookConfig',
     'journal.apps.JournalConfig',
     'community.apps.CommunityConfig',
+    'events',
 ]
 
 MIDDLEWARE = [

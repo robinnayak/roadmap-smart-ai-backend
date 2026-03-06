@@ -71,6 +71,7 @@ class HabitTrackerSerializer(serializers.ModelSerializer):
 class DailyTaskItemSerializer(serializers.ModelSerializer):
     related_goal_info = serializers.SerializerMethodField()
     habit_info        = serializers.SerializerMethodField()
+    event_info        = serializers.SerializerMethodField()
     primary_category  = serializers.SerializerMethodField()
 
     class Meta:
@@ -81,7 +82,7 @@ class DailyTaskItemSerializer(serializers.ModelSerializer):
             'is_completed', 'completed_at', 'time_slot', 'suggested_time',
             'is_skipped', 'skip_reason', 'completion_notes',
             'why_important', 'display_order', 'points_earned', 'primary_category',
-            'related_goal_info', 'habit_info',
+            'related_goal_info', 'habit_info', 'event_info',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'completed_at', 'points_earned', 'created_at', 'updated_at', 'primary_category']
@@ -107,12 +108,24 @@ class DailyTaskItemSerializer(serializers.ModelSerializer):
             }
         return None
 
+    def get_event_info(self, obj):
+        if obj.event_id:
+            return {
+                'id': str(obj.event_id),
+                'title': obj.event.title,
+                'event_type': obj.event.event_type,
+                'timezone': obj.event.timezone,
+            }
+        return None
+
     def get_primary_category(self, obj):
         """Return the primary category from related goal or task item source."""
         if obj.related_goal_id:
             return obj.related_goal.primary_category
         elif obj.habit_id:
             return 'Habit'
+        elif obj.event_id:
+            return 'Event'
         return 'Task'
 
 
@@ -135,6 +148,8 @@ class DailyTaskItemSummarySerializer(serializers.ModelSerializer):
             return obj.related_goal.primary_category
         elif obj.habit_id:
             return 'Habit'
+        elif obj.event_id:
+            return 'Event'
         return 'Task'
 
 
@@ -158,6 +173,7 @@ class DailyTaskListSerializer(serializers.ModelSerializer):
             'total_tasks', 'completed_tasks', 'completion_percentage',
             'is_fully_completed', 'completed_on_time',
             'daily_motivation', 'daily_mantra',
+            'schedule_constraints',
             'created_at', 'updated_at', 'completed_at',
             'tasks', 'high_priority_tasks', 'next_task',
             
@@ -172,13 +188,16 @@ class DailyTaskListSerializer(serializers.ModelSerializer):
         return request and request.query_params.get('detailed', 'false').lower() == 'true'
 
     def get_tasks(self, obj):
-        qs = obj.tasks.all()
+        qs = obj.tasks.select_related('related_goal', 'habit', 'event')
         if self._use_detailed():
             return DailyTaskItemSerializer(qs, many=True).data
         return DailyTaskItemSummarySerializer(qs, many=True).data
 
     def get_high_priority_tasks(self, obj):
-        qs = obj.tasks.filter(priority='high', is_completed=False)
+        qs = obj.tasks.select_related('related_goal', 'habit', 'event').filter(
+            priority='high',
+            is_completed=False,
+        )
         return DailyTaskItemSerializer(qs, many=True).data
 
     def get_next_task(self, obj):
@@ -189,6 +208,7 @@ class DailyTaskListSerializer(serializers.ModelSerializer):
         for priority in ('high', 'medium', 'low'):
             task = (
                 obj.tasks
+                .select_related('related_goal', 'habit', 'event')
                 .filter(is_completed=False, is_skipped=False, priority=priority)
                 .order_by('display_order')
                 .first()

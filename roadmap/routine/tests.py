@@ -1,10 +1,11 @@
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from authentication.models import CustomUser
+from events.models import Event
 from goal.models import Goal, Milestone, SubGoal, Task
 from journal.models import JournalEntry
 from routine.models import AdaptiveRoadmapState, DailyTaskList, DailyTaskItem, HabitTracker
@@ -86,6 +87,61 @@ class RoutineCompletionCascadeTests(APITestCase):
         self.assertEqual(milestone.status, "completed")
         self.assertEqual(goal.status, "completed")
         self.assertEqual(goal.progress_percentage, 100)
+
+    def test_event_task_item_supports_complete_and_skip_without_goal_habit_cascade(self):
+        target_date = timezone.localdate()
+        event = Event.objects.create(
+            user=self.user,
+            title="Client Call",
+            description="Planned sync",
+            event_type="one_time",
+            start_at=datetime.fromisoformat(f"{target_date.isoformat()}T10:00:00+00:00"),
+            end_at=datetime.fromisoformat(f"{target_date.isoformat()}T11:00:00+00:00"),
+            is_all_day=False,
+            timezone="UTC",
+            recurrence=None,
+            routine_constraint={"constraint_mode": "hard", "routine_policy": "block"},
+        )
+
+        task_list = DailyTaskList.objects.create(user=self.user, date=target_date)
+        complete_item = DailyTaskItem.objects.create(
+            task_list=task_list,
+            item_type="event",
+            event=event,
+            title=event.title,
+            description=event.description,
+            priority="high",
+            estimated_minutes=60,
+            display_order=0,
+        )
+        skip_item = DailyTaskItem.objects.create(
+            task_list=task_list,
+            item_type="event",
+            event=event,
+            title="Client Call Follow-up",
+            description="Prep and context notes",
+            priority="medium",
+            estimated_minutes=30,
+            display_order=1,
+        )
+        task_list.update_progress()
+
+        complete_response = self.client.post(f"/routines/tasks/{complete_item.id}/complete/", data={})
+        self.assertEqual(complete_response.status_code, status.HTTP_200_OK)
+        complete_item.refresh_from_db()
+        self.assertTrue(complete_item.is_completed)
+
+        skip_response = self.client.post(
+            f"/routines/tasks/{skip_item.id}/skip/",
+            data={"reason": "Rescheduled"},
+        )
+        self.assertEqual(skip_response.status_code, status.HTTP_200_OK)
+        skip_item.refresh_from_db()
+        self.assertTrue(skip_item.is_skipped)
+
+        task_list.refresh_from_db()
+        self.assertEqual(task_list.total_tasks, 2)
+        self.assertEqual(task_list.completed_tasks, 1)
 
 
 class RoutineWriteValidationTests(APITestCase):
@@ -921,3 +977,155 @@ class RoutineDeleteEndpointTests(APITestCase):
         DailyTaskList.objects.filter(id=self.owner_routine.id).delete()
         response = self.client.delete(f"/routines/{self.owner_routine.id}/")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class RoutineEventConstraintIntegrationTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="routine-events@test.com",
+            password="Password@123",
+        )
+
+    def _create_goal_task(self, *, title: str, preferred_time_slot: str = "afternoon", estimated_minutes: int = 60):
+        goal = Goal.objects.create(
+            user=self.user,
+            title=f"{title} Goal",
+            description="Goal for event integration tests",
+            primary_category="career",
+            priority="high",
+            target_date=timezone.localdate() + timedelta(days=30),
+            status="in_progress",
+        )
+        milestone = Milestone.objects.create(
+            goal=goal,
+            title=f"{title} Milestone",
+            display_order=1,
+            priority="high",
+            status="in_progress",
+        )
+        subgoal = SubGoal.objects.create(
+            milestone=milestone,
+            title=f"{title} Subgoal",
+            display_order=1,
+            priority="high",
+            status="in_progress",
+        )
+        Task.objects.create(
+            subgoal=subgoal,
+            title=title,
+            status="pending",
+            priority="high",
+            preferred_time_slot=preferred_time_slot,
+            estimated_duration_minutes=estimated_minutes,
+            display_order=1,
+        )
+
+    def test_recurring_office_event_injects_constraints_metadata(self):
+        target_date = date(2026, 3, 10)  # Tuesday
+        self._create_goal_task(title="Deep Work Task", preferred_time_slot="afternoon")
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Morning Journal",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=20,
+            priority="medium",
+        )
+        Event.objects.create(
+            user=self.user,
+            title="Office Hours",
+            description="Mon-Fri office",
+            event_type="recurring",
+            start_at=datetime.fromisoformat("2026-03-09T09:00:00+05:45"),
+            end_at=datetime.fromisoformat("2026-03-09T17:00:00+05:45"),
+            is_all_day=False,
+            timezone="Asia/Katmandu",
+            recurrence={
+                "frequency": "weekly",
+                "interval": 1,
+                "by_weekday": ["MON", "TUE", "WED", "THU", "FRI"],
+                "until_date": "2026-12-31",
+                "count": None,
+            },
+            routine_constraint={
+                "constraint_mode": "hard",
+                "buffer_before_minutes": 15,
+                "buffer_after_minutes": 15,
+                "routine_policy": "block",
+            },
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+        constraints = task_list.schedule_constraints
+        self.assertEqual(constraints["timezone"], "Asia/Katmandu")
+        self.assertGreaterEqual(len(constraints["occupied_windows"]), 1)
+        self.assertIn(constraints["fit_summary"]["fit_status"], {"fit", "partial_fit"})
+        event_item = task_list.tasks.filter(item_type="event").first()
+        self.assertIsNotNone(event_item)
+        self.assertEqual(event_item.time_slot, "afternoon")
+        first_item = task_list.tasks.order_by("display_order").first()
+        self.assertIsNotNone(first_item)
+        self.assertEqual(first_item.item_type, "event")
+
+    def test_ad_hoc_meeting_shifts_tasks_out_of_blocked_slot(self):
+        target_date = date(2026, 3, 14)
+        self._create_goal_task(title="Meeting Day Task", preferred_time_slot="afternoon")
+        Event.objects.create(
+            user=self.user,
+            title="Ad-hoc Meeting",
+            description="Blocks full afternoon",
+            event_type="one_time",
+            start_at=datetime.fromisoformat("2026-03-14T12:00:00+05:45"),
+            end_at=datetime.fromisoformat("2026-03-14T18:00:00+05:45"),
+            is_all_day=False,
+            timezone="Asia/Katmandu",
+            recurrence=None,
+            routine_constraint={
+                "constraint_mode": "hard",
+                "buffer_before_minutes": 0,
+                "buffer_after_minutes": 0,
+                "routine_policy": "shift",
+            },
+        )
+
+        task_list, _ = get_or_create_today_task_list(self.user, target_date)
+        goal_item = task_list.tasks.filter(item_type="goal_task").first()
+        self.assertIsNotNone(goal_item)
+        self.assertNotEqual(goal_item.time_slot, "afternoon")
+        self.assertEqual(task_list.schedule_constraints["fit_summary"]["fallback_strategy"], "none")
+
+    def test_multi_day_travel_forces_partial_strategy(self):
+        target_date = date(2026, 4, 11)
+        self._create_goal_task(title="Travel Task", preferred_time_slot="morning")
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Travel Habit",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=30,
+            priority="medium",
+        )
+        Event.objects.create(
+            user=self.user,
+            title="Travel",
+            description="Multi-day full coverage",
+            event_type="multi_day",
+            start_at=datetime.fromisoformat("2026-04-10T00:00:00+05:45"),
+            end_at=datetime.fromisoformat("2026-04-13T23:59:00+05:45"),
+            is_all_day=True,
+            timezone="Asia/Katmandu",
+            recurrence=None,
+            routine_constraint={
+                "constraint_mode": "hard",
+                "buffer_before_minutes": 0,
+                "buffer_after_minutes": 0,
+                "routine_policy": "reduce_load",
+            },
+        )
+
+        task_list, _ = get_or_create_today_task_list(self.user, target_date)
+        self.assertEqual(task_list.tasks.exclude(item_type="event").count(), 0)
+        self.assertGreaterEqual(task_list.tasks.filter(item_type="event").count(), 1)
+        self.assertEqual(task_list.schedule_constraints["fit_summary"]["fallback_strategy"], "partial")
+        self.assertEqual(task_list.schedule_constraints["fit_summary"]["fit_status"], "partial_fit")

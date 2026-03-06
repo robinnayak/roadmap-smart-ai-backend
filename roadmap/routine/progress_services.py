@@ -600,7 +600,7 @@ def build_progress_overview_payload(
     if selected_task_list:
         selected_items = (
             DailyTaskItem.objects.filter(task_list=selected_task_list)
-            .select_related("related_goal")
+            .select_related("related_goal", "habit", "event")
             .order_by("display_order")
         )
     else:
@@ -618,6 +618,8 @@ def build_progress_overview_payload(
         category = "personal"
         if item.related_goal_id and item.related_goal and item.related_goal.primary_category:
             category = item.related_goal.primary_category
+        elif item.event_id:
+            category = "Event"
 
         today_task_sheet.append(
             {

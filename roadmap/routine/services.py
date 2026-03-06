@@ -7,7 +7,8 @@ AI is only used to generate the daily motivation + mantra (two short strings).
 """
 import logging
 from collections import deque
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.db.utils import IntegrityError
@@ -29,6 +30,12 @@ MIN_DAILY_GOAL_TASKS = 5
 ADAPTIVE_SCALE_MIN = -3
 ADAPTIVE_SCALE_MAX = 3
 ADAPTIVE_SCALE_COOLDOWN_DAYS = 2
+SLOT_ORDER = ("morning", "afternoon", "evening")
+SLOT_WINDOWS = {
+    "morning": (time(hour=6, minute=0), time(hour=12, minute=0)),
+    "afternoon": (time(hour=12, minute=0), time(hour=18, minute=0)),
+    "evening": (time(hour=18, minute=0), time(hour=23, minute=59)),
+}
 
 FRICTION_REASON_KEYWORDS = {
     "time_pressure": (
@@ -88,6 +95,283 @@ def _infer_time_slot_from_text(*values: str, fallback: str = "morning") -> str:
     if any(word in text for word in ("afternoon", "noon", "midday", "lunch")):
         return "afternoon"
     return fallback
+
+
+def _infer_time_slot_from_datetime(value: datetime | None, fallback: str = "afternoon") -> str:
+    if not value:
+        return fallback
+    hour = value.hour
+    if 6 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 18:
+        return "afternoon"
+    if 18 <= hour <= 23:
+        return "evening"
+    return fallback
+
+
+def _infer_time_slot_from_interval(
+    start_at: datetime | None,
+    end_at: datetime | None,
+    *,
+    target_date: date | None = None,
+    fallback: str = "afternoon",
+) -> str:
+    """
+    Infer slot by maximum overlap with slot windows.
+
+    This is preferred for long windows (e.g., 09:50-17:00) where start-time-only
+    classification is misleading.
+    """
+    if not start_at:
+        return fallback
+    if not end_at or end_at <= start_at:
+        return _infer_time_slot_from_datetime(start_at, fallback=fallback)
+
+    tz = start_at.tzinfo
+    if tz is None:
+        return _infer_time_slot_from_datetime(start_at, fallback=fallback)
+
+    anchor_date = target_date or start_at.date()
+    slot_overlaps: dict[str, int] = {}
+    for slot_name in SLOT_ORDER:
+        slot_start_time, slot_end_time = SLOT_WINDOWS[slot_name]
+        slot_start = datetime.combine(anchor_date, slot_start_time, tzinfo=tz)
+        slot_end = datetime.combine(anchor_date, slot_end_time, tzinfo=tz)
+        slot_overlaps[slot_name] = _compute_overlap_minutes(start_at, end_at, slot_start, slot_end)
+
+    best_slot = max(
+        SLOT_ORDER,
+        key=lambda slot_name: (
+            slot_overlaps.get(slot_name, 0),
+            -SLOT_ORDER.index(slot_name),
+        ),
+    )
+    if slot_overlaps.get(best_slot, 0) > 0:
+        return best_slot
+
+    return _infer_time_slot_from_datetime(start_at, fallback=fallback)
+
+
+def _slot_duration_minutes(slot_name: str) -> int:
+    start_time, end_time = SLOT_WINDOWS[slot_name]
+    start_minutes = start_time.hour * 60 + start_time.minute
+    end_minutes = end_time.hour * 60 + end_time.minute
+    return max(0, end_minutes - start_minutes)
+
+
+def _datetime_from_date_and_time(target_date: date, target_time: time, tz: ZoneInfo) -> datetime:
+    return datetime.combine(target_date, target_time, tzinfo=tz)
+
+
+def _compute_overlap_minutes(start_a: datetime, end_a: datetime, start_b: datetime, end_b: datetime) -> int:
+    overlap_start = max(start_a, start_b)
+    overlap_end = min(end_a, end_b)
+    seconds = (overlap_end - overlap_start).total_seconds()
+    return max(0, int(seconds // 60))
+
+
+def _build_default_schedule_constraints(target_date: date) -> dict:
+    return {
+        "timezone": "UTC",
+        "window_start": f"{target_date.isoformat()}T00:00:00+00:00",
+        "window_end": f"{target_date.isoformat()}T23:59:59+00:00",
+        "occupied_windows": [],
+        "fit_summary": {
+            "available_minutes": 0,
+            "required_minutes": 0,
+            "fit_status": "fit",
+            "fallback_strategy": "none",
+        },
+    }
+
+
+def _get_event_occurrences_for_day(user, target_date: date) -> list[dict]:
+    try:
+        from events.models import Event
+        from events.services import expand_event_occurrences
+    except Exception:
+        return []
+
+    events = Event.objects.filter(user=user).order_by("start_at")
+    if not events.exists():
+        return []
+
+    event_occurrences = []
+    for event in events:
+        occurrences = expand_event_occurrences(
+            event=event,
+            start_date=target_date,
+            end_date=target_date,
+            output_timezone=event.timezone,
+        )
+        for occurrence in occurrences:
+            routine_constraint = occurrence.get("routine_constraint") or {}
+            buffer_before = int(routine_constraint.get("buffer_before_minutes", 0))
+            buffer_after = int(routine_constraint.get("buffer_after_minutes", 0))
+            start_value = occurrence["start_at"]
+            end_value = occurrence["end_at"]
+            start_dt = (
+                start_value
+                if isinstance(start_value, datetime)
+                else datetime.fromisoformat(str(start_value))
+            ) - timedelta(minutes=buffer_before)
+            end_dt = (
+                end_value
+                if isinstance(end_value, datetime)
+                else datetime.fromisoformat(str(end_value))
+            )
+            if end_dt <= start_dt:
+                continue
+            event_occurrences.append(
+                {
+                    "event": event,
+                    "event_id": occurrence["event_id"],
+                    "occurrence_id": occurrence["occurrence_id"],
+                    "title": occurrence.get("title", ""),
+                    "event_type": occurrence.get("event_type", ""),
+                    "start_at": start_dt,
+                    "end_at": end_dt,
+                    "constraint_mode": routine_constraint.get("constraint_mode", "hard"),
+                    "routine_policy": routine_constraint.get("routine_policy", "block"),
+                    "buffer_before_minutes": buffer_before,
+                    "buffer_after_minutes": buffer_after,
+                    "duration_minutes": max(0, int((end_dt - start_dt).total_seconds() // 60)),
+                }
+            )
+    return sorted(
+        event_occurrences,
+        key=lambda item: (item["start_at"], item["end_at"], item["event_id"]),
+    )
+
+
+def _fetch_day_event_constraints(user, target_date: date, event_occurrences: list[dict] | None = None) -> dict:
+    constraints = _build_default_schedule_constraints(target_date)
+    event_occurrences = event_occurrences if event_occurrences is not None else _get_event_occurrences_for_day(
+        user=user,
+        target_date=target_date,
+    )
+    if not event_occurrences:
+        return constraints
+
+    occupied_windows = []
+    day_timezone = None
+    for occurrence in event_occurrences:
+        start_dt = occurrence["start_at"] - timedelta(minutes=int(occurrence.get("buffer_before_minutes", 0)))
+        end_dt = occurrence["end_at"] + timedelta(minutes=int(occurrence.get("buffer_after_minutes", 0)))
+        if day_timezone is None:
+            day_timezone = start_dt.tzinfo
+        occupied_windows.append(
+            {
+                "source": "event",
+                "event_id": occurrence["event_id"],
+                "occurrence_id": occurrence["occurrence_id"],
+                "title": occurrence.get("title", ""),
+                "start_at": start_dt,
+                "end_at": end_dt,
+                "constraint_mode": occurrence.get("constraint_mode", "hard"),
+                "routine_policy": occurrence.get("routine_policy", "block"),
+            }
+        )
+
+    if day_timezone is None:
+        return constraints
+
+    constraints["timezone"] = getattr(day_timezone, "key", str(day_timezone))
+    day_start = _datetime_from_date_and_time(target_date, time(hour=0, minute=0), day_timezone)
+    day_end = _datetime_from_date_and_time(target_date, time(hour=23, minute=59, second=59), day_timezone)
+    constraints["window_start"] = day_start.isoformat()
+    constraints["window_end"] = day_end.isoformat()
+    constraints["occupied_windows"] = occupied_windows
+    return constraints
+
+
+def _build_available_minutes_by_slot(target_date: date, schedule_constraints: dict) -> dict[str, int]:
+    timezone_name = schedule_constraints.get("timezone") or "UTC"
+    tz = ZoneInfo(timezone_name)
+    hard_windows = [
+        item
+        for item in schedule_constraints.get("occupied_windows", [])
+        if item.get("constraint_mode", "hard") == "hard"
+    ]
+
+    availability = {}
+    for slot_name in SLOT_ORDER:
+        slot_start_time, slot_end_time = SLOT_WINDOWS[slot_name]
+        slot_start = _datetime_from_date_and_time(target_date, slot_start_time, tz)
+        slot_end = _datetime_from_date_and_time(target_date, slot_end_time, tz)
+        blocked_minutes = 0
+        for window in hard_windows:
+            blocked_minutes += _compute_overlap_minutes(slot_start, slot_end, window["start_at"], window["end_at"])
+        availability[slot_name] = max(0, _slot_duration_minutes(slot_name) - blocked_minutes)
+    return availability
+
+
+def _select_available_slot(preferred_slot: str | None, availability_by_slot: dict[str, int]) -> str:
+    preferred = preferred_slot if preferred_slot in SLOT_ORDER else "afternoon"
+    if availability_by_slot.get(preferred, 0) > 0:
+        return preferred
+    for slot_name in SLOT_ORDER:
+        if availability_by_slot.get(slot_name, 0) > 0:
+            return slot_name
+    return preferred
+
+
+def _calculate_required_minutes(habits, goal_tasks, minutes_multiplier: float) -> int:
+    habit_minutes = sum(_scale_minutes(h.estimated_minutes, minutes_multiplier) for h in habits)
+    goal_minutes = sum(_scale_minutes(t.estimated_duration_minutes, minutes_multiplier) for t in goal_tasks)
+    return habit_minutes + goal_minutes
+
+
+def _apply_overbooked_fallback(
+    habits,
+    goal_tasks,
+    minutes_multiplier: float,
+    available_minutes: int,
+):
+    if available_minutes <= 0:
+        return [], [], minutes_multiplier, "partial", 0
+
+    required_minutes = _calculate_required_minutes(habits, goal_tasks, minutes_multiplier)
+    if required_minutes <= available_minutes:
+        return habits, goal_tasks, minutes_multiplier, "none", required_minutes
+
+    deficit_ratio = (required_minutes - available_minutes) / max(required_minutes, 1)
+    if deficit_ratio <= 0.2:
+        compressed_multiplier = max(0.7, minutes_multiplier * (available_minutes / required_minutes))
+        compressed_required = _calculate_required_minutes(habits, goal_tasks, compressed_multiplier)
+        return habits, goal_tasks, compressed_multiplier, "compress", compressed_required
+
+    if deficit_ratio <= 0.5:
+        kept_tasks = list(goal_tasks)
+        while kept_tasks and _calculate_required_minutes(habits, kept_tasks, minutes_multiplier) > available_minutes:
+            drop_index = min(
+                range(len(kept_tasks)),
+                key=lambda idx: (
+                    GOAL_PRIORITY_ORDER.get(kept_tasks[idx].priority, 0),
+                    -kept_tasks[idx].display_order,
+                    str(kept_tasks[idx].id),
+                ),
+            )
+            kept_tasks.pop(drop_index)
+        deferred_required = _calculate_required_minutes(habits, kept_tasks, minutes_multiplier)
+        return habits, kept_tasks, minutes_multiplier, "defer", deferred_required
+
+    kept_tasks = sorted(
+        goal_tasks,
+        key=lambda task: (
+            -GOAL_PRIORITY_ORDER.get(task.priority, 0),
+            task.display_order,
+            str(task.id),
+        ),
+    )
+    limited = []
+    for task in kept_tasks:
+        candidate = limited + [task]
+        if _calculate_required_minutes(habits, candidate, minutes_multiplier) <= available_minutes:
+            limited = candidate
+    partial_required = _calculate_required_minutes(habits, limited, minutes_multiplier)
+    return habits, limited, minutes_multiplier, "partial", partial_required
 
 
 def _select_balanced_goal_tasks(user, limit: int = MAX_DAILY_GOAL_TASKS) -> list[Task]:
@@ -615,16 +899,12 @@ def get_or_create_today_task_list(
     Otherwise, build one from the goal hierarchy + active habits, then
     call the AI only for motivation/mantra text.
 
-    force_regenerate only rebuilds an existing day if it is currently empty
-    (0 total_tasks, 0 completed_tasks). This avoids destructive resets.
+    force_regenerate rebuilds an existing day when explicitly requested.
+    This is used to refresh routine composition after scheduling-rule updates.
     """
     existing = DailyTaskList.objects.filter(user=user, date=target_date).first()
     if existing:
-        if (
-            force_regenerate
-            and existing.total_tasks == 0
-            and existing.completed_tasks == 0
-        ):
+        if force_regenerate:
             existing.delete()
         else:
             return existing, False
@@ -670,6 +950,29 @@ def get_or_create_today_task_list(
         if h.should_include_on_date(target_date)
     ]
 
+    event_occurrences = _get_event_occurrences_for_day(user=user, target_date=target_date)
+    schedule_constraints = _fetch_day_event_constraints(
+        user=user,
+        target_date=target_date,
+        event_occurrences=event_occurrences,
+    )
+    availability_by_slot = _build_available_minutes_by_slot(
+        target_date=target_date,
+        schedule_constraints=schedule_constraints,
+    )
+    total_available_minutes = sum(availability_by_slot.values())
+    required_minutes_before_fallback = _calculate_required_minutes(
+        habits=habits,
+        goal_tasks=goal_tasks,
+        minutes_multiplier=minutes_multiplier,
+    )
+    habits, goal_tasks, minutes_multiplier, fallback_strategy, required_minutes_after_fallback = _apply_overbooked_fallback(
+        habits=habits,
+        goal_tasks=goal_tasks,
+        minutes_multiplier=minutes_multiplier,
+        available_minutes=total_available_minutes,
+    )
+
     # 3) Ask AI for motivation + mantra only
     motivation = ""
     mantra = ""
@@ -678,6 +981,12 @@ def get_or_create_today_task_list(
 
         user_context = _get_user_context(user)
         user_context["routine_tone_style"] = tone_style
+        user_context["event_constraints"] = {
+            "available_minutes": total_available_minutes,
+            "required_minutes": required_minutes_before_fallback,
+            "fallback_strategy": fallback_strategy,
+            "occupied_window_count": len(schedule_constraints.get("occupied_windows", [])),
+        }
         user_context["journal_load_signal"] = {
             "average_sentiment_score": journal_adaptation["average_sentiment_score"],
             "total_bad_habit_hits": journal_adaptation["total_bad_habit_hits"],
@@ -688,6 +997,7 @@ def get_or_create_today_task_list(
             user_context=user_context,
             goal_tasks=list(goal_tasks),
             habits=habits,
+            events=event_occurrences,
             target_date=target_date,
         )
         if ai_result.get("status") == "success":
@@ -717,22 +1027,96 @@ def get_or_create_today_task_list(
     # 4) Build list + items, race-safe against concurrent calls
     try:
         with transaction.atomic():
+            serialized_occupied_windows = []
+            for item in schedule_constraints.get("occupied_windows", []):
+                serialized_occupied_windows.append(
+                    {
+                        "source": item.get("source", "event"),
+                        "event_id": item.get("event_id", ""),
+                        "occurrence_id": item.get("occurrence_id", ""),
+                        "title": item.get("title", ""),
+                        "start_at": item["start_at"].isoformat(),
+                        "end_at": item["end_at"].isoformat(),
+                        "constraint_mode": item.get("constraint_mode", "hard"),
+                        "routine_policy": item.get("routine_policy", "block"),
+                    }
+                )
+
+            fit_status = "fit"
+            if fallback_strategy in ("compress", "defer"):
+                fit_status = "partial_fit"
+            elif fallback_strategy == "partial":
+                fit_status = "partial_fit"
+
             task_list = DailyTaskList.objects.create(
                 user=user,
                 date=target_date,
                 daily_motivation=motivation,
                 daily_mantra=mantra,
+                schedule_constraints={
+                    "timezone": schedule_constraints.get("timezone", "UTC"),
+                    "window_start": schedule_constraints.get("window_start"),
+                    "window_end": schedule_constraints.get("window_end"),
+                    "occupied_windows": serialized_occupied_windows,
+                    "fit_summary": {
+                        "available_minutes": total_available_minutes,
+                        "required_minutes": required_minutes_after_fallback,
+                        "fit_status": fit_status,
+                        "fallback_strategy": fallback_strategy,
+                    },
+                },
             )
 
             items_to_create = []
             order = 0
 
-            # Habits first
+            # Events first
+            for occurrence in event_occurrences:
+                start_dt = occurrence.get("start_at")
+                end_dt = occurrence.get("end_at")
+                event_slot = _infer_time_slot_from_interval(
+                    start_dt,
+                    end_dt,
+                    target_date=target_date,
+                    fallback="afternoon",
+                )
+                start_label = start_dt.strftime("%H:%M") if start_dt else ""
+                end_label = end_dt.strftime("%H:%M") if end_dt else ""
+                event_description = f"Scheduled event window: {start_label} - {end_label}"
+                if occurrence.get("routine_policy"):
+                    event_description = (
+                        f"{event_description}. Routine policy: {occurrence['routine_policy']}."
+                    )
+                items_to_create.append(
+                    DailyTaskItem(
+                        task_list=task_list,
+                        item_type="event",
+                        event=occurrence.get("event"),
+                        title=occurrence.get("title", "Scheduled Event"),
+                        description=event_description,
+                        icon="calendar",
+                        priority="high"
+                        if occurrence.get("constraint_mode", "hard") == "hard"
+                        else "medium",
+                        estimated_minutes=max(10, int(occurrence.get("duration_minutes", 0) or 0)),
+                        time_slot=event_slot,
+                        suggested_time=start_dt.time() if start_dt else _default_time_for_slot(event_slot),
+                        why_important="Scheduled event commitment.",
+                        display_order=order,
+                    )
+                )
+                order += 1
+
+            # Habits next
             for habit in habits:
                 habit_slot = _infer_time_slot_from_text(
                     habit.name,
                     habit.description,
                     fallback="morning",
+                )
+                habit_slot = _select_available_slot(
+                    preferred_slot=habit_slot,
+                    availability_by_slot=availability_by_slot,
                 )
                 items_to_create.append(
                     DailyTaskItem(
@@ -760,6 +1144,10 @@ def get_or_create_today_task_list(
                     task.title,
                     task.description,
                     fallback="afternoon",
+                )
+                task_slot = _select_available_slot(
+                    preferred_slot=task_slot,
+                    availability_by_slot=availability_by_slot,
                 )
                 adjusted_priority = (
                     _shift_priority_down(task.priority) if deprioritize_goal_tasks else task.priority
@@ -803,9 +1191,10 @@ def get_or_create_today_task_list(
         raise
 
     logger.info(
-        "DailyTaskList created for user %s on %s - %d habits, %d goal tasks",
+        "DailyTaskList created for user %s on %s - %d events, %d habits, %d goal tasks",
         user.id,
         target_date,
+        len(event_occurrences),
         len(habits),
         len(goal_tasks),
     )

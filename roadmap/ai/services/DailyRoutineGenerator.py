@@ -49,6 +49,7 @@ class DailyRoutineGenerator(BaseAIService):
         user_context: dict,
         goal_tasks: list,
         habits: list,
+        events: list | None,
         target_date: date,
         user=None,
     ) -> dict:
@@ -79,13 +80,18 @@ class DailyRoutineGenerator(BaseAIService):
                     "target_date":   str(target_date),
                     "task_count":    len(goal_tasks),
                     "habit_count":   len(habits),
+                    "event_count":   len(events or []),
                 },
             )
             job.start_processing()
 
         try:
             # Combine summarized goal tasks and habits for motivation prompt
-            combined_tasks = self._summarise_tasks(goal_tasks) + self._summarise_habits(habits)
+            combined_tasks = (
+                self._summarise_tasks(goal_tasks)
+                + self._summarise_habits(habits)
+                + self._summarise_events(events or [])
+            )
             
             prompt = self.prompts.get_motivation_prompt(
                 user_context=user_context,
@@ -165,4 +171,20 @@ class DailyRoutineGenerator(BaseAIService):
             }
             for habit in habits
         ]
+
+    @staticmethod
+    def _summarise_events(events: list) -> list[dict]:
+        """Return a minimal summary of each event occurrence for the prompt."""
+        result = []
+        for event in events:
+            result.append(
+                {
+                    "title": event.get("title", ""),
+                    "type": event.get("event_type", ""),
+                    "minutes": event.get("duration_minutes", 0),
+                    "constraint_mode": event.get("constraint_mode", "hard"),
+                    "time_slot": event.get("time_slot"),
+                }
+            )
+        return result
 

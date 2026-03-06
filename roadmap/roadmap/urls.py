@@ -13,6 +13,7 @@ urlpatterns = [
     path('routines/', include('routine.urls')),
     path('journal/', include('journal.urls')),
     path('community/', include('community.urls')),
+    path('events/', include('events.urls')),
     path('api/journeybook/', include('journeybook.urls', namespace='journeybook')),
     path('journey-books/demo-preview/', JourneyBookDemoPreviewAPIView.as_view(), name='journeybook-demo-preview'),
     path('journey-books/demo-preview/pdf/', JourneyBookDemoPreviewPDFAPIView.as_view(), name='journeybook-demo-preview-pdf'),
