@@ -235,6 +235,58 @@ class TaskDetailOwnershipTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(str(response.data["id"]), str(self.task.id))
 
+    def test_owner_put_allows_status_transitions_and_cascades_hierarchy(self):
+        self.client.force_authenticate(self.owner)
+
+        complete_response = self.client.put(
+            self.url,
+            data={"status": "completed"},
+            format="json",
+        )
+        self.assertEqual(complete_response.status_code, status.HTTP_200_OK)
+
+        self.task.refresh_from_db()
+        subgoal = self.task.subgoal
+        milestone = subgoal.milestone
+        goal = milestone.goal
+        subgoal.refresh_from_db()
+        milestone.refresh_from_db()
+        goal.refresh_from_db()
+
+        self.assertEqual(self.task.status, "completed")
+        self.assertIsNotNone(self.task.completed_at)
+        self.assertEqual(subgoal.status, "completed")
+        self.assertEqual(milestone.status, "completed")
+        self.assertEqual(goal.status, "completed")
+
+        revert_response = self.client.put(
+            self.url,
+            data={"status": "skipped"},
+            format="json",
+        )
+        self.assertEqual(revert_response.status_code, status.HTTP_200_OK)
+
+        self.task.refresh_from_db()
+        subgoal.refresh_from_db()
+        milestone.refresh_from_db()
+        goal.refresh_from_db()
+
+        self.assertEqual(self.task.status, "skipped")
+        self.assertIsNone(self.task.completed_at)
+        self.assertEqual(subgoal.status, "pending")
+        self.assertEqual(milestone.status, "not_started")
+        self.assertEqual(goal.status, "not_started")
+
+    def test_owner_put_rejects_invalid_status(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.put(
+            self.url,
+            data={"status": "archived"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+
 
 class CreateGoalWithHierarchyConfigFallbackTests(APITestCase):
     def setUp(self):

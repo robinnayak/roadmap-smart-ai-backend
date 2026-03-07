@@ -746,6 +746,10 @@ class SubGoal(models.Model):
             self.completed_date = timezone.localdate()
         elif self.progress_percentage > 0:
             self.status = "in_progress"
+            self.completed_date = None
+        else:
+            self.status = "pending"
+            self.completed_date = None
         self.save(
             update_fields=[
                 "progress_percentage",

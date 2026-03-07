@@ -893,40 +893,125 @@ class DisciplineStreak(models.Model):
         """
         Update streak for a given date.
 
-        FIX 1: Guard against double-counting — if update_streak is called
-               twice for the same date (two tasks complete within the same day),
-               only the first call takes effect.
-        FIX 2: Guard against future dates — passing tomorrow's date would
-               corrupt the streak counter.
-        FIX 3: Uses update_fields=[...] instead of a full save().
+        FIX 1: Guard against double-counting if update_streak is called
+               twice for the same date.
+        FIX 2: Guard against future dates.
+        FIX 3: Keep updates monotonic by ignoring out-of-order past dates.
         """
         today = timezone.localdate()
 
-        # Reject future dates
         if date > today:
             return
 
-        # Idempotent — don't process the same date twice
+        if self.last_tracked_date and date < self.last_tracked_date:
+            return
+
         if self.last_tracked_date == date:
             return
 
         if all_tasks_completed:
-            if self.current_streak_days == 0:
+            previous_date = self.last_tracked_date
+            has_missed_gap = bool(
+                previous_date and date > (previous_date + timedelta(days=1))
+            )
+
+            if has_missed_gap:
+                self.current_streak_days = 1
                 self.current_streak_start = date
-            self.current_streak_days += 1
-            self.total_perfect_days  += 1
+            else:
+                if self.current_streak_days == 0:
+                    self.current_streak_start = date
+                self.current_streak_days += 1
+
+            if self.current_streak_start is None:
+                self.current_streak_start = date
+            self.total_perfect_days += 1
 
             if self.current_streak_days > self.longest_streak_days:
-                self.longest_streak_days  = self.current_streak_days
+                self.longest_streak_days = self.current_streak_days
                 self.longest_streak_start = self.current_streak_start
-                self.longest_streak_end   = date
+                self.longest_streak_end = date
         else:
-            # Streak broken
-            self.current_streak_days  = 0
+            self.current_streak_days = 0
             self.current_streak_start = None
 
         self.total_days_tracked += 1
-        self.last_tracked_date   = date
+        self.last_tracked_date = date
+
+        self.save(update_fields=[
+            'current_streak_days', 'current_streak_start',
+            'longest_streak_days', 'longest_streak_start', 'longest_streak_end',
+            'total_perfect_days', 'total_days_tracked', 'last_tracked_date',
+            'updated_at',
+        ])
+
+    def reconcile_with_daily_history(self, as_of_date=None):
+        """
+        Rebuild streak counters from DailyTaskList rows up to as_of_date.
+        """
+        as_of_date = as_of_date or timezone.localdate()
+        rows = list(
+            DailyTaskList.objects.filter(
+                user=self.user,
+                date__lte=as_of_date,
+            )
+            .order_by("date")
+            .values("date", "is_fully_completed")
+        )
+
+        if not rows:
+            self.current_streak_days = 0
+            self.current_streak_start = None
+            self.longest_streak_days = 0
+            self.longest_streak_start = None
+            self.longest_streak_end = None
+            self.total_perfect_days = 0
+            self.total_days_tracked = 0
+            self.last_tracked_date = None
+        else:
+            current_days = 0
+            current_start = None
+            longest_days = 0
+            longest_start = None
+            longest_end = None
+            run_days = 0
+            run_start = None
+            prev_date = None
+
+            for row in rows:
+                day = row["date"]
+                is_perfect = bool(row["is_fully_completed"])
+
+                if is_perfect:
+                    if prev_date and day == (prev_date + timedelta(days=1)) and run_days > 0:
+                        run_days += 1
+                    else:
+                        run_days = 1
+                        run_start = day
+
+                    if run_days > longest_days:
+                        longest_days = run_days
+                        longest_start = run_start
+                        longest_end = day
+
+                    current_days = run_days
+                    current_start = run_start
+                else:
+                    run_days = 0
+                    run_start = None
+                    current_days = 0
+                    current_start = None
+
+                prev_date = day
+
+            self.current_streak_days = current_days
+            self.current_streak_start = current_start
+            self.longest_streak_days = longest_days
+            self.longest_streak_start = longest_start
+            self.longest_streak_end = longest_end
+            self.total_perfect_days = sum(1 for row in rows if row["is_fully_completed"])
+            self.total_days_tracked = len(rows)
+            self.last_tracked_date = rows[-1]["date"]
 
         self.save(update_fields=[
             'current_streak_days', 'current_streak_start',
@@ -1157,3 +1242,4 @@ class WakeBaselineState(models.Model):
             f"{self.user.email} - baseline={self.baseline_minutes}min "
             f"({self.baseline_timezone})"
         )
+

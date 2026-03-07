@@ -500,6 +500,77 @@ class ChurnReengagementServiceTests(TestCase):
         latest = AIReengagementAction.objects.filter(user=self.user).order_by("-created_at").first()
         self.assertEqual(latest.action_type, AIReengagementAction.ACTION_TYPE_ESCALATION)
 
+    @patch("ai.services.churn_reengagement.ChurnReengagementService.score_user")
+    def test_sent_push_action_includes_message_payload_metadata(self, mock_score_user):
+        NotificationSettings.objects.update_or_create(
+            user=self.user,
+            defaults={
+                "notifications_enabled": True,
+                "personalize_assistant": True,
+                "push_notifications": True,
+                "email_notifications": False,
+            },
+        )
+        mock_score_user.return_value = type(
+            "ScoreResult",
+            (),
+            {
+                "risk_score": 55.0,
+                "risk_tier": AIUserChurnState.RISK_TIER_MEDIUM,
+                "inactivity_days": 4,
+                "last_activity_at": timezone.now() - timedelta(days=4),
+                "score_inputs": {},
+            },
+        )()
+
+        result = self.service.process_user(user=self.user)
+        self.assertEqual(result["status"], AIReengagementAction.STATUS_SENT)
+
+        action = AIReengagementAction.objects.filter(user=self.user).order_by("-created_at").first()
+        payload = action.metadata.get("message_payload", {})
+
+        self.assertEqual(action.channel, AIReengagementAction.CHANNEL_PUSH)
+        self.assertEqual(payload.get("channel"), AIReengagementAction.CHANNEL_PUSH)
+        self.assertEqual(payload.get("action_type"), AIReengagementAction.ACTION_TYPE_NUDGE)
+        self.assertTrue(payload.get("headline"))
+        self.assertTrue(payload.get("body"))
+        self.assertEqual(payload.get("cta", {}).get("target"), "/routine")
+
+    @patch("ai.services.churn_reengagement.ChurnReengagementService.score_user")
+    def test_sent_email_action_includes_message_payload_metadata(self, mock_score_user):
+        NotificationSettings.objects.update_or_create(
+            user=self.user,
+            defaults={
+                "notifications_enabled": True,
+                "personalize_assistant": True,
+                "push_notifications": False,
+                "email_notifications": True,
+            },
+        )
+        mock_score_user.return_value = type(
+            "ScoreResult",
+            (),
+            {
+                "risk_score": 58.0,
+                "risk_tier": AIUserChurnState.RISK_TIER_MEDIUM,
+                "inactivity_days": 5,
+                "last_activity_at": timezone.now() - timedelta(days=5),
+                "score_inputs": {},
+            },
+        )()
+
+        result = self.service.process_user(user=self.user)
+        self.assertEqual(result["status"], AIReengagementAction.STATUS_SENT)
+
+        action = AIReengagementAction.objects.filter(user=self.user).order_by("-created_at").first()
+        payload = action.metadata.get("message_payload", {})
+
+        self.assertEqual(action.channel, AIReengagementAction.CHANNEL_EMAIL)
+        self.assertEqual(payload.get("channel"), AIReengagementAction.CHANNEL_EMAIL)
+        self.assertEqual(payload.get("risk_tier"), AIUserChurnState.RISK_TIER_MEDIUM)
+        self.assertTrue(payload.get("headline"))
+        self.assertTrue(payload.get("body"))
+
 
 class ChurnReengagementCommandTests(TestCase):
     def setUp(self):

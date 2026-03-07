@@ -16,6 +16,7 @@ from routine.models import (
     AdaptiveRoadmapState,
     DailyTaskList,
     DailyTaskItem,
+    DisciplineStreak,
     HabitTracker,
     HealthProfile,
     GoalProgressEntry,
@@ -2174,6 +2175,55 @@ class DailyBriefAPITests(APITestCase):
         self.assertEqual(mock_provider.generate_response.call_count, 1)
         self.assertEqual(first_response.data["brief"]["id"], second_response.data["brief"]["id"])
 
+    @patch("routine.daily_brief_service.OllamaProvider")
+    def test_get_reconciles_streak_snapshot_before_brief_creation(self, mock_provider_cls):
+        mock_provider = mock_provider_cls.return_value
+        mock_provider.generate_response.return_value = SimpleNamespace(
+            content="Keep moving today. One clear action first. Then build momentum."
+        )
+
+        today = timezone.localdate()
+        completed_day = today - timedelta(days=2)
+        missed_day = today - timedelta(days=1)
+
+        DailyTaskList.objects.create(
+            user=self.user,
+            date=completed_day,
+            total_tasks=1,
+            completed_tasks=1,
+            completion_percentage=100,
+            is_fully_completed=True,
+            status="completed",
+        )
+        DailyTaskList.objects.create(
+            user=self.user,
+            date=missed_day,
+            total_tasks=1,
+            completed_tasks=0,
+            completion_percentage=0,
+            is_fully_completed=False,
+            status="pending",
+        )
+        DisciplineStreak.objects.update_or_create(
+            user=self.user,
+            defaults={
+                "current_streak_days": 6,
+                "current_streak_start": completed_day - timedelta(days=5),
+                "longest_streak_days": 6,
+                "longest_streak_start": completed_day - timedelta(days=5),
+                "longest_streak_end": completed_day,
+                "total_perfect_days": 6,
+                "total_days_tracked": 6,
+                "last_tracked_date": completed_day,
+            },
+        )
+
+        response = self.client.get(self.today_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["brief"]["streak_at_generation"], 0)
+        brief = DailyBrief.objects.get(user=self.user, date=today)
+        self.assertEqual(brief.streak_at_generation, 0)
+
     def test_post_track_status_sets_status_and_timestamp(self):
         DailyBrief.objects.create(
             user=self.user,
@@ -2411,3 +2461,100 @@ class WakeUpDetectionTests(APITestCase):
         self.assertEqual(inferred_item.time_slot, "morning")
         self.assertIsNotNone(inferred_item.suggested_time)
         self.assertEqual(task_list.schedule_constraints["wake_baseline"]["baseline_minutes"], 330)
+
+
+class DisciplineStreakLifecycleTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="discipline-streak@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+
+    def test_update_streak_resets_after_missed_day_gap(self):
+        streak, _ = DisciplineStreak.objects.get_or_create(user=self.user)
+        start_day = timezone.localdate() - timedelta(days=3)
+        return_day = timezone.localdate() - timedelta(days=1)
+
+        streak.update_streak(start_day, all_tasks_completed=True)
+        streak.update_streak(return_day, all_tasks_completed=True)
+        streak.refresh_from_db()
+
+        self.assertEqual(streak.current_streak_days, 1)
+        self.assertEqual(streak.current_streak_start, return_day)
+        self.assertEqual(streak.longest_streak_days, 1)
+        self.assertEqual(streak.total_perfect_days, 2)
+
+    def test_streak_endpoint_reconciles_stale_streak_with_daily_task_history(self):
+        today = timezone.localdate()
+        completed_day = today - timedelta(days=2)
+        missed_day = today - timedelta(days=1)
+
+        DailyTaskList.objects.create(
+            user=self.user,
+            date=completed_day,
+            total_tasks=1,
+            completed_tasks=1,
+            completion_percentage=100,
+            is_fully_completed=True,
+            status="completed",
+        )
+        DailyTaskList.objects.create(
+            user=self.user,
+            date=missed_day,
+            total_tasks=1,
+            completed_tasks=0,
+            completion_percentage=0,
+            is_fully_completed=False,
+            status="pending",
+        )
+
+        DisciplineStreak.objects.update_or_create(
+            user=self.user,
+            defaults={
+                "current_streak_days": 9,
+                "current_streak_start": completed_day - timedelta(days=8),
+                "longest_streak_days": 9,
+                "longest_streak_start": completed_day - timedelta(days=8),
+                "longest_streak_end": completed_day,
+                "total_perfect_days": 9,
+                "total_days_tracked": 9,
+                "last_tracked_date": completed_day,
+            },
+        )
+
+        response = self.client.get("/routines/streak/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["streak"]["current_streak_days"], 0)
+        self.assertEqual(response.data["streak"]["longest_streak_days"], 1)
+        self.assertEqual(response.data["streak"]["total_perfect_days"], 1)
+        self.assertEqual(response.data["streak"]["total_days_tracked"], 2)
+
+    def test_streak_endpoint_preserves_consecutive_completed_day_growth(self):
+        today = timezone.localdate()
+        first_day = today - timedelta(days=2)
+        second_day = today - timedelta(days=1)
+
+        DailyTaskList.objects.create(
+            user=self.user,
+            date=first_day,
+            total_tasks=1,
+            completed_tasks=1,
+            completion_percentage=100,
+            is_fully_completed=True,
+            status="completed",
+        )
+        DailyTaskList.objects.create(
+            user=self.user,
+            date=second_day,
+            total_tasks=1,
+            completed_tasks=1,
+            completion_percentage=100,
+            is_fully_completed=True,
+            status="completed",
+        )
+
+        response = self.client.get("/routines/streak/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["streak"]["current_streak_days"], 2)
+        self.assertEqual(response.data["streak"]["longest_streak_days"], 2)

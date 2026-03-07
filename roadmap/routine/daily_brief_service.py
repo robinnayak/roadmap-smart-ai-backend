@@ -111,7 +111,8 @@ def get_or_generate_today_brief(user) -> DailyBrief:
 
     goal_metrics_snapshot = _extract_latest_goal_metrics(user)
     upcoming_events_today = _extract_upcoming_events_for_today(user, today)
-    streak = DisciplineStreak.objects.filter(user=user).first()
+    streak, _ = DisciplineStreak.objects.get_or_create(user=user)
+    streak.reconcile_with_daily_history(as_of_date=today)
     streak_days = int(getattr(streak, "current_streak_days", 0) or 0)
     previous_track_status = (
         DailyBrief.objects.filter(user=user, date=yesterday)

@@ -5,6 +5,8 @@ from django.contrib.auth.password_validation import validate_password
 from .models import CustomUser, Profile, NotificationSettings, UserPersonalDetails
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import IntegerField, Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 
@@ -204,6 +206,61 @@ class ProfileSerializer(serializers.ModelSerializer):
     email = serializers.CharField(
         source="user.email", read_only=True, help_text="User's email address"
     )
+    total_points = serializers.SerializerMethodField()
+    current_level = serializers.SerializerMethodField()
+    goals_completed = serializers.SerializerMethodField()
+    current_streak_days = serializers.SerializerMethodField()
+
+    def _get_dynamic_stats(self, obj):
+        cache = getattr(self, "_dynamic_stats_cache", {})
+        cache_key = str(obj.pk)
+        if cache_key in cache:
+            return cache[cache_key]
+
+        from goal.models import Goal
+        from routine.models import DailyTaskItem, DisciplineStreak
+
+        total_points = int(
+            DailyTaskItem.objects.filter(
+                task_list__user=obj.user,
+                is_completed=True,
+            ).aggregate(
+                total=Coalesce(
+                    Sum("points_earned"),
+                    0,
+                    output_field=IntegerField(),
+                )
+            )["total"]
+            or 0
+        )
+        current_level = max(1, (total_points // 100) + 1)
+        goals_completed = Goal.objects.filter(user=obj.user, status="completed").count()
+
+        streak, _ = DisciplineStreak.objects.get_or_create(user=obj.user)
+        streak.reconcile_with_daily_history(as_of_date=timezone.localdate())
+        current_streak_days = int(getattr(streak, "current_streak_days", 0) or 0)
+
+        stats = {
+            "total_points": total_points,
+            "current_level": current_level,
+            "goals_completed": goals_completed,
+            "current_streak_days": current_streak_days,
+        }
+        cache[cache_key] = stats
+        self._dynamic_stats_cache = cache
+        return stats
+
+    def get_total_points(self, obj):
+        return self._get_dynamic_stats(obj)["total_points"]
+
+    def get_current_level(self, obj):
+        return self._get_dynamic_stats(obj)["current_level"]
+
+    def get_goals_completed(self, obj):
+        return self._get_dynamic_stats(obj)["goals_completed"]
+
+    def get_current_streak_days(self, obj):
+        return self._get_dynamic_stats(obj)["current_streak_days"]
 
     class Meta:
         model = Profile
@@ -217,6 +274,8 @@ class ProfileSerializer(serializers.ModelSerializer):
             "subscription_tier",
             "total_points",
             "current_level",
+            "goals_completed",
+            "current_streak_days",
             "preferred_language",
             "theme",
         ]

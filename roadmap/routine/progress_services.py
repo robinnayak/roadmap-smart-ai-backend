@@ -262,10 +262,12 @@ def build_week_overview_payload(user, today=None):
 
 
 def build_streak_payload(user, interval_days: int = 1, as_of_date=None):
+    as_of_date = as_of_date or timezone.localdate()
     streak, _ = DisciplineStreak.objects.get_or_create(user=user)
+    streak.reconcile_with_daily_history(as_of_date=as_of_date)
     interval_streak = streak.calculate_custom_interval_streak(
         interval_days=interval_days,
-        as_of_date=as_of_date or timezone.localdate(),
+        as_of_date=as_of_date,
     )
     return {
         "streak": DisciplineStreakSerializer(streak).data,
@@ -385,6 +387,7 @@ def build_progress_overview_payload(
     )
 
     streak, _ = DisciplineStreak.objects.get_or_create(user=user)
+    streak.reconcile_with_daily_history(as_of_date=target_date)
     interval_streak = streak.calculate_custom_interval_streak(
         interval_days=streak_interval_days,
         as_of_date=target_date,

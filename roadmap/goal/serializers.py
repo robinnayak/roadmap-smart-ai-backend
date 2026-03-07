@@ -120,7 +120,7 @@ class TaskSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "completed_at", "created_at", "updated_at", "status"]
+        read_only_fields = ["id", "completed_at", "created_at", "updated_at"]
 
     def validate_scheduled_date(self, value):
         """Warn (but don't block) if scheduling a task in the past."""
@@ -132,7 +132,28 @@ class TaskSerializer(serializers.ModelSerializer):
         """
         Keep hierarchy progress in sync when task status changes via API edits.
         """
+        requested_status = validated_data.pop("status", None)
         updated = super().update(instance, validated_data)
+
+        if requested_status == "completed":
+            if updated.status != "completed":
+                updated.mark_completed(
+                    notes=updated.completion_notes or "",
+                    difficulty=updated.difficulty_rating,
+                    actual_minutes=updated.actual_duration_minutes,
+                )
+            else:
+                updated.subgoal.update_progress()
+            return updated
+
+        if requested_status in {"pending", "in_progress", "skipped"}:
+            updated.status = requested_status
+            fields_to_update = ["status", "updated_at"]
+            if updated.completed_at is not None:
+                updated.completed_at = None
+                fields_to_update.append("completed_at")
+            updated.save(update_fields=fields_to_update)
+
         updated.subgoal.update_progress()
         return updated
 

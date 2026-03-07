@@ -154,6 +154,12 @@ class ChurnReengagementService:
             )
             return {"risk_tier": churn_state.risk_tier, "action": action.action_type, "status": action.status}
 
+        message_payload = self._build_message_payload(
+            user=user,
+            churn_state=churn_state,
+            action_type=action_type,
+            channel=channel,
+        )
         action = AIReengagementAction.objects.create(
             user=user,
             churn_state=churn_state,
@@ -163,9 +169,51 @@ class ChurnReengagementService:
             reason_code="delivered",
             risk_score=churn_state.risk_score,
             risk_tier=churn_state.risk_tier,
-            metadata={"cooldown_hours": self.COOLDOWN_HOURS},
+            metadata={
+                "cooldown_hours": self.COOLDOWN_HOURS,
+                "message_payload": message_payload,
+            },
         )
         return {"risk_tier": churn_state.risk_tier, "action": action.action_type, "status": action.status}
+
+    @staticmethod
+    def _build_message_payload(*, user, churn_state: AIUserChurnState, action_type: str, channel: str) -> dict:
+        first_name = (
+            (getattr(user, "first_name", "") or "").strip()
+            or (getattr(user, "email", "") or "there").split("@")[0]
+            or "there"
+        )
+        risk_label = churn_state.risk_tier.replace("_", " ").title()
+        inactivity_days = max(churn_state.inactivity_days, 0)
+
+        if action_type == AIReengagementAction.ACTION_TYPE_ESCALATION:
+            headline = f"{first_name}, let's get your momentum back today."
+            body = (
+                f"Your planner has been inactive for {inactivity_days} days. "
+                "Start with one focused task to restart progress."
+            )
+            cta_label = "Restart With One Task"
+        else:
+            headline = f"Quick check-in, {first_name}."
+            body = (
+                f"You've been away for {inactivity_days} days. "
+                "A small action now keeps your roadmap moving."
+            )
+            cta_label = "Open Today's Plan"
+
+        return {
+            "channel": channel,
+            "action_type": action_type,
+            "risk_tier": churn_state.risk_tier,
+            "risk_score": round(churn_state.risk_score, 1),
+            "headline": headline,
+            "body": body,
+            "cta": {
+                "label": cta_label,
+                "target": "/routine",
+            },
+            "tags": [risk_label.lower(), action_type],
+        }
 
     def _resolve_channel(self, *, user) -> tuple[str | None, str | None]:
         NotificationSettings = apps.get_model("authentication", "NotificationSettings")
