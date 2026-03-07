@@ -90,10 +90,12 @@ class JourneyBookAPITestCase(TestCase):
         *,
         user=None,
         goal=None,
+        goals=None,
         status_value: str = JourneyBook.STATUS_READY,
         with_pdf: bool = False,
         created_at=None,
         error_message: str = "",
+        selection_mode: str | None = None,
     ) -> JourneyBook:
         user = user or self.user
         goal = goal or self._create_goal(user=user, status="completed")
@@ -106,7 +108,11 @@ class JourneyBookAPITestCase(TestCase):
             data_end_date=date.today(),
             days_of_data=11,
             error_message=error_message,
+            metadata={"selection_mode": selection_mode} if selection_mode else {},
         )
+        selected_goals = goals or ([goal] if goal else [])
+        if selected_goals:
+            book.goals.set(selected_goals)
         if with_pdf:
             book.pdf_file.save(
                 f"book_{book.id}.pdf",
@@ -172,6 +178,30 @@ class JourneyBookAPITestCase(TestCase):
         self.assertTrue(payload["goal_completed_or_due"])
         self.assertEqual(payload["complete_unlock_reason"], "completed_goal")
 
+    def test_eligibility_multi_goal_unlocks_when_any_goal_completed(self):
+        completed_goal = self._create_goal(status="completed", start_days_ago=3, title="Done goal")
+        active_goal = self._create_goal(status="in_progress", start_days_ago=3, title="Active goal")
+        url = reverse("journeybook:journeybook-eligibility")
+        response = self.client.get(
+            url,
+            [("goal_ids", str(active_goal.id)), ("goal_ids", str(completed_goal.id))],
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertTrue(payload["can_generate_complete"])
+        self.assertEqual(payload["selection_mode"], "multiple")
+        self.assertEqual(payload["goal_ids"], [str(active_goal.id), str(completed_goal.id)])
+
+    def test_eligibility_all_goals_uses_all_user_goals(self):
+        first_goal = self._create_goal(status="in_progress", start_days_ago=10)
+        second_goal = self._create_goal(status="completed", start_days_ago=2)
+        url = reverse("journeybook:journeybook-eligibility")
+        response = self.client.get(url, {"include_all_goals": "true"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["selection_mode"], "all")
+        self.assertCountEqual(payload["goal_ids"], [str(first_goal.id), str(second_goal.id)])
+
     def test_eligibility_goal_due_unlocks_complete(self):
         goal = self._create_goal(status="in_progress", start_days_ago=1, target_days_from_now=-1)
         url = reverse("journeybook:journeybook-eligibility")
@@ -200,6 +230,69 @@ class JourneyBookAPITestCase(TestCase):
         book = JourneyBook.objects.filter(user=self.user).first()
         self.assertIsNotNone(book)
         self.assertIn(book.status, [JourneyBook.STATUS_QUEUED, JourneyBook.STATUS_GENERATING])
+
+    @patch("journeybook.views.JourneyBookViewSet._generate_sync")
+    def test_generate_multiple_goals_creates_selection(self, mock_generate_sync):
+        first_goal = self._create_goal(status="in_progress", start_days_ago=15, title="Goal A")
+        second_goal = self._create_goal(status="completed", start_days_ago=3, title="Goal B")
+        mock_generate_sync.return_value = None
+
+        url = reverse("journeybook:journeybook-list")
+        payload = {
+            "goal_ids": [str(first_goal.id), str(second_goal.id)],
+            "book_type": "complete",
+            "privacy_settings": {"exclude_journal_ids": []},
+        }
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        book = JourneyBook.objects.get(user=self.user)
+        self.assertEqual(book.goal_id, first_goal.id)
+        self.assertEqual(book.metadata["selection_mode"], "multiple")
+        self.assertCountEqual(book.goals.values_list("id", flat=True), [first_goal.id, second_goal.id])
+
+    @patch("journeybook.views.JourneyBookViewSet._generate_sync")
+    def test_generate_all_goals_creates_all_selection(self, mock_generate_sync):
+        first_goal = self._create_goal(status="in_progress", start_days_ago=15, title="Goal A")
+        second_goal = self._create_goal(status="completed", start_days_ago=3, title="Goal B")
+        mock_generate_sync.return_value = None
+
+        url = reverse("journeybook:journeybook-list")
+        payload = {
+            "include_all_goals": True,
+            "book_type": "complete",
+            "privacy_settings": {"exclude_journal_ids": []},
+        }
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        book = JourneyBook.objects.get(user=self.user)
+        self.assertEqual(book.metadata["selection_mode"], "all")
+        self.assertCountEqual(book.goals.values_list("id", flat=True), [first_goal.id, second_goal.id])
+
+    def test_generate_rejects_conflicting_goal_selection_inputs(self):
+        goal = self._create_goal(status="completed", start_days_ago=0)
+        url = reverse("journeybook:journeybook-list")
+        payload = {
+            "goal_id": str(goal.id),
+            "goal_ids": [str(goal.id)],
+            "book_type": "complete",
+        }
+        response = self.client.post(url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("goal_ids", response.json())
+
+    def test_generate_rejects_goal_not_owned_for_goal_ids(self):
+        own_goal = self._create_goal(status="completed", start_days_ago=10)
+        foreign_goal = self._create_goal(user=self.other_user, status="completed", start_days_ago=10)
+        url = reverse("journeybook:journeybook-list")
+        payload = {
+            "goal_ids": [str(own_goal.id), str(foreign_goal.id)],
+            "book_type": "complete",
+        }
+        response = self.client.post(url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("goal_ids", response.json())
 
     @patch("journeybook.views.JourneyBookViewSet._generate_sync", side_effect=ValueError("generation failure"))
     def test_generate_handles_sync_value_error_without_crashing(self, _mock_generate_sync):
@@ -336,7 +429,7 @@ class JourneyBookAPITestCase(TestCase):
             build_demo_pdf_bytes(book_type="complete", trim_size="6x9")
 
     def test_generate_rate_limit(self):
-        goal = self._create_goal(status="completed")
+        goal = self._create_goal(status="completed", title="Launch a Startup While Mastering Core Business Skills")
         self._create_book(
             goal=goal,
             status_value=JourneyBook.STATUS_QUEUED,
@@ -348,7 +441,50 @@ class JourneyBookAPITestCase(TestCase):
         response = self.client.post(url, payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
-        self.assertEqual(response.json().get("error"), "Rate limit")
+        self.assertEqual(
+            response.json().get("error"),
+            'A Journey Book for "Launch a Startup While Mastering Core Business Skills" is already being generated.',
+        )
+
+    @patch("journeybook.views.JourneyBookViewSet._generate_sync")
+    def test_generate_different_selection_not_rate_limited_by_recent_ready_book(self, mock_generate_sync):
+        first_goal = self._create_goal(status="completed", title="Goal A")
+        second_goal = self._create_goal(status="completed", title="Goal B")
+        self._create_book(
+            goal=first_goal,
+            goals=[first_goal],
+            status_value=JourneyBook.STATUS_READY,
+            selection_mode="single",
+            created_at=timezone.now() - timedelta(hours=1),
+        )
+        mock_generate_sync.return_value = None
+
+        url = reverse("journeybook:journeybook-list")
+        payload = {"goal_id": str(second_goal.id), "book_type": "complete"}
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_generate_same_all_goals_selection_is_rate_limited(self):
+        first_goal = self._create_goal(status="completed", title="Goal A")
+        second_goal = self._create_goal(status="completed", title="Goal B")
+        self._create_book(
+            goal=first_goal,
+            goals=[first_goal, second_goal],
+            status_value=JourneyBook.STATUS_READY,
+            selection_mode="all",
+            created_at=timezone.now() - timedelta(hours=1),
+        )
+
+        url = reverse("journeybook:journeybook-list")
+        payload = {"include_all_goals": True, "book_type": "complete"}
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(
+            response.json().get("error"),
+            "You cannot generate an all-goals Journey Book more than once on the same day.",
+        )
         self.assertIn("next_allowed_at", response.json())
 
     def test_download_requires_ownership(self):
@@ -470,6 +606,24 @@ class JourneyBookAPITestCase(TestCase):
         self.assertTrue(record["can_retry"])
         self.assertIn("retry_context", record)
         self.assertIn("error_display", record)
+
+    def test_serializer_exposes_multi_goal_selection_metadata(self):
+        first_goal = self._create_goal(status="completed", title="Goal 1")
+        second_goal = self._create_goal(status="in_progress", title="Goal 2")
+        self._create_book(
+            goal=first_goal,
+            goals=[first_goal, second_goal],
+            selection_mode="multiple",
+        )
+
+        url = reverse("journeybook:journeybook-list")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        record = payload["results"][0] if isinstance(payload, dict) else payload[0]
+        self.assertEqual(record["selection_mode"], "multiple")
+        self.assertEqual(record["goal_titles"], ["Goal 1", "Goal 2"])
+        self.assertEqual(record["retry_context"]["goal_ids"], [str(first_goal.id), str(second_goal.id)])
 
     def test_download_returns_pdf(self):
         goal = self._create_goal(status="completed")

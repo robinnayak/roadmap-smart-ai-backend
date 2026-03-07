@@ -37,6 +37,11 @@ class JourneyBook(models.Model):
         blank=True,
         related_name="journey_books",
     )
+    goals = models.ManyToManyField(
+        "goal.Goal",
+        blank=True,
+        related_name="journey_book_selections",
+    )
     book_type = models.CharField(max_length=20, choices=BOOK_TYPE_CHOICES)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_QUEUED)
 
@@ -72,7 +77,9 @@ class JourneyBook(models.Model):
 
     def mark_ready(self, metadata: dict):
         self.status = self.STATUS_READY
-        self.metadata = metadata or {}
+        merged_metadata = dict(self.metadata or {})
+        merged_metadata.update(metadata or {})
+        self.metadata = merged_metadata
         self.generation_completed_at = timezone.now()
         self.save(
             update_fields=["status", "metadata", "generation_completed_at", "updated_at"]

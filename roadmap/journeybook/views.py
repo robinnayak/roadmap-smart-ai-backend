@@ -75,15 +75,18 @@ class JourneyBookViewSet(ModelViewSet):
             )
             return Response(payload, status=status.HTTP_200_OK)
 
-        goal_id = validated.get("goal_id")
+        selected_goals = validated.get("selected_goals") or []
+        representative_goal = validated.get("representative_goal")
+        selection_mode = validated.get("selection_mode", "overall")
         privacy_settings = validated.get("privacy_settings") or {}
         collector = DataCollector(
             user=request.user,
-            goal_id=goal_id,
+            selected_goals=selected_goals,
+            selection_mode=selection_mode,
             privacy_settings=privacy_settings,
         )
         collected_data = collector.collect_all_data()
-        eligibility = validated.get("eligibility") or collector.check_eligibility(goal_id=goal_id)
+        eligibility = validated.get("eligibility") or collector.check_eligibility()
 
         metrics_calculator = MetricsCalculator(collected_data)
         metrics = metrics_calculator.calculate_all()
@@ -101,14 +104,21 @@ class JourneyBookViewSet(ModelViewSet):
 
         book = JourneyBook.objects.create(
             user=request.user,
-            goal_id=goal_id,
+            goal=representative_goal,
             book_type=validated["book_type"],
             status=JourneyBook.STATUS_QUEUED,
             data_start_date=start_date,
             data_end_date=end_date,
             days_of_data=int(eligibility.get("days_of_data") or 0),
             privacy_settings=privacy_settings,
+            metadata={
+                "selection_mode": selection_mode,
+                "goal_ids": [str(goal.id) for goal in selected_goals],
+                "goal_titles": [goal.title for goal in selected_goals],
+            },
         )
+        if selected_goals:
+            book.goals.set(selected_goals)
 
         try:
             self._generate_sync(book=book, data=collected_data, metrics=metrics)
@@ -142,9 +152,18 @@ class JourneyBookViewSet(ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def eligibility(self, request):
-        goal_id = request.query_params.get("goal_id")
-        collector = DataCollector(request.user, goal_id=goal_id)
-        eligibility = collector.check_eligibility(goal_id=goal_id)
+        normalized = JourneyBookGenerateSerializer.normalize_goal_selection(
+            user=request.user,
+            goal_id=request.query_params.get("goal_id"),
+            goal_ids=request.query_params.getlist("goal_ids"),
+            include_all_goals=str(request.query_params.get("include_all_goals", "")).lower() in {"1", "true", "yes"},
+        )
+        collector = DataCollector(
+            request.user,
+            selected_goals=normalized["selected_goals"],
+            selection_mode=normalized["selection_mode"],
+        )
+        eligibility = collector.check_eligibility()
         serializer = BookEligibilitySerializer(instance=eligibility)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -472,7 +491,10 @@ class JourneyBookViewSet(ModelViewSet):
         return None
 
     def _demo_seed_payload(self, book: JourneyBook) -> tuple[dict[str, Any], dict[str, Any]]:
-        goal_title = book.goal.title if book.goal_id and book.goal else "your journey"
+        goal_titles = list(book.goals.all().values_list("title", flat=True))
+        if book.goal_id and book.goal and not goal_titles:
+            goal_titles = [book.goal.title]
+        goal_title = goal_titles[0] if len(goal_titles) == 1 else ("All goals" if self._selection_mode(book) == "all" else "your journey")
         profile_name = getattr(book.user, "username", "") or getattr(book.user, "email", "") or "DayOneGoal Member"
         data = {
             "profile": {"name": profile_name, "email": getattr(book.user, "email", "")},
@@ -554,9 +576,13 @@ class JourneyBookViewSet(ModelViewSet):
             }
 
     def _collect_preview_metrics(self, book: JourneyBook) -> tuple[dict[str, Any], dict[str, Any]]:
+        selected_goals = list(book.goals.all())
+        if not selected_goals and book.goal_id and book.goal:
+            selected_goals = [book.goal]
         collector = DataCollector(
             user=book.user,
-            goal_id=book.goal_id,
+            selected_goals=selected_goals,
+            selection_mode=self._selection_mode(book),
             privacy_settings=book.privacy_settings or {},
         )
         collected_data = collector.collect_all_data()
@@ -636,18 +662,46 @@ class JourneyBookViewSet(ModelViewSet):
 
     @staticmethod
     def _preview_subtitle(book: JourneyBook) -> str:
-        goal_title = book.goal.title if book.goal_id and book.goal else "your journey"
+        goal_titles = list(book.goals.all().values_list("title", flat=True))
+        if book.goal_id and book.goal and not goal_titles:
+            goal_titles = [book.goal.title]
+        if len(goal_titles) == 1:
+            goal_title = goal_titles[0]
+        elif goal_titles:
+            goal_title = "all goals" if (book.metadata or {}).get("selection_mode") == "all" else f"{len(goal_titles)} goals"
+        else:
+            goal_title = "your journey"
         return (
             f"A sample view of how your narrative would look for {goal_title} "
             f"({book.data_start_date} to {book.data_end_date})."
         )
 
     @staticmethod
-    def _retry_context(book: JourneyBook) -> dict[str, str | None]:
+    def _retry_context(book: JourneyBook) -> dict[str, Any]:
+        goal_ids = list(book.goals.all().values_list("id", flat=True))
+        selection_mode = (book.metadata or {}).get("selection_mode") or (
+            "single" if len(goal_ids) == 1 else "multiple" if goal_ids else "overall"
+        )
         return {
             "goal_id": str(book.goal_id) if book.goal_id else None,
+            "goal_ids": [str(goal_id) for goal_id in goal_ids],
+            "include_all_goals": selection_mode == "all",
+            "selection_mode": selection_mode,
             "book_type": book.book_type,
         }
+
+    @staticmethod
+    def _selection_mode(book: JourneyBook) -> str:
+        metadata = book.metadata or {}
+        selection_mode = metadata.get("selection_mode")
+        if selection_mode in {"overall", "single", "multiple", "all"}:
+            return selection_mode
+        goal_count = book.goals.count()
+        if goal_count == 1:
+            return "single"
+        if goal_count > 1:
+            return "multiple"
+        return "overall"
 
     @staticmethod
     def _build_demo_json_payload(book_type: str, trim_size: str | None = None) -> dict[str, Any]:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -9,37 +9,65 @@ class DataCollector:
     MIN_IN_PROGRESS_DAYS = 7
     MIN_COMPLETE_DAYS_WITHOUT_GOAL_COMPLETION = 180
 
-    def __init__(self, user, goal_id: str | UUID | None = None, privacy_settings: dict | None = None):
+    def __init__(
+        self,
+        user,
+        goal_id: str | UUID | None = None,
+        goal_ids: list[str | UUID] | None = None,
+        include_all_goals: bool = False,
+        selected_goals: list | None = None,
+        selection_mode: str | None = None,
+        privacy_settings: dict | None = None,
+    ):
         self.user = user
-        self.goal_id = goal_id
         self.privacy_settings = privacy_settings or {}
+        self._selected_goals = list(selected_goals or [])
+        self.include_all_goals = include_all_goals
+        self.selection_mode = selection_mode
+
+        if not self._selected_goals:
+            resolved = self._resolve_selected_goals(
+                goal_id=goal_id,
+                goal_ids=goal_ids,
+                include_all_goals=include_all_goals,
+            )
+            self._selected_goals = resolved["selected_goals"]
+            self.selection_mode = self.selection_mode or resolved["selection_mode"]
+
+        self.selection_mode = self.selection_mode or self._infer_selection_mode(self._selected_goals)
 
     def collect_all_data(self) -> dict[str, Any]:
-        goal = self._get_goal(self.goal_id)
+        goals = self._get_goals()
         journals = self._get_journals()
         streaks = self._get_streaks(journals=journals)
 
         return {
             "user": self.user,
             "profile": self._get_profile(),
-            "goal": goal,
+            "goal": self._build_goal_summary(goals),
+            "goals": goals,
             "journals": journals,
             "streaks": streaks,
             "word_frequencies": self._get_word_frequencies(),
             "derived_milestones": self._get_existing_derived_milestones(),
+            "selection_mode": self.selection_mode,
         }
 
     def check_eligibility(self, goal_id: str | UUID | None = None) -> dict[str, Any]:
-        goal = self._get_goal(goal_id)
+        goals = self._get_goals()
         journals = self._get_journals()
-        journal_days, goal_age_days = self._calculate_data_day_breakdown(goal=goal, journals=journals)
-        days_of_data = max(journal_days, goal_age_days)
+        journal_days, goal_age_days = self._calculate_data_day_breakdown(goals=goals, journals=journals)
+        days_of_data = len(self._combined_date_coverage(goals=goals, journals=journals))
 
-        goal_deadline = goal.get("deadline")
-        goal_status = (goal.get("status") or "").lower()
-        goal_is_completed = goal_status == "completed"
-        goal_is_due = goal_deadline is not None and goal_deadline <= date.today()
-        is_completed_or_due = goal_is_completed or goal_is_due
+        qualifying_goal = self._find_complete_unlock_goal(goals)
+        goal_is_completed = bool(qualifying_goal and (qualifying_goal.get("status") or "").lower() == "completed")
+        goal_is_due = bool(
+            qualifying_goal
+            and qualifying_goal.get("deadline") is not None
+            and qualifying_goal["deadline"] <= date.today()
+            and (qualifying_goal.get("status") or "").lower() != "completed"
+        )
+        is_completed_or_due = qualifying_goal is not None
 
         can_generate_complete = False
         can_generate_in_progress = False
@@ -64,6 +92,7 @@ class DataCollector:
         else:
             reason_blocked = "Come back after at least 7 days of journey data."
 
+        goal_summary = self._build_goal_summary(goals)
         return {
             "can_generate_complete": can_generate_complete,
             "can_generate_in_progress": can_generate_in_progress,
@@ -80,9 +109,61 @@ class DataCollector:
                 "uses_goal_timeline": True,
             },
             "reason_blocked": reason_blocked,
-            "goal_id": str(goal.get("id")) if goal.get("id") else (str(goal_id) if goal_id else None),
-            "goal_title": goal.get("title"),
+            "goal_id": str(goal_summary.get("id")) if goal_summary.get("id") else (str(goal_id) if goal_id else None),
+            "goal_title": goal_summary.get("title"),
+            "goal_ids": [str(goal["id"]) for goal in goals if goal.get("id")],
+            "goal_titles": [goal["title"] for goal in goals if goal.get("title")],
+            "selection_mode": self.selection_mode,
         }
+
+    def _resolve_selected_goals(
+        self,
+        *,
+        goal_id: str | UUID | None = None,
+        goal_ids: list[str | UUID] | None = None,
+        include_all_goals: bool = False,
+    ) -> dict[str, Any]:
+        if include_all_goals:
+            selected = self._load_all_goals()
+            return {"selected_goals": selected, "selection_mode": "all"}
+
+        if goal_id:
+            selected = self._load_goals([goal_id])
+            return {"selected_goals": selected, "selection_mode": "single" if selected else "overall"}
+
+        if goal_ids:
+            selected = self._load_goals(goal_ids)
+            return {
+                "selected_goals": selected,
+                "selection_mode": "single" if len(selected) == 1 else "multiple",
+            }
+
+        return {"selected_goals": [], "selection_mode": "overall"}
+
+    def _load_all_goals(self):
+        try:
+            from goal.models import Goal
+
+            return list(Goal.objects.filter(user=self.user).order_by("created_at", "id"))
+        except Exception:
+            return []
+
+    def _load_goals(self, goal_ids: list[str | UUID]):
+        try:
+            from goal.models import Goal
+
+            ordered_ids: list[str] = []
+            for goal_id in goal_ids:
+                rendered = str(goal_id)
+                if rendered not in ordered_ids:
+                    ordered_ids.append(rendered)
+            goal_map = {
+                str(goal.id): goal
+                for goal in Goal.objects.filter(user=self.user, id__in=ordered_ids).order_by("created_at", "id")
+            }
+            return [goal_map[goal_id] for goal_id in ordered_ids if goal_id in goal_map]
+        except Exception:
+            return []
 
     def _get_profile(self) -> dict[str, Any]:
         try:
@@ -106,28 +187,63 @@ class DataCollector:
                 "current_situation": "",
             }
 
-    def _get_goal(self, goal_id: str | UUID | None) -> dict[str, Any]:
-        if not goal_id:
-            return {}
-        try:
-            from goal.models import Goal
+    def _get_goals(self) -> list[dict[str, Any]]:
+        goals = []
+        for goal in self._selected_goals:
+            try:
+                deadline = goal.target_date
+                created_date = goal.created_at.date() if goal.created_at else None
+                goals.append(
+                    {
+                        "id": goal.id,
+                        "title": goal.title,
+                        "category": getattr(goal, "primary_category", "personal"),
+                        "status": goal.status,
+                        "deadline": deadline,
+                        "start_date": getattr(goal, "start_date", None),
+                        "created_at": created_date,
+                    }
+                )
+            except Exception:
+                continue
+        return goals
 
-            goal = Goal.objects.filter(id=goal_id, user=self.user).first()
-            if not goal:
-                return {}
-            deadline = goal.target_date
-            created_date = goal.created_at.date() if goal.created_at else None
-            return {
-                "id": goal.id,
-                "title": goal.title,
-                "category": getattr(goal, "primary_category", "personal"),
-                "status": goal.status,
-                "deadline": deadline,
-                "start_date": getattr(goal, "start_date", None),
-                "created_at": created_date,
-            }
-        except (ImportError, Exception):
+    def _build_goal_summary(self, goals: list[dict[str, Any]]) -> dict[str, Any]:
+        if not goals:
             return {}
+        if len(goals) == 1:
+            return goals[0]
+
+        start_candidates = [goal.get("start_date") or goal.get("created_at") for goal in goals]
+        deadline_candidates = [goal.get("deadline") for goal in goals if goal.get("deadline")]
+        earliest_start = min((value for value in start_candidates if value), default=None)
+        latest_deadline = max(deadline_candidates, default=None)
+        return {
+            "id": goals[0].get("id"),
+            "title": self._goal_collection_title(goals),
+            "category": "personal",
+            "status": "in_progress",
+            "deadline": latest_deadline,
+            "start_date": earliest_start,
+            "created_at": earliest_start,
+        }
+
+    def _goal_collection_title(self, goals: list[dict[str, Any]]) -> str:
+        if self.selection_mode == "all":
+            return "All goals"
+        return f"{len(goals)} goals"
+
+    def _find_complete_unlock_goal(self, goals: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if self.selection_mode == "overall":
+            return None
+        for goal in goals:
+            goal_deadline = goal.get("deadline")
+            goal_status = (goal.get("status") or "").lower()
+            goal_is_completed = goal_status == "completed"
+            goal_is_due = goal_deadline is not None and goal_deadline <= date.today()
+            if goal_is_completed or goal_is_due:
+                return goal
+        return None
 
     def _get_journals(self) -> list[dict[str, Any]]:
         try:
@@ -151,7 +267,7 @@ class DataCollector:
                     "total_word_count",
                 )
             )
-        except (ImportError, Exception):
+        except Exception:
             return []
 
     def _get_streaks(self, journals: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -166,7 +282,7 @@ class DataCollector:
                 "longest_streak": int(streaks.get("longest_streak", 0)),
                 "last_entry_date": dates[-1] if dates else None,
             }
-        except (ImportError, Exception):
+        except Exception:
             try:
                 dates = sorted([entry["entry_date"] for entry in journals if entry.get("entry_date")])
                 return {
@@ -183,7 +299,7 @@ class DataCollector:
 
             agg = WordCloudAggregate.objects.filter(user=self.user).first()
             return dict(agg.frequencies or {}) if agg else {}
-        except (ImportError, Exception):
+        except Exception:
             return {}
 
     def _get_existing_derived_milestones(self) -> list[dict[str, Any]]:
@@ -199,21 +315,48 @@ class DataCollector:
         except Exception:
             return []
 
-    @staticmethod
-    def _calculate_days_of_data(goal: dict[str, Any], journals: list[dict[str, Any]]) -> int:
-        journal_days, goal_age_days = DataCollector._calculate_data_day_breakdown(goal=goal, journals=journals)
-        return max(journal_days, goal_age_days)
+    @classmethod
+    def _calculate_days_of_data(cls, goals: list[dict[str, Any]], journals: list[dict[str, Any]]) -> int:
+        return len(cls._combined_date_coverage(goals=goals, journals=journals))
 
-    @staticmethod
-    def _calculate_data_day_breakdown(goal: dict[str, Any], journals: list[dict[str, Any]]) -> tuple[int, int]:
+    @classmethod
+    def _calculate_data_day_breakdown(
+        cls, goals: list[dict[str, Any]], journals: list[dict[str, Any]]
+    ) -> tuple[int, int]:
         journal_days = len({entry["entry_date"] for entry in journals if entry.get("entry_date")})
-
-        goal_age_days = 0
-        try:
-            start = goal.get("start_date") or goal.get("created_at")
-            if start:
-                goal_age_days = max((date.today() - start).days + 1, 0)
-        except Exception:
-            goal_age_days = 0
-
+        goal_age_days = len(cls._goal_date_coverage(goals))
         return journal_days, goal_age_days
+
+    @staticmethod
+    def _combined_date_coverage(goals: list[dict[str, Any]], journals: list[dict[str, Any]]) -> set[date]:
+        return DataCollector._goal_date_coverage(goals).union(
+            {entry["entry_date"] for entry in journals if entry.get("entry_date")}
+        )
+
+    @staticmethod
+    def _goal_date_coverage(goals: list[dict[str, Any]]) -> set[date]:
+        covered: set[date] = set()
+        today = date.today()
+        for goal in goals:
+            try:
+                start = goal.get("start_date") or goal.get("created_at")
+                if not start:
+                    continue
+                end = goal.get("deadline") or today
+                if end < start:
+                    end = today
+                current = start
+                while current <= min(end, today):
+                    covered.add(current)
+                    current += timedelta(days=1)
+            except Exception:
+                continue
+        return covered
+
+    @staticmethod
+    def _infer_selection_mode(selected_goals: list[Any]) -> str:
+        if not selected_goals:
+            return "overall"
+        if len(selected_goals) == 1:
+            return "single"
+        return "multiple"
