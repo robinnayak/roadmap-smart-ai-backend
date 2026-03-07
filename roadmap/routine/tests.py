@@ -1,10 +1,12 @@
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from authentication.models import CustomUser
 from events.models import Event
@@ -18,8 +20,15 @@ from routine.models import (
     HealthProfile,
     GoalProgressEntry,
     DailyBrief,
+    RoutineDayModeCheckIn,
+    WakeBaselineState,
+    WakeInteraction,
 )
-from routine.services import get_or_create_today_task_list
+from routine.services import (
+    build_adaptive_roadmap_adjustment,
+    get_or_create_today_task_list,
+)
+from routine.wake_service import sync_wake_baseline_for_user
 from routine.habit_recommendation_service import (
     _build_habit_prompt,
     generate_habit_recommendations_for_user,
@@ -215,6 +224,15 @@ class RoutineWriteValidationTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"], "Invalid date format. Use YYYY-MM-DD.")
 
+    def test_generate_endpoint_rejects_invalid_day_mode(self):
+        response = self.client.post(
+            "/routines/generate/",
+            data={"day_mode": "unplanned"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "\"unplanned\" is not a valid choice.")
+
     def test_complete_endpoint_rejects_invalid_actual_minutes(self):
         response = self.client.post(
             f"/routines/tasks/{self.daily_item.id}/complete/",
@@ -355,6 +373,105 @@ class DailyTaskGenerationTests(APITestCase):
         self.assertEqual(by_task_id[str(task_preferred_evening.id)].time_slot, "evening")
         self.assertEqual(by_task_id[str(task_inferred_evening.id)].time_slot, "evening")
         self.assertEqual(by_task_id[str(task_fallback_afternoon.id)].time_slot, "afternoon")
+
+    def test_generation_always_places_journal_task_last(self):
+        target_date = timezone.localdate()
+        goal, subgoal = self._create_goal_with_subgoal("Journal Rule Goal", priority="medium")
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Core task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=45,
+            display_order=1,
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+        last_item = task_list.tasks.order_by("display_order").last()
+        self.assertIsNotNone(last_item)
+        self.assertEqual(last_item.item_type, "journal")
+        self.assertEqual(last_item.title, "Evening journal entry")
+
+    def test_flex_day_profile_caps_actionable_non_event_work_to_two_items(self):
+        target_date = timezone.localdate()
+        goal, subgoal = self._create_goal_with_subgoal("Flex Load Goal", priority="high")
+        for idx in range(1, 6):
+            Task.objects.create(
+                subgoal=subgoal,
+                title=f"Flex task {idx}",
+                status="pending",
+                priority="high" if idx < 3 else "medium",
+                estimated_duration_minutes=40,
+                display_order=idx,
+            )
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Flex habit",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=20,
+            priority="high",
+        )
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Extra habit",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=20,
+            priority="medium",
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date, day_mode="flex")
+        self.assertTrue(created)
+
+        actionable_count = task_list.tasks.filter(item_type__in=["habit", "goal_task"]).count()
+        self.assertLessEqual(actionable_count, 2)
+        self.assertEqual(task_list.schedule_constraints["day_mode"]["value"], "flex")
+        self.assertEqual(task_list.schedule_constraints["fit_summary"]["fallback_strategy"], "flex_profile")
+
+    def test_day_mode_carry_forward_across_dates_and_override(self):
+        day_one = timezone.localdate()
+        day_two = day_one + timedelta(days=1)
+        day_three = day_one + timedelta(days=2)
+        day_four = day_one + timedelta(days=3)
+        goal, subgoal = self._create_goal_with_subgoal("Carry Forward Goal", priority="medium")
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Carry task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=30,
+            display_order=1,
+        )
+
+        list_day_one, _ = get_or_create_today_task_list(self.user, day_one, day_mode="flex")
+        self.assertEqual(list_day_one.schedule_constraints["day_mode"]["value"], "flex")
+        self.assertEqual(
+            RoutineDayModeCheckIn.objects.get(user=self.user, date=day_one).source,
+            "explicit",
+        )
+
+        list_day_two, _ = get_or_create_today_task_list(self.user, day_two)
+        self.assertEqual(list_day_two.schedule_constraints["day_mode"]["value"], "flex")
+        self.assertEqual(
+            RoutineDayModeCheckIn.objects.get(user=self.user, date=day_two).source,
+            "carry_forward",
+        )
+
+        list_day_three, _ = get_or_create_today_task_list(self.user, day_three, day_mode="focused")
+        self.assertEqual(list_day_three.schedule_constraints["day_mode"]["value"], "focused")
+        self.assertEqual(
+            RoutineDayModeCheckIn.objects.get(user=self.user, date=day_three).source,
+            "explicit",
+        )
+
+        list_day_four, _ = get_or_create_today_task_list(self.user, day_four)
+        self.assertEqual(list_day_four.schedule_constraints["day_mode"]["value"], "focused")
+        self.assertEqual(
+            RoutineDayModeCheckIn.objects.get(user=self.user, date=day_four).source,
+            "carry_forward",
+        )
 
     def test_daily_generation_balances_tasks_across_multiple_active_goals(self):
         target_date = timezone.localdate()
@@ -753,6 +870,175 @@ class DailyTaskGenerationTests(APITestCase):
         adaptive_state.refresh_from_db()
         self.assertEqual(adaptive_state.current_scale_level, 0)
 
+    def test_generation_includes_adaptive_metadata_contract_in_schedule_constraints(self):
+        target_date = timezone.localdate()
+        if target_date.weekday() == 6:
+            target_date = target_date + timedelta(days=1)
+
+        _, subgoal = self._create_goal_with_subgoal(
+            "Adaptive Metadata Goal",
+            priority="medium",
+            status="in_progress",
+        )
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Metadata task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=40,
+            display_order=1,
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+
+        adaptive = task_list.schedule_constraints.get("adaptive_roadmap")
+        self.assertIsNotNone(adaptive)
+        self.assertEqual(adaptive["target_date"], target_date.isoformat())
+        self.assertIn("state", adaptive)
+        self.assertIn("triggers", adaptive)
+        self.assertIn("adjustments", adaptive)
+        self.assertIn("recommendations", adaptive)
+        self.assertEqual(adaptive["policy"]["scale_change_cooldown_days"], 2)
+        self.assertEqual(adaptive["policy"]["miss_recovery_threshold_days"], 5)
+
+    def test_adaptive_scale_cooldown_transition_boundaries(self):
+        target_date = timezone.localdate()
+        if target_date.weekday() == 6:
+            target_date = target_date + timedelta(days=1)
+
+        for offset in range(1, 4):
+            success_date = target_date - timedelta(days=offset)
+            DailyTaskList.objects.create(
+                user=self.user,
+                date=success_date,
+                total_tasks=2,
+                completed_tasks=2,
+                completion_percentage=100,
+                is_fully_completed=True,
+                status="completed",
+            )
+
+        state, _ = AdaptiveRoadmapState.objects.get_or_create(user=self.user)
+        state.current_scale_level = 0
+        state.last_scale_change_date = target_date - timedelta(days=1)
+        state.save(update_fields=["current_scale_level", "last_scale_change_date", "updated_at"])
+
+        blocked = build_adaptive_roadmap_adjustment(self.user, target_date)
+        self.assertEqual(blocked["state"]["current_scale_level"], 0)
+
+        state.refresh_from_db()
+        state.last_scale_change_date = target_date - timedelta(days=2)
+        state.save(update_fields=["last_scale_change_date", "updated_at"])
+
+        allowed = build_adaptive_roadmap_adjustment(self.user, target_date)
+        self.assertEqual(allowed["state"]["current_scale_level"], 1)
+
+    def test_adaptive_weekly_reset_anchor_resets_on_iso_week_change(self):
+        target_date = timezone.localdate()
+        previous_week_anchor = target_date - timedelta(days=7)
+
+        state, _ = AdaptiveRoadmapState.objects.get_or_create(user=self.user)
+        state.weekly_reset_anchor = previous_week_anchor
+        state.weekly_miss_days = 4
+        state.save(update_fields=["weekly_reset_anchor", "weekly_miss_days", "updated_at"])
+
+        adjustment = build_adaptive_roadmap_adjustment(self.user, target_date)
+        state.refresh_from_db()
+
+        self.assertEqual(state.weekly_reset_anchor, target_date)
+        self.assertEqual(state.weekly_miss_days, 0)
+        self.assertEqual(adjustment["state"]["weekly_miss_days"], 0)
+
+    def test_adaptive_scale_clamps_at_min_and_max_levels(self):
+        target_date = timezone.localdate()
+
+        upper_state, _ = AdaptiveRoadmapState.objects.get_or_create(user=self.user)
+        upper_state.current_scale_level = 3
+        upper_state.last_scale_change_date = target_date - timedelta(days=10)
+        upper_state.save(update_fields=["current_scale_level", "last_scale_change_date", "updated_at"])
+
+        for offset in range(1, 4):
+            success_date = target_date - timedelta(days=offset)
+            DailyTaskList.objects.update_or_create(
+                user=self.user,
+                date=success_date,
+                defaults={
+                    "total_tasks": 1,
+                    "completed_tasks": 1,
+                    "completion_percentage": 100,
+                    "is_fully_completed": True,
+                    "status": "completed",
+                },
+            )
+
+        upper_adjustment = build_adaptive_roadmap_adjustment(self.user, target_date)
+        self.assertEqual(upper_adjustment["state"]["current_scale_level"], 3)
+
+        lower_user = CustomUser.objects.create_user(
+            email="adaptive-lower-bound@test.com",
+            password="Password@123",
+        )
+        lower_state, _ = AdaptiveRoadmapState.objects.get_or_create(user=lower_user)
+        lower_state.current_scale_level = -3
+        lower_state.last_scale_change_date = target_date - timedelta(days=10)
+        lower_state.save(update_fields=["current_scale_level", "last_scale_change_date", "updated_at"])
+
+        for offset in range(1, 6):
+            missed_date = target_date - timedelta(days=offset)
+            DailyTaskList.objects.create(
+                user=lower_user,
+                date=missed_date,
+                total_tasks=2,
+                completed_tasks=0,
+                completion_percentage=0,
+                is_fully_completed=False,
+                status="pending",
+            )
+
+        lower_adjustment = build_adaptive_roadmap_adjustment(lower_user, target_date)
+        self.assertEqual(lower_adjustment["state"]["current_scale_level"], -3)
+        self.assertEqual(lower_adjustment["adjustments"]["minutes_multiplier"], 0.7)
+
+    def test_repeated_same_day_generation_is_deterministic_without_force_regenerate(self):
+        target_date = timezone.localdate()
+        if target_date.weekday() == 6:
+            target_date = target_date + timedelta(days=1)
+
+        _, subgoal = self._create_goal_with_subgoal(
+            "Determinism Goal",
+            priority="high",
+            status="in_progress",
+        )
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Deterministic task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=60,
+            display_order=1,
+        )
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Daily consistency",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=20,
+            priority="medium",
+        )
+
+        first_list, first_created = get_or_create_today_task_list(self.user, target_date)
+        second_list, second_created = get_or_create_today_task_list(self.user, target_date)
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first_list.id, second_list.id)
+        self.assertEqual(first_list.tasks.count(), second_list.tasks.count())
+        self.assertEqual(
+            first_list.schedule_constraints.get("adaptive_roadmap"),
+            second_list.schedule_constraints.get("adaptive_roadmap"),
+        )
+
 
 class RoutineProgressEndpointTests(APITestCase):
     def setUp(self):
@@ -1108,6 +1394,57 @@ class RoutineEventConstraintIntegrationTests(APITestCase):
         self.assertIsNotNone(goal_item)
         self.assertNotEqual(goal_item.time_slot, "afternoon")
         self.assertEqual(task_list.schedule_constraints["fit_summary"]["fallback_strategy"], "none")
+
+    def test_slot_capacity_reservation_distributes_items_across_free_windows(self):
+        target_date = date(2026, 3, 17)
+        self._create_goal_task(
+            title="Capacity Task One",
+            preferred_time_slot="morning",
+            estimated_minutes=200,
+        )
+        self._create_goal_task(
+            title="Capacity Task Two",
+            preferred_time_slot="morning",
+            estimated_minutes=200,
+        )
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Morning Stretch",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=180,
+            priority="medium",
+        )
+        Event.objects.create(
+            user=self.user,
+            title="Morning Blocker",
+            description="Blocks first half of morning slot",
+            event_type="one_time",
+            start_at=datetime.fromisoformat("2026-03-17T06:00:00+05:45"),
+            end_at=datetime.fromisoformat("2026-03-17T09:00:00+05:45"),
+            is_all_day=False,
+            timezone="Asia/Katmandu",
+            recurrence=None,
+            routine_constraint={
+                "constraint_mode": "hard",
+                "buffer_before_minutes": 0,
+                "buffer_after_minutes": 0,
+                "routine_policy": "shift",
+            },
+        )
+
+        task_list, _ = get_or_create_today_task_list(self.user, target_date)
+        self.assertEqual(task_list.schedule_constraints["fit_summary"]["fallback_strategy"], "none")
+
+        habit_item = task_list.tasks.filter(item_type="habit").first()
+        self.assertIsNotNone(habit_item)
+        self.assertEqual(habit_item.time_slot, "morning")
+
+        goal_slots = set(
+            task_list.tasks.filter(item_type="goal_task")
+            .values_list("time_slot", flat=True)
+        )
+        self.assertEqual(goal_slots, {"afternoon", "evening"})
 
     def test_multi_day_travel_forces_partial_strategy(self):
         target_date = date(2026, 4, 11)
@@ -1844,3 +2181,203 @@ class DailyBriefAPITests(APITestCase):
         track_response = self.client.post(self.track_status_url, data={"status": "on_track"}, format="json")
         self.assertEqual(today_response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(track_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class WakeUpDetectionTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="wake@test.com",
+            password="Password@123",
+        )
+        token = RefreshToken.for_user(self.user).access_token
+        self.access_token = str(token)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.access_token}")
+
+    @staticmethod
+    def _local_dt_to_utc(local_date: date, hour: int, minute: int, timezone_name: str) -> datetime:
+        local = datetime(
+            year=local_date.year,
+            month=local_date.month,
+            day=local_date.day,
+            hour=hour,
+            minute=minute,
+            tzinfo=ZoneInfo(timezone_name),
+        )
+        return local.astimezone(ZoneInfo("UTC"))
+
+    def _create_interaction(self, *, local_date: date, hour: int, minute: int, timezone_name: str = "UTC"):
+        WakeInteraction.objects.create(
+            user=self.user,
+            local_date=local_date,
+            first_interaction_at=self._local_dt_to_utc(local_date, hour, minute, timezone_name),
+            timezone_name=timezone_name,
+            source_path="/auth/user/",
+            source_method="GET",
+        )
+
+    def _create_goal_with_tasks_for_schedule_tests(self):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Wake Baseline Goal",
+            description="Wake baseline routine fit",
+            primary_category="career",
+            priority="high",
+            target_date=timezone.localdate() + timedelta(days=30),
+            status="in_progress",
+        )
+        milestone = Milestone.objects.create(
+            goal=goal,
+            title="Baseline Milestone",
+            display_order=1,
+            priority="high",
+            status="in_progress",
+        )
+        subgoal = SubGoal.objects.create(
+            milestone=milestone,
+            title="Baseline Subgoal",
+            display_order=1,
+            priority="high",
+            status="in_progress",
+        )
+        explicit = Task.objects.create(
+            subgoal=subgoal,
+            title="Explicit evening task",
+            status="pending",
+            priority="high",
+            preferred_time_slot="evening",
+            scheduled_time=datetime.strptime("21:15", "%H:%M").time(),
+            estimated_duration_minutes=45,
+            display_order=1,
+        )
+        inferred = Task.objects.create(
+            subgoal=subgoal,
+            title="Focus block",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=45,
+            display_order=2,
+        )
+        return explicit, inferred
+
+    @patch("routine.wake_service.timezone.now")
+    def test_first_interaction_logged_once_per_day(self, mock_now):
+        first_time = datetime(2026, 3, 6, 1, 0, tzinfo=ZoneInfo("UTC"))
+        later_time = datetime(2026, 3, 6, 2, 0, tzinfo=ZoneInfo("UTC"))
+        mock_now.return_value = first_time
+        response_a = self.client.get("/auth/user/")
+        self.assertEqual(response_a.status_code, status.HTTP_200_OK)
+
+        mock_now.return_value = later_time
+        response_b = self.client.get("/auth/user/")
+        self.assertEqual(response_b.status_code, status.HTTP_200_OK)
+
+        records = WakeInteraction.objects.filter(user=self.user)
+        self.assertEqual(records.count(), 1)
+        interaction = records.first()
+        self.assertEqual(interaction.first_interaction_at, first_time)
+
+    @patch("routine.wake_service.timezone.now")
+    def test_timezone_local_date_bucketing_handles_transition(self, mock_now):
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {self.access_token}",
+            HTTP_X_USER_TIMEZONE="America/New_York",
+        )
+        before_midnight_local = datetime(2026, 3, 8, 4, 30, tzinfo=ZoneInfo("UTC"))
+        after_midnight_local = datetime(2026, 3, 8, 5, 30, tzinfo=ZoneInfo("UTC"))
+
+        mock_now.return_value = before_midnight_local
+        response_a = self.client.get("/auth/user/")
+        self.assertEqual(response_a.status_code, status.HTTP_200_OK)
+
+        mock_now.return_value = after_midnight_local
+        response_b = self.client.get("/auth/user/")
+        self.assertEqual(response_b.status_code, status.HTTP_200_OK)
+
+        local_dates = list(
+            WakeInteraction.objects.filter(user=self.user).order_by("local_date").values_list("local_date", flat=True)
+        )
+        self.assertEqual(local_dates, [date(2026, 3, 7), date(2026, 3, 8)])
+
+    def test_sparse_data_does_not_mutate_existing_baseline(self):
+        today = date(2026, 3, 6)
+        WakeBaselineState.objects.create(
+            user=self.user,
+            baseline_minutes=390,
+            baseline_time=datetime.strptime("06:30", "%H:%M").time(),
+            baseline_timezone="UTC",
+        )
+        self._create_interaction(local_date=today - timedelta(days=2), hour=6, minute=15, timezone_name="UTC")
+        self._create_interaction(local_date=today - timedelta(days=1), hour=6, minute=20, timezone_name="UTC")
+        self._create_interaction(local_date=today, hour=6, minute=10, timezone_name="UTC")
+
+        payload = sync_wake_baseline_for_user(self.user)
+        state = WakeBaselineState.objects.get(user=self.user)
+
+        self.assertEqual(state.baseline_minutes, 390)
+        self.assertEqual(state.last_update_reason, "insufficient_samples")
+        self.assertTrue(payload["is_available"])
+
+    def test_outlier_is_excluded_from_baseline(self):
+        today = date(2026, 3, 6)
+        regular_times = [(6, 10), (6, 20), (6, 15), (6, 25), (6, 30), (6, 18)]
+        for index, (hour, minute) in enumerate(regular_times):
+            self._create_interaction(
+                local_date=today - timedelta(days=index),
+                hour=hour,
+                minute=minute,
+                timezone_name="UTC",
+            )
+        self._create_interaction(local_date=today - timedelta(days=6), hour=23, minute=0, timezone_name="UTC")
+
+        payload = sync_wake_baseline_for_user(self.user)
+        state = WakeBaselineState.objects.get(user=self.user)
+
+        self.assertEqual(state.last_valid_sample_count, 6)
+        self.assertTrue(360 <= int(payload["baseline_minutes"]) <= 390)
+
+    def test_baseline_updates_when_5_of_7_days_deviate(self):
+        today = date(2026, 3, 6)
+        WakeBaselineState.objects.create(
+            user=self.user,
+            baseline_minutes=360,
+            baseline_time=datetime.strptime("06:00", "%H:%M").time(),
+            baseline_timezone="UTC",
+        )
+        shifted_times = [(8, 0), (8, 10), (8, 5), (8, 15), (8, 20), (8, 0), (8, 10)]
+        for index, (hour, minute) in enumerate(shifted_times):
+            self._create_interaction(
+                local_date=today - timedelta(days=index),
+                hour=hour,
+                minute=minute,
+                timezone_name="UTC",
+            )
+
+        payload = sync_wake_baseline_for_user(self.user)
+        state = WakeBaselineState.objects.get(user=self.user)
+
+        self.assertEqual(state.last_update_reason, "behavior_shift_5_of_7")
+        self.assertTrue(480 <= int(state.baseline_minutes) <= 500)
+        self.assertEqual(payload["last_update_reason"], "behavior_shift_5_of_7")
+
+    def test_generation_shifts_only_inferred_items_and_keeps_explicit_times(self):
+        explicit_task, inferred_task = self._create_goal_with_tasks_for_schedule_tests()
+        WakeBaselineState.objects.create(
+            user=self.user,
+            baseline_minutes=330,
+            baseline_time=datetime.strptime("05:30", "%H:%M").time(),
+            baseline_timezone="UTC",
+            last_update_reason="initial_inference",
+            last_sample_count=7,
+            last_valid_sample_count=7,
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, timezone.localdate())
+        self.assertTrue(created)
+
+        explicit_item = task_list.tasks.get(goal_task=explicit_task)
+        inferred_item = task_list.tasks.get(goal_task=inferred_task)
+        self.assertEqual(explicit_item.time_slot, "evening")
+        self.assertEqual(explicit_item.suggested_time.strftime("%H:%M"), "21:15")
+        self.assertEqual(inferred_item.time_slot, "morning")
+        self.assertIsNotNone(inferred_item.suggested_time)
+        self.assertEqual(task_list.schedule_constraints["wake_baseline"]["baseline_minutes"], 330)

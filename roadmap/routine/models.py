@@ -252,6 +252,7 @@ class DailyTaskItem(models.Model):
         ('habit',     'Daily Habit'),
         ('goal_task', 'Goal Task'),
         ('event',     'Event'),
+        ('journal',   'Journal'),
     ]
     PRIORITY_CHOICES = [
         ('high',   'High'),
@@ -999,7 +1000,48 @@ class DisciplineStreak(models.Model):
 
 
 # ==============================================================================
-# 10. AdaptiveRoadmapState
+# 10. RoutineDayModeCheckIn
+# ==============================================================================
+
+class RoutineDayModeCheckIn(models.Model):
+    DAY_MODE_CHOICES = [
+        ("focused", "Focused"),
+        ("flex", "Flex/Unplanned"),
+    ]
+    SOURCE_CHOICES = [
+        ("explicit", "Explicit request payload"),
+        ("carry_forward", "Carried from previous day"),
+        ("default", "Default focused mode"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        "authentication.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="routine_day_mode_checkins",
+    )
+    date = models.DateField()
+    day_mode = models.CharField(max_length=10, choices=DAY_MODE_CHOICES, default="focused")
+    day_mode_note = models.TextField(blank=True)
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="default")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "routine_day_mode_checkins"
+        unique_together = ["user", "date"]
+        ordering = ["-date", "-created_at"]
+        indexes = [
+            models.Index(fields=["user", "date"]),
+            models.Index(fields=["user", "day_mode"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.date} [{self.day_mode}]"
+
+
+# ==============================================================================
+# 11. AdaptiveRoadmapState
 # ==============================================================================
 
 class AdaptiveRoadmapState(models.Model):
@@ -1037,4 +1079,73 @@ class AdaptiveRoadmapState(models.Model):
         return (
             f"{self.user.email} - scale={self.current_scale_level}, "
             f"miss={self.consecutive_miss_days}, success={self.consecutive_success_days}"
+        )
+
+
+# ==============================================================================
+# 12. WakeInteraction
+# ==============================================================================
+
+class WakeInteraction(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        "authentication.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="wake_interactions",
+    )
+    local_date = models.DateField()
+    first_interaction_at = models.DateTimeField()
+    timezone_name = models.CharField(max_length=64, default="UTC")
+    source_path = models.CharField(max_length=255, blank=True)
+    source_method = models.CharField(max_length=10, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "wake_interactions"
+        unique_together = ["user", "local_date"]
+        ordering = ["-local_date", "-first_interaction_at"]
+        indexes = [
+            models.Index(fields=["user", "local_date"]),
+            models.Index(fields=["user", "first_interaction_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.local_date} @ {self.first_interaction_at.isoformat()}"
+
+
+# ==============================================================================
+# 13. WakeBaselineState
+# ==============================================================================
+
+class WakeBaselineState(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        "authentication.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="wake_baseline_state",
+    )
+
+    baseline_minutes = models.IntegerField(null=True, blank=True)
+    baseline_time = models.TimeField(null=True, blank=True)
+    baseline_timezone = models.CharField(max_length=64, default="UTC")
+    last_computed_at = models.DateTimeField(null=True, blank=True)
+    last_update_reason = models.CharField(max_length=100, blank=True)
+    last_sample_count = models.IntegerField(default=0)
+    last_valid_sample_count = models.IntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "wake_baseline_states"
+        indexes = [
+            models.Index(fields=["baseline_timezone", "updated_at"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.user.email} - baseline={self.baseline_minutes}min "
+            f"({self.baseline_timezone})"
         )

@@ -20,7 +20,9 @@ from routine.models import (
     DailyTaskItem,
     DisciplineStreak,
     HabitTracker,
+    RoutineDayModeCheckIn,
 )
+from routine.wake_service import get_wake_baseline_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,8 @@ ADAPTIVE_SCALE_MIN = -3
 ADAPTIVE_SCALE_MAX = 3
 ADAPTIVE_SCALE_COOLDOWN_DAYS = 2
 SLOT_ORDER = ("morning", "afternoon", "evening")
+DAY_MODE_FOCUSED = "focused"
+DAY_MODE_FLEX = "flex"
 SLOT_WINDOWS = {
     "morning": (time(hour=6, minute=0), time(hour=12, minute=0)),
     "afternoon": (time(hour=12, minute=0), time(hour=18, minute=0)),
@@ -77,12 +81,39 @@ BAD_HABIT_SIGNAL_KEYWORDS = {
 }
 
 
-def _default_time_for_slot(slot: str | None):
+def _minutes_to_time(value: int) -> time:
+    value = int(max(0, min(1439, value)))
+    return time(hour=value // 60, minute=value % 60)
+
+
+def _clamp_minutes(value: int, slot: str) -> int:
+    slot_start, slot_end = SLOT_WINDOWS[slot]
+    start_minutes = slot_start.hour * 60 + slot_start.minute
+    end_minutes = slot_end.hour * 60 + slot_end.minute
+    # Keep room below the slot end to avoid exact-boundary rollover.
+    return max(start_minutes, min(end_minutes - 1, value))
+
+
+def _default_time_for_slot(
+    slot: str | None,
+    *,
+    wake_baseline_minutes: int | None = None,
+    use_wake_baseline: bool = False,
+):
     mapping = {
         "morning": time(hour=8, minute=0),
         "afternoon": time(hour=14, minute=0),
         "evening": time(hour=19, minute=0),
     }
+    if use_wake_baseline and wake_baseline_minutes is not None and slot in SLOT_ORDER:
+        # Shift inferred schedule defaults using wake baseline while preserving explicit user-set times.
+        morning_anchor = _clamp_minutes(int(wake_baseline_minutes) + 30, "morning")
+        shifted_minutes = {
+            "morning": morning_anchor,
+            "afternoon": _clamp_minutes(morning_anchor + 300, "afternoon"),
+            "evening": _clamp_minutes(morning_anchor + 660, "evening"),
+        }
+        return _minutes_to_time(shifted_minutes[slot])
     return mapping.get(slot or "", None)
 
 
@@ -307,14 +338,36 @@ def _build_available_minutes_by_slot(target_date: date, schedule_constraints: di
     return availability
 
 
-def _select_available_slot(preferred_slot: str | None, availability_by_slot: dict[str, int]) -> str:
+def _select_available_slot(
+    preferred_slot: str | None,
+    availability_by_slot: dict[str, int],
+    *,
+    required_minutes: int = 0,
+) -> str:
     preferred = preferred_slot if preferred_slot in SLOT_ORDER else "afternoon"
-    if availability_by_slot.get(preferred, 0) > 0:
+    required = max(0, int(required_minutes or 0))
+    if availability_by_slot.get(preferred, 0) >= required and availability_by_slot.get(preferred, 0) > 0:
         return preferred
-    for slot_name in SLOT_ORDER:
+
+    ordered_slots = [preferred] + [slot for slot in SLOT_ORDER if slot != preferred]
+    for slot_name in ordered_slots:
+        if availability_by_slot.get(slot_name, 0) >= required and availability_by_slot.get(slot_name, 0) > 0:
+            return slot_name
+
+    for slot_name in ordered_slots:
         if availability_by_slot.get(slot_name, 0) > 0:
             return slot_name
     return preferred
+
+
+def _reserve_slot_minutes(availability_by_slot: dict[str, int], slot_name: str, minutes: int) -> None:
+    if slot_name not in SLOT_ORDER:
+        return
+    minutes_to_reserve = max(0, int(minutes or 0))
+    availability_by_slot[slot_name] = max(
+        0,
+        int(availability_by_slot.get(slot_name, 0)) - minutes_to_reserve,
+    )
 
 
 def _calculate_required_minutes(habits, goal_tasks, minutes_multiplier: float) -> int:
@@ -475,6 +528,115 @@ def _append_adjustment_note(base_text: str, note: str) -> str:
     if not text:
         return note
     return f"{text}\n\n{note}"
+
+
+def _resolve_and_persist_day_mode(user, target_date: date, explicit_day_mode: str | None, day_mode_note: str = "") -> dict:
+    note_text = (day_mode_note or "").strip()
+    if explicit_day_mode:
+        checkin, _ = RoutineDayModeCheckIn.objects.update_or_create(
+            user=user,
+            date=target_date,
+            defaults={
+                "day_mode": explicit_day_mode,
+                "day_mode_note": note_text,
+                "source": "explicit",
+            },
+        )
+        return {
+            "day_mode": checkin.day_mode,
+            "source": checkin.source,
+            "carried_from_date": None,
+            "day_mode_note": checkin.day_mode_note,
+        }
+
+    existing = RoutineDayModeCheckIn.objects.filter(user=user, date=target_date).first()
+    if existing:
+        return {
+            "day_mode": existing.day_mode,
+            "source": existing.source,
+            "carried_from_date": None,
+            "day_mode_note": existing.day_mode_note,
+        }
+
+    prior = (
+        RoutineDayModeCheckIn.objects.filter(user=user, date__lt=target_date)
+        .order_by("-date", "-created_at")
+        .first()
+    )
+    if prior:
+        checkin = RoutineDayModeCheckIn.objects.create(
+            user=user,
+            date=target_date,
+            day_mode=prior.day_mode,
+            day_mode_note=prior.day_mode_note,
+            source="carry_forward",
+        )
+        return {
+            "day_mode": checkin.day_mode,
+            "source": checkin.source,
+            "carried_from_date": prior.date.isoformat(),
+            "day_mode_note": checkin.day_mode_note,
+        }
+
+    checkin = RoutineDayModeCheckIn.objects.create(
+        user=user,
+        date=target_date,
+        day_mode=DAY_MODE_FOCUSED,
+        source="default",
+    )
+    return {
+        "day_mode": checkin.day_mode,
+        "source": checkin.source,
+        "carried_from_date": None,
+        "day_mode_note": "",
+    }
+
+
+def _apply_flex_day_profile(habits, goal_tasks, minutes_multiplier: float):
+    sorted_habits = sorted(
+        habits,
+        key=lambda habit: (
+            -GOAL_PRIORITY_ORDER.get(habit.priority, 0),
+            habit.name.lower(),
+            str(habit.id),
+        ),
+    )
+    sorted_goal_tasks = sorted(
+        goal_tasks,
+        key=lambda task: (
+            -GOAL_PRIORITY_ORDER.get(task.priority, 0),
+            task.display_order,
+            str(task.id),
+        ),
+    )
+    selected_habits = sorted_habits[:1]
+    remaining_slots = max(0, 2 - len(selected_habits))
+    selected_goal_tasks = sorted_goal_tasks[:remaining_slots]
+    if not selected_habits and not selected_goal_tasks and sorted_goal_tasks:
+        selected_goal_tasks = sorted_goal_tasks[:1]
+
+    return selected_habits, selected_goal_tasks, max(0.7, minutes_multiplier * 0.75)
+
+
+def _build_journal_last_task(task_list: DailyTaskList, display_order: int, day_mode: str) -> DailyTaskItem:
+    description = "End the day with an honest reflection. This task is always scheduled last."
+    if day_mode == DAY_MODE_FLEX:
+        description = (
+            "Flex-day reflection: capture what happened, one win, and the smallest next step."
+        )
+    return DailyTaskItem(
+        task_list=task_list,
+        item_type="journal",
+        title="Evening journal entry",
+        description=description,
+        icon="journal",
+        priority="medium",
+        estimated_minutes=15,
+        time_slot="evening",
+        suggested_time=time(hour=21, minute=0),
+        why_important="Deterministic ordering rule: journal is always the final task.",
+        display_order=display_order,
+    )
 
 
 def _journal_tone_note(tone_style: str) -> str:
@@ -889,8 +1051,29 @@ def build_adaptive_roadmap_adjustment(user, target_date: date) -> dict:
     }
 
 
+def _build_adaptive_response_metadata(adaptive_adjustment: dict) -> dict:
+    return {
+        "target_date": adaptive_adjustment.get("target_date"),
+        "state": adaptive_adjustment.get("state", {}),
+        "triggers": adaptive_adjustment.get("triggers", {}),
+        "adjustments": adaptive_adjustment.get("adjustments", {}),
+        "recommendations": adaptive_adjustment.get("recommendations", []),
+        "policy": {
+            "scale_level_min": ADAPTIVE_SCALE_MIN,
+            "scale_level_max": ADAPTIVE_SCALE_MAX,
+            "scale_change_cooldown_days": ADAPTIVE_SCALE_COOLDOWN_DAYS,
+            "miss_recovery_threshold_days": 5,
+            "sunday_rebuild_rule": "once_per_sunday",
+        },
+    }
+
+
 def get_or_create_today_task_list(
-    user, target_date: date, force_regenerate: bool = False
+    user,
+    target_date: date,
+    force_regenerate: bool = False,
+    day_mode: str | None = None,
+    day_mode_note: str = "",
 ) -> tuple[DailyTaskList, bool]:
     """
     Return (task_list, created).
@@ -908,6 +1091,18 @@ def get_or_create_today_task_list(
             existing.delete()
         else:
             return existing, False
+
+    mode_context = _resolve_and_persist_day_mode(
+        user=user,
+        target_date=target_date,
+        explicit_day_mode=day_mode,
+        day_mode_note=day_mode_note,
+    )
+    resolved_day_mode = mode_context["day_mode"]
+    wake_baseline = get_wake_baseline_metadata(user=user)
+    wake_baseline_minutes = wake_baseline.get("baseline_minutes")
+    wake_has_baseline = bool(wake_baseline.get("is_available"))
+    wake_default_slot = wake_baseline.get("default_slot") or "afternoon"
 
     friction_audit = build_weekly_friction_audit(user=user, target_date=target_date)
     journal_adaptation = build_journal_routine_adaptation(user=user, target_date=target_date)
@@ -940,6 +1135,9 @@ def get_or_create_today_task_list(
         or journal_adjustments["add_split_hint"]
         or adaptive_adjustments["add_split_hint"]
     )
+    if resolved_day_mode == DAY_MODE_FLEX:
+        deprioritize_goal_tasks = True
+        add_split_hint = True
 
     # 1) Fetch pending goal tasks with balanced cross-goal coverage
     goal_tasks = _select_balanced_goal_tasks(user=user, limit=goal_task_limit)
@@ -972,6 +1170,18 @@ def get_or_create_today_task_list(
         minutes_multiplier=minutes_multiplier,
         available_minutes=total_available_minutes,
     )
+    if resolved_day_mode == DAY_MODE_FLEX:
+        habits, goal_tasks, minutes_multiplier = _apply_flex_day_profile(
+            habits=habits,
+            goal_tasks=goal_tasks,
+            minutes_multiplier=minutes_multiplier,
+        )
+        required_minutes_after_fallback = _calculate_required_minutes(
+            habits=habits,
+            goal_tasks=goal_tasks,
+            minutes_multiplier=minutes_multiplier,
+        )
+        fallback_strategy = "flex_profile"
 
     # 3) Ask AI for motivation + mantra only
     motivation = ""
@@ -1064,6 +1274,14 @@ def get_or_create_today_task_list(
                         "fit_status": fit_status,
                         "fallback_strategy": fallback_strategy,
                     },
+                    "day_mode": {
+                        "value": resolved_day_mode,
+                        "source": mode_context["source"],
+                        "carried_from_date": mode_context["carried_from_date"],
+                        "note": mode_context["day_mode_note"],
+                    },
+                    "adaptive_roadmap": _build_adaptive_response_metadata(adaptive_adjustment),
+                    "wake_baseline": wake_baseline,
                 },
             )
 
@@ -1109,14 +1327,29 @@ def get_or_create_today_task_list(
 
             # Habits next
             for habit in habits:
-                habit_slot = _infer_time_slot_from_text(
-                    habit.name,
-                    habit.description,
-                    fallback="morning",
-                )
+                habit_minutes = _scale_minutes(habit.estimated_minutes, minutes_multiplier)
+                if habit.suggested_time:
+                    habit_slot = _infer_time_slot_from_datetime(
+                        datetime.combine(target_date, habit.suggested_time),
+                        fallback=wake_default_slot if wake_has_baseline else "morning",
+                    )
+                    habit_uses_fallback = False
+                else:
+                    habit_slot = _infer_time_slot_from_text(
+                        habit.name,
+                        habit.description,
+                        fallback=wake_default_slot if wake_has_baseline else "morning",
+                    )
+                    habit_uses_fallback = True
                 habit_slot = _select_available_slot(
                     preferred_slot=habit_slot,
                     availability_by_slot=availability_by_slot,
+                    required_minutes=habit_minutes,
+                )
+                _reserve_slot_minutes(
+                    availability_by_slot=availability_by_slot,
+                    slot_name=habit_slot,
+                    minutes=habit_minutes,
                 )
                 items_to_create.append(
                     DailyTaskItem(
@@ -1128,9 +1361,17 @@ def get_or_create_today_task_list(
                         description=habit.description,
                         icon=habit.icon,
                         priority=habit.priority,
-                        estimated_minutes=_scale_minutes(habit.estimated_minutes, minutes_multiplier),
+                        estimated_minutes=habit_minutes,
                         time_slot=habit_slot,
-                        suggested_time=_default_time_for_slot(habit_slot),
+                        suggested_time=(
+                            habit.suggested_time
+                            if habit.suggested_time
+                            else _default_time_for_slot(
+                                habit_slot,
+                                wake_baseline_minutes=wake_baseline_minutes,
+                                use_wake_baseline=habit_uses_fallback,
+                            )
+                        ),
                         why_important=_append_adjustment_note(habit.why_important, tone_note),
                         display_order=order,
                     )
@@ -1140,14 +1381,26 @@ def get_or_create_today_task_list(
             # Goal tasks next
             for task in goal_tasks:
                 goal = task.subgoal.milestone.goal
-                task_slot = task.preferred_time_slot or _infer_time_slot_from_text(
-                    task.title,
-                    task.description,
-                    fallback="afternoon",
-                )
+                task_minutes = _scale_minutes(task.estimated_duration_minutes, minutes_multiplier)
+                if task.preferred_time_slot:
+                    task_slot = task.preferred_time_slot
+                    task_uses_fallback = False
+                else:
+                    task_slot = _infer_time_slot_from_text(
+                        task.title,
+                        task.description,
+                        fallback=wake_default_slot if wake_has_baseline else "afternoon",
+                    )
+                    task_uses_fallback = True
                 task_slot = _select_available_slot(
                     preferred_slot=task_slot,
                     availability_by_slot=availability_by_slot,
+                    required_minutes=task_minutes,
+                )
+                _reserve_slot_minutes(
+                    availability_by_slot=availability_by_slot,
+                    slot_name=task_slot,
+                    minutes=task_minutes,
                 )
                 adjusted_priority = (
                     _shift_priority_down(task.priority) if deprioritize_goal_tasks else task.priority
@@ -1170,15 +1423,28 @@ def get_or_create_today_task_list(
                         description=adjusted_description,
                         icon="target",
                         priority=adjusted_priority,
-                        estimated_minutes=_scale_minutes(task.estimated_duration_minutes, minutes_multiplier),
+                        estimated_minutes=task_minutes,
                         time_slot=task_slot,
                         suggested_time=task.scheduled_time
-                        or _default_time_for_slot(task_slot),
+                        or _default_time_for_slot(
+                            task_slot,
+                            wake_baseline_minutes=wake_baseline_minutes,
+                            use_wake_baseline=task_uses_fallback,
+                        ),
                         why_important=f"Part of: {goal.title}",
                         display_order=order,
                     )
                 )
                 order += 1
+
+            # Deterministic ordering rule: journal is always the final task.
+            items_to_create.append(
+                _build_journal_last_task(
+                    task_list=task_list,
+                    display_order=order,
+                    day_mode=resolved_day_mode,
+                )
+            )
 
             DailyTaskItem.objects.bulk_create(items_to_create)
             task_list.update_progress()

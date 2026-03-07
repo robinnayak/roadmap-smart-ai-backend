@@ -86,16 +86,34 @@ class GenerateDailyTaskListAPIView(APIView):
         request_serializer = GenerateDailyTaskListRequestSerializer(data=request.data)
         if not request_serializer.is_valid():
             date_error = request_serializer.errors.get("date")
+            mode_error = request_serializer.errors.get("day_mode")
+            note_error = request_serializer.errors.get("day_mode_note")
             return Response(
-                {"error": date_error[0] if date_error else "Invalid request data."},
+                {
+                    "error": (
+                        date_error[0]
+                        if date_error
+                        else mode_error[0]
+                        if mode_error
+                        else note_error[0]
+                        if note_error
+                        else "Invalid request data."
+                    )
+                },
                 status=http_status.HTTP_400_BAD_REQUEST,
             )
         validated = request_serializer.validated_data
         target_date = validated.get("date", timezone.localdate())
         force = validated.get("force", False)
+        day_mode = validated.get("day_mode")
+        day_mode_note = validated.get("day_mode_note", "")
 
         task_list, created = get_or_create_today_task_list(
-            request.user, target_date, force_regenerate=force
+            request.user,
+            target_date,
+            force_regenerate=force,
+            day_mode=day_mode,
+            day_mode_note=day_mode_note,
         )
         serializer = DailyTaskListSerializer(task_list, context={"request": request})
         message = (

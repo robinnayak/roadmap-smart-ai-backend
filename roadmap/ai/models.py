@@ -485,3 +485,112 @@ class AIPromptTemplate(models.Model):
         
         self.success_rate = (current_successes / total) * 100
         self.save(update_fields=['success_rate', 'updated_at'])
+
+
+class AIUserChurnState(models.Model):
+    """
+    Stores the latest churn scoring snapshot per user.
+    """
+
+    RISK_TIER_LOW = "low"
+    RISK_TIER_MEDIUM = "medium"
+    RISK_TIER_HIGH = "high"
+    RISK_TIER_CHOICES = [
+        (RISK_TIER_LOW, "Low"),
+        (RISK_TIER_MEDIUM, "Medium"),
+        (RISK_TIER_HIGH, "High"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        "authentication.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="ai_churn_state",
+    )
+    risk_score = models.FloatField(default=0.0)
+    risk_tier = models.CharField(max_length=10, choices=RISK_TIER_CHOICES, default=RISK_TIER_LOW)
+    inactivity_days = models.IntegerField(default=0)
+    last_activity_at = models.DateTimeField(null=True, blank=True)
+    last_scored_at = models.DateTimeField(default=timezone.now, db_index=True)
+    score_inputs = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "ai_user_churn_states"
+        ordering = ["-last_scored_at"]
+        indexes = [
+            models.Index(fields=["risk_tier", "last_scored_at"]),
+            models.Index(fields=["user", "last_scored_at"]),
+        ]
+        verbose_name = "AI User Churn State"
+        verbose_name_plural = "AI User Churn States"
+
+    def __str__(self):
+        return f"{self.user.email} - {self.risk_tier} ({self.risk_score:.1f})"
+
+
+class AIReengagementAction(models.Model):
+    """
+    Append-only action log for churn re-engagement orchestration.
+    """
+
+    ACTION_TYPE_NUDGE = "nudge"
+    ACTION_TYPE_ESCALATION = "escalation"
+    ACTION_TYPE_CHOICES = [
+        (ACTION_TYPE_NUDGE, "Nudge"),
+        (ACTION_TYPE_ESCALATION, "Escalation"),
+    ]
+
+    CHANNEL_PUSH = "push"
+    CHANNEL_EMAIL = "email"
+    CHANNEL_NONE = "none"
+    CHANNEL_CHOICES = [
+        (CHANNEL_PUSH, "Push"),
+        (CHANNEL_EMAIL, "Email"),
+        (CHANNEL_NONE, "None"),
+    ]
+
+    STATUS_SENT = "sent"
+    STATUS_SUPPRESSED = "suppressed"
+    STATUS_COOLDOWN_BLOCKED = "cooldown_blocked"
+    STATUS_REENGAGED_BLOCKED = "reengaged_blocked"
+    STATUS_CHOICES = [
+        (STATUS_SENT, "Sent"),
+        (STATUS_SUPPRESSED, "Suppressed"),
+        (STATUS_COOLDOWN_BLOCKED, "Cooldown Blocked"),
+        (STATUS_REENGAGED_BLOCKED, "Reengaged Blocked"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        "authentication.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="ai_reengagement_actions",
+    )
+    churn_state = models.ForeignKey(
+        AIUserChurnState,
+        on_delete=models.CASCADE,
+        related_name="actions",
+    )
+    action_type = models.CharField(max_length=20, choices=ACTION_TYPE_CHOICES, db_index=True)
+    channel = models.CharField(max_length=10, choices=CHANNEL_CHOICES, default=CHANNEL_NONE)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, db_index=True)
+    reason_code = models.CharField(max_length=100, blank=True)
+    risk_score = models.FloatField(default=0.0)
+    risk_tier = models.CharField(max_length=10, choices=AIUserChurnState.RISK_TIER_CHOICES)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "ai_reengagement_actions"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "action_type", "created_at"]),
+            models.Index(fields=["user", "status", "created_at"]),
+        ]
+        verbose_name = "AI Re-engagement Action"
+        verbose_name_plural = "AI Re-engagement Actions"
+
+    def __str__(self):
+        return f"{self.user.email} - {self.action_type} - {self.status}"

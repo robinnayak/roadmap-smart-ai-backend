@@ -1,15 +1,21 @@
 import os
+from datetime import timedelta
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ImproperlyConfigured
+from django.core.management import call_command
 from django.urls import reverse
+from django.utils import timezone
 from unittest.mock import patch, MagicMock
 import httpx
 
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from authentication.models import NotificationSettings
+from ai.models import AIReengagementAction, AIUserChurnState
 from ai.providers.ollama_provider import OllamaProvider
+from ai.services.churn_reengagement import ChurnReengagementService
 from goal.models import Goal, Milestone
 from ai.utils.validators import OutputValidator
 
@@ -353,3 +359,167 @@ class AIHealthCheckConfigTests(APITestCase):
         self.assertEqual(response.data["status"], "healthy")
         self.assertEqual(response.data["service"], "ollama")
         self.assertEqual(response.data["model"], "gpt-oss:120b-cloud")
+
+
+class ChurnReengagementServiceTests(TestCase):
+    def setUp(self):
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(
+            email="churn-service@test.com",
+            password="testpass123",
+        )
+        self.service = ChurnReengagementService()
+
+    def test_tier_boundaries(self):
+        self.assertEqual(self.service._tier_for_score(39.9), AIUserChurnState.RISK_TIER_LOW)
+        self.assertEqual(self.service._tier_for_score(40.0), AIUserChurnState.RISK_TIER_MEDIUM)
+        self.assertEqual(self.service._tier_for_score(69.9), AIUserChurnState.RISK_TIER_MEDIUM)
+        self.assertEqual(self.service._tier_for_score(70.0), AIUserChurnState.RISK_TIER_HIGH)
+
+    def test_score_user_high_risk_when_no_activity(self):
+        result = self.service.score_user(user=self.user)
+
+        self.assertGreaterEqual(result.risk_score, 90.0)
+        self.assertEqual(result.risk_tier, AIUserChurnState.RISK_TIER_HIGH)
+        self.assertGreaterEqual(result.inactivity_days, 300)
+
+    def test_notification_gating_suppresses_action_when_disabled(self):
+        NotificationSettings.objects.update_or_create(
+            user=self.user,
+            defaults={
+                "notifications_enabled": False,
+                "personalize_assistant": True,
+                "push_notifications": True,
+                "email_notifications": True,
+            },
+        )
+
+        result = self.service.process_user(user=self.user)
+        self.assertEqual(result["status"], AIReengagementAction.STATUS_SUPPRESSED)
+
+        latest = AIReengagementAction.objects.filter(user=self.user).first()
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.reason_code, "notifications_disabled")
+
+    @patch("ai.services.churn_reengagement.ChurnReengagementService.score_user")
+    def test_cooldown_blocks_duplicate_action_within_24h(self, mock_score_user):
+        NotificationSettings.objects.update_or_create(
+            user=self.user,
+            defaults={
+                "notifications_enabled": True,
+                "personalize_assistant": True,
+                "push_notifications": True,
+                "email_notifications": False,
+            },
+        )
+        mock_score_user.return_value = type(
+            "ScoreResult",
+            (),
+            {
+                "risk_score": 50.0,
+                "risk_tier": AIUserChurnState.RISK_TIER_MEDIUM,
+                "inactivity_days": 4,
+                "last_activity_at": timezone.now() - timedelta(days=4),
+                "score_inputs": {},
+            },
+        )()
+
+        first = self.service.process_user(user=self.user)
+        second = self.service.process_user(user=self.user)
+
+        self.assertEqual(first["status"], AIReengagementAction.STATUS_SENT)
+        self.assertEqual(second["status"], AIReengagementAction.STATUS_COOLDOWN_BLOCKED)
+
+    @patch("ai.services.churn_reengagement.ChurnReengagementService._get_last_activity_at")
+    @patch("ai.services.churn_reengagement.ChurnReengagementService.score_user")
+    def test_reengaged_user_is_blocked(self, mock_score_user, mock_last_activity):
+        NotificationSettings.objects.update_or_create(
+            user=self.user,
+            defaults={
+                "notifications_enabled": True,
+                "personalize_assistant": True,
+                "push_notifications": True,
+                "email_notifications": False,
+            },
+        )
+        mock_score_user.return_value = type(
+            "ScoreResult",
+            (),
+            {
+                "risk_score": 85.0,
+                "risk_tier": AIUserChurnState.RISK_TIER_HIGH,
+                "inactivity_days": 8,
+                "last_activity_at": timezone.now() - timedelta(days=8),
+                "score_inputs": {},
+            },
+        )()
+        mock_last_activity.return_value = timezone.now()
+
+        result = self.service.process_user(user=self.user)
+
+        self.assertEqual(result["status"], AIReengagementAction.STATUS_REENGAGED_BLOCKED)
+
+    def test_high_tier_escalates_after_prior_nudge(self):
+        NotificationSettings.objects.update_or_create(
+            user=self.user,
+            defaults={
+                "notifications_enabled": True,
+                "personalize_assistant": True,
+                "push_notifications": True,
+                "email_notifications": False,
+            },
+        )
+
+        churn_state = AIUserChurnState.objects.create(
+            user=self.user,
+            risk_score=85.0,
+            risk_tier=AIUserChurnState.RISK_TIER_HIGH,
+            inactivity_days=10,
+            score_inputs={},
+        )
+        AIReengagementAction.objects.create(
+            user=self.user,
+            churn_state=churn_state,
+            action_type=AIReengagementAction.ACTION_TYPE_NUDGE,
+            channel=AIReengagementAction.CHANNEL_PUSH,
+            status=AIReengagementAction.STATUS_SENT,
+            reason_code="delivered",
+            risk_score=70.0,
+            risk_tier=AIUserChurnState.RISK_TIER_HIGH,
+            metadata={},
+        )
+
+        # Make the prior nudge old enough so cooldown does not block escalation.
+        AIReengagementAction.objects.filter(user=self.user).update(
+            created_at=timezone.now() - timedelta(hours=25)
+        )
+
+        result = self.service.process_user(user=self.user)
+        self.assertEqual(result["status"], AIReengagementAction.STATUS_SENT)
+
+        latest = AIReengagementAction.objects.filter(user=self.user).order_by("-created_at").first()
+        self.assertEqual(latest.action_type, AIReengagementAction.ACTION_TYPE_ESCALATION)
+
+
+class ChurnReengagementCommandTests(TestCase):
+    def setUp(self):
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(
+            email="churn-command@test.com",
+            password="testpass123",
+        )
+        NotificationSettings.objects.update_or_create(
+            user=self.user,
+            defaults={
+                "notifications_enabled": True,
+                "personalize_assistant": True,
+                "push_notifications": True,
+                "email_notifications": False,
+            },
+        )
+
+    def test_management_command_processes_user_and_persists_records(self):
+        call_command("run_churn_reengagement")
+
+        self.assertTrue(AIUserChurnState.objects.filter(user=self.user).exists())
+        self.assertTrue(AIReengagementAction.objects.filter(user=self.user).exists())

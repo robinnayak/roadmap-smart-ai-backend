@@ -16,6 +16,11 @@ class GenerateDailyTaskListRequestSerializer(serializers.Serializer):
         error_messages={"invalid": "Invalid date format. Use YYYY-MM-DD."},
     )
     force = serializers.BooleanField(required=False, default=False)
+    day_mode = serializers.ChoiceField(
+        required=False,
+        choices=["focused", "flex"],
+    )
+    day_mode_note = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
 
 
 class CompleteTaskItemRequestSerializer(serializers.Serializer):
@@ -257,6 +262,8 @@ class DailyTaskItemSerializer(serializers.ModelSerializer):
             return 'Habit'
         elif obj.event_id:
             return 'Event'
+        elif obj.item_type == 'journal':
+            return 'Journal'
         return 'Task'
 
 
@@ -281,6 +288,8 @@ class DailyTaskItemSummarySerializer(serializers.ModelSerializer):
             return 'Habit'
         elif obj.event_id:
             return 'Event'
+        elif obj.item_type == 'journal':
+            return 'Journal'
         return 'Task'
 
 
