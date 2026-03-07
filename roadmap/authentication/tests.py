@@ -392,6 +392,58 @@ class ProfilePersonalNotificationEndpointTests(APITestCase):
         self.assertFalse(response.data["success"])
         self.assertEqual(response.data["code"], "details_not_found")
 
+    def test_personal_details_put_allows_existing_past_roadmap_start_date_when_unchanged(self):
+        url = reverse("user-personal-details")
+        past_start_date = timezone.now().date() - timedelta(days=5)
+        date_of_birth = timezone.now().date() - timedelta(days=9000)
+        details = UserPersonalDetails.objects.create(
+            user=self.user,
+            date_of_birth=date_of_birth,
+            roadmap_start_date=past_start_date,
+            current_situation="Current role and constraints.",
+        )
+
+        payload = {
+            "date_of_birth": str(details.date_of_birth),
+            "roadmap_start_date": str(details.roadmap_start_date),
+            "current_situation": "Updated current role and constraints.",
+        }
+        response = self.client.put(url, data=payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(
+            response.data["data"]["roadmap_start_date"],
+            str(past_start_date),
+        )
+        self.assertEqual(
+            response.data["data"]["current_situation"],
+            payload["current_situation"],
+        )
+
+    def test_personal_details_put_rejects_roadmap_start_date_change(self):
+        url = reverse("user-personal-details")
+        current_start_date = timezone.now().date() + timedelta(days=2)
+        date_of_birth = timezone.now().date() - timedelta(days=9000)
+        details = UserPersonalDetails.objects.create(
+            user=self.user,
+            date_of_birth=date_of_birth,
+            roadmap_start_date=current_start_date,
+            current_situation="Current role and constraints.",
+        )
+
+        payload = {
+            "date_of_birth": str(details.date_of_birth),
+            "roadmap_start_date": str(current_start_date + timedelta(days=1)),
+            "current_situation": "Updated current role and constraints.",
+        }
+        response = self.client.put(url, data=payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "invalid_data")
+        self.assertIn("roadmap_start_date", response.data["errors"])
+
     def test_notification_get_uses_standard_success_envelope(self):
         response = self.client.get(self.notification_url)
 

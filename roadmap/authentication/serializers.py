@@ -276,6 +276,13 @@ class UserPersonalDetailsSerializer(serializers.ModelSerializer):
 
     def validate_roadmap_start_date(self, value):
         today = timezone.now().date()
+        if self.instance is not None:
+            if value != self.instance.roadmap_start_date:
+                raise serializers.ValidationError(
+                    "Roadmap start date cannot be changed once it is set."
+                )
+            return value
+
         if value < today:
             raise serializers.ValidationError("Roadmap start date cannot be in the past.")
         return value
