@@ -288,6 +288,185 @@ class TaskDetailOwnershipTests(APITestCase):
         self.assertIn("status", response.data)
 
 
+class GoalHierarchyMutationIntegrationTests(APITestCase):
+    def setUp(self):
+        self.owner = CustomUser.objects.create_user(
+            email="goal-hierarchy-owner@test.com",
+            password="Password@123",
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="goal-hierarchy-other@test.com",
+            password="Password@123",
+        )
+        self.goal = Goal.objects.create(
+            user=self.owner,
+            title="Hierarchy Mutation Goal",
+            primary_category="career",
+            status="not_started",
+            target_date=timezone.localdate() + timedelta(days=30),
+        )
+        self.milestone = Milestone.objects.create(
+            goal=self.goal,
+            title="Hierarchy Mutation Milestone",
+            display_order=1,
+            status="not_started",
+        )
+        self.subgoal = SubGoal.objects.create(
+            milestone=self.milestone,
+            title="Hierarchy Mutation SubGoal",
+            display_order=1,
+            status="pending",
+        )
+        self.task_one = Task.objects.create(
+            subgoal=self.subgoal,
+            title="Hierarchy Task One",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=30,
+            display_order=1,
+        )
+        self.task_two = Task.objects.create(
+            subgoal=self.subgoal,
+            title="Hierarchy Task Two",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=30,
+            display_order=2,
+        )
+        self.task_one_url = f"/goal/tasks/{self.task_one.id}/"
+        self.task_two_url = f"/goal/tasks/{self.task_two.id}/"
+        self.hierarchy_url = f"/goal/goals/{self.goal.id}/hierarchy/"
+
+    def _assert_hierarchy_state(
+        self,
+        expected_subgoal_status,
+        expected_subgoal_progress,
+        expected_milestone_status,
+        expected_milestone_progress,
+        expected_goal_status,
+        expected_goal_progress,
+    ):
+        self.subgoal.refresh_from_db()
+        self.milestone.refresh_from_db()
+        self.goal.refresh_from_db()
+
+        self.assertEqual(self.subgoal.status, expected_subgoal_status)
+        self.assertEqual(self.subgoal.progress_percentage, expected_subgoal_progress)
+        self.assertEqual(self.milestone.status, expected_milestone_status)
+        self.assertEqual(self.milestone.progress_percentage, expected_milestone_progress)
+        self.assertEqual(self.goal.status, expected_goal_status)
+        self.assertEqual(self.goal.progress_percentage, expected_goal_progress)
+
+    def test_end_to_end_task_mutation_propagates_and_reverts_hierarchy_progress(self):
+        self.client.force_authenticate(self.owner)
+
+        task_one_complete = self.client.put(
+            self.task_one_url,
+            data={"status": "completed"},
+            format="json",
+        )
+        self.assertEqual(task_one_complete.status_code, status.HTTP_200_OK)
+        self.task_one.refresh_from_db()
+        self.assertEqual(self.task_one.status, "completed")
+        self.assertIsNotNone(self.task_one.completed_at)
+        self._assert_hierarchy_state(
+            expected_subgoal_status="in_progress",
+            expected_subgoal_progress=50,
+            expected_milestone_status="in_progress",
+            expected_milestone_progress=50,
+            expected_goal_status="in_progress",
+            expected_goal_progress=50,
+        )
+
+        task_two_complete = self.client.put(
+            self.task_two_url,
+            data={"status": "completed"},
+            format="json",
+        )
+        self.assertEqual(task_two_complete.status_code, status.HTTP_200_OK)
+        self.task_two.refresh_from_db()
+        self.assertEqual(self.task_two.status, "completed")
+        self.assertIsNotNone(self.task_two.completed_at)
+        self._assert_hierarchy_state(
+            expected_subgoal_status="completed",
+            expected_subgoal_progress=100,
+            expected_milestone_status="completed",
+            expected_milestone_progress=100,
+            expected_goal_status="completed",
+            expected_goal_progress=100,
+        )
+        self.assertIsNotNone(self.subgoal.completed_date)
+        self.assertIsNotNone(self.milestone.completed_date)
+
+        task_one_revert_to_skipped = self.client.put(
+            self.task_one_url,
+            data={"status": "skipped"},
+            format="json",
+        )
+        self.assertEqual(task_one_revert_to_skipped.status_code, status.HTTP_200_OK)
+        self.task_one.refresh_from_db()
+        self.assertEqual(self.task_one.status, "skipped")
+        self.assertIsNone(self.task_one.completed_at)
+        self._assert_hierarchy_state(
+            expected_subgoal_status="in_progress",
+            expected_subgoal_progress=50,
+            expected_milestone_status="in_progress",
+            expected_milestone_progress=50,
+            expected_goal_status="in_progress",
+            expected_goal_progress=50,
+        )
+        self.assertIsNone(self.subgoal.completed_date)
+        self.assertIsNone(self.milestone.completed_date)
+
+        task_two_revert_to_pending = self.client.put(
+            self.task_two_url,
+            data={"status": "pending"},
+            format="json",
+        )
+        self.assertEqual(task_two_revert_to_pending.status_code, status.HTTP_200_OK)
+        self.task_two.refresh_from_db()
+        self.assertEqual(self.task_two.status, "pending")
+        self.assertIsNone(self.task_two.completed_at)
+        self._assert_hierarchy_state(
+            expected_subgoal_status="pending",
+            expected_subgoal_progress=0,
+            expected_milestone_status="not_started",
+            expected_milestone_progress=0,
+            expected_goal_status="in_progress",
+            expected_goal_progress=0,
+        )
+        self.assertIsNone(self.subgoal.completed_date)
+        self.assertIsNone(self.milestone.completed_date)
+
+    def test_owner_can_retrieve_and_mutate_while_non_owner_receives_404(self):
+        self.client.force_authenticate(self.owner)
+
+        owner_task_get = self.client.get(self.task_one_url)
+        self.assertEqual(owner_task_get.status_code, status.HTTP_200_OK)
+        owner_hierarchy_get = self.client.get(self.hierarchy_url)
+        self.assertEqual(owner_hierarchy_get.status_code, status.HTTP_200_OK)
+
+        owner_mutation = self.client.put(
+            self.task_one_url,
+            data={"status": "completed"},
+            format="json",
+        )
+        self.assertEqual(owner_mutation.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(self.other_user)
+
+        non_owner_task_get = self.client.get(self.task_one_url)
+        self.assertEqual(non_owner_task_get.status_code, status.HTTP_404_NOT_FOUND)
+        non_owner_hierarchy_get = self.client.get(self.hierarchy_url)
+        self.assertEqual(non_owner_hierarchy_get.status_code, status.HTTP_404_NOT_FOUND)
+        non_owner_mutation = self.client.put(
+            self.task_one_url,
+            data={"status": "completed"},
+            format="json",
+        )
+        self.assertEqual(non_owner_mutation.status_code, status.HTTP_404_NOT_FOUND)
+
+
 class CreateGoalWithHierarchyConfigFallbackTests(APITestCase):
     def setUp(self):
         self.user = CustomUser.objects.create_user(
