@@ -1,4 +1,5 @@
-﻿from datetime import timedelta
+from datetime import timedelta
+from unittest.mock import patch
 
 from django.db import IntegrityError
 from django.utils import timezone
@@ -161,3 +162,48 @@ class JournalApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["entry"]["full_day_input"], payload["full_day_input"])
         self.assertEqual(response.data["entry"]["parsed_via"], "ollama_frontend")
+
+    @patch("journal.views.ai_or_fallback_summary_refine")
+    def test_refine_summary_success(self, mock_refine):
+        mock_refine.return_value = "I am grateful for this beautiful life. Today I made strong progress."
+        response = self.client.post(
+            "/journal/refine-summary/",
+            {"text": "i am grateful for life , today progress"},
+            format="json",
+            **self.base_headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["refined_text"],
+            "I am grateful for this beautiful life. Today I made strong progress.",
+        )
+        mock_refine.assert_called_once()
+
+    def test_refine_summary_rejects_blank_text(self):
+        response = self.client.post(
+            "/journal/refine-summary/",
+            {"text": ""},
+            format="json",
+            **self.base_headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_refine_summary_rate_limit(self):
+        for idx in range(20):
+            ok = self.client.post(
+                "/journal/refine-summary/",
+                {"text": f"raw summary {idx}"},
+                format="json",
+                **self.base_headers,
+            )
+            self.assertEqual(ok.status_code, status.HTTP_200_OK)
+
+        blocked = self.client.post(
+            "/journal/refine-summary/",
+            {"text": "blocked summary"},
+            format="json",
+            **self.base_headers,
+        )
+        self.assertEqual(blocked.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(blocked.data["code"], "summary_refine_rate_limited")
+

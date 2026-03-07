@@ -67,3 +67,7 @@ class AutoPhraseSerializer(serializers.Serializer):
         if value not in JOURNAL_FIELDS:
             raise serializers.ValidationError("Invalid field.")
         return value
+
+
+class RefineSummarySerializer(serializers.Serializer):
+    text = serializers.CharField(allow_blank=False)

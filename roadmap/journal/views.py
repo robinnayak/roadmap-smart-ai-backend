@@ -9,10 +9,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from journal.models import JournalEntry, WordCloudAggregate
-from journal.serializers import AutoPhraseSerializer, JournalEntrySerializer
+from journal.serializers import AutoPhraseSerializer, JournalEntrySerializer, RefineSummarySerializer
 from journal.utils import (
     apply_search_filters,
     ai_or_fallback_autophrase,
+    ai_or_fallback_summary_refine,
     build_locked_at,
     compute_streaks,
     consume_autophrase_quota,
@@ -208,6 +209,33 @@ class JournalAutoPhraseAPIView(APIView):
             {
                 "polished": result.polished,
                 "confidence": result.confidence,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class JournalSummaryRefineAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user_tz = resolve_user_timezone(request, request.user)
+        allowed, limit = consume_autophrase_quota(request.user, user_tz)
+        if not allowed:
+            return Response(
+                {
+                    "error": f"Daily summary-refine limit exceeded ({limit}/day).",
+                    "code": "summary_refine_rate_limited",
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        serializer = RefineSummarySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        refined_text = ai_or_fallback_summary_refine(serializer.validated_data["text"])
+        return Response(
+            {
+                "refined_text": refined_text,
             },
             status=status.HTTP_200_OK,
         )

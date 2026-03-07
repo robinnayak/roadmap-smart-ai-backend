@@ -244,6 +244,51 @@ def ai_or_fallback_autophrase(field: str, text: str) -> PhraseResult:
     return fallback_auto_phrase(text)
 
 
+def fallback_refine_summary(text: str) -> str:
+    if not text or not text.strip():
+        return ""
+
+    cleaned = re.sub(r"\s+", " ", text.strip())
+    cleaned = re.sub(r"\bi\b", "I", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\biam\b", "I am", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\biaccomplish\b", "I accomplished", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bi learn\b", "I learned", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bi will\b", "I will", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bim\b", "I'm", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bcant\b", "can't", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bdont\b", "don't", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bwont\b", "won't", cleaned, flags=re.IGNORECASE)
+
+    sentence_parts = [part.strip(" ,") for part in re.split(r"[,\n]+", cleaned) if part.strip(" ,")]
+    if not sentence_parts:
+        return ""
+
+    normalized: list[str] = []
+    for part in sentence_parts:
+        piece = part[0].upper() + part[1:] if len(part) > 1 else part.upper()
+        if piece[-1] not in ".!?":
+            piece = f"{piece}."
+        normalized.append(piece)
+    return " ".join(normalized)
+
+
+def ai_or_fallback_summary_refine(text: str) -> str:
+    if _ollama_enabled():
+        try:
+            prompt = (
+                "Refine the grammar, spelling, and punctuation of this daily summary while preserving meaning and tone. "
+                "Do not remove details and do not add new information. Return plain text only.\n\n"
+                f"Input:\n{text}"
+            )
+            output = _generate_with_ollama(prompt, "You are a concise writing editor.")
+            if output:
+                return output
+        except Exception:
+            pass
+
+    return fallback_refine_summary(text)
+
+
 def consume_autophrase_quota(user, user_timezone: str) -> tuple[bool, int]:
     local_today = today_for_timezone(user_timezone)
     profile, _ = Profile.objects.get_or_create(user=user)
