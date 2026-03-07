@@ -1327,6 +1327,8 @@ def get_or_create_today_task_list(
 
             # Habits next
             for habit in habits:
+                habit_description = (habit.description or "").strip() or (habit.reason_body or "").strip()
+                habit_why_important = (habit.why_important or "").strip() or (habit.reason_headline or "").strip()
                 habit_minutes = _scale_minutes(habit.estimated_minutes, minutes_multiplier)
                 if habit.suggested_time:
                     habit_slot = _infer_time_slot_from_datetime(
@@ -1337,7 +1339,7 @@ def get_or_create_today_task_list(
                 else:
                     habit_slot = _infer_time_slot_from_text(
                         habit.name,
-                        habit.description,
+                        habit_description,
                         fallback=wake_default_slot if wake_has_baseline else "morning",
                     )
                     habit_uses_fallback = True
@@ -1358,7 +1360,7 @@ def get_or_create_today_task_list(
                         habit=habit,
                         related_goal=habit.linked_goal,
                         title=habit.name,
-                        description=habit.description,
+                        description=habit_description,
                         icon=habit.icon,
                         priority=habit.priority,
                         estimated_minutes=habit_minutes,
@@ -1372,7 +1374,7 @@ def get_or_create_today_task_list(
                                 use_wake_baseline=habit_uses_fallback,
                             )
                         ),
-                        why_important=_append_adjustment_note(habit.why_important, tone_note),
+                        why_important=_append_adjustment_note(habit_why_important, tone_note),
                         display_order=order,
                     )
                 )

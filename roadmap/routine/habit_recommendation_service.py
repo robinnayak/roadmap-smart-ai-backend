@@ -52,7 +52,7 @@ Return format:
       "suggested_time": "HH:MM",
       "frequency": "daily",
       "reason_headline": "string",
-      "reason_body": "string",
+      "reason_body": "How To Do It steps as plain text. Prefer numbered steps like '1. ...\\n2. ...\\n3. ...'",
       "science_badge": "string",
       "proof_metric_name": "string",
       "rewards": [
@@ -64,6 +64,8 @@ Return format:
 
 Do not suggest habits in existing_habits.
 Use free or low-cost habits if budget_level is minimal or low.
+Important: `reason_body` must be practical execution steps, not motivational explanation.
+Keep steps simple, concrete, and doable in the suggested duration.
 """.strip()
 
 
@@ -94,6 +96,16 @@ def _normalize_ai_habit(raw_habit: dict) -> dict | None:
     if not isinstance(rewards, list):
         rewards = []
 
+    raw_reason_body = raw_habit.get("reason_body")
+    if isinstance(raw_reason_body, list):
+        reason_body = "\n".join(
+            f"{index}. {str(step).strip()}"
+            for index, step in enumerate(raw_reason_body, start=1)
+            if str(step).strip()
+        )
+    else:
+        reason_body = str(raw_reason_body or "").strip()
+
     return {
         "name": name,
         "icon": str(raw_habit.get("icon", "⭐"))[:10] or "⭐",
@@ -102,7 +114,7 @@ def _normalize_ai_habit(raw_habit: dict) -> dict | None:
         "suggested_time": suggested_time,
         "frequency": str(raw_habit.get("frequency", "daily"))[:15] or "daily",
         "reason_headline": str(raw_habit.get("reason_headline", ""))[:200],
-        "reason_body": str(raw_habit.get("reason_body", "")),
+        "reason_body": reason_body,
         "science_badge": str(raw_habit.get("science_badge", ""))[:100],
         "proof_metric_name": str(raw_habit.get("proof_metric_name", ""))[:100],
         "rewards": rewards,

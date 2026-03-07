@@ -655,11 +655,19 @@ class HabitRecommendation(models.Model):
         if self.status == 'accepted' and self.habit_tracker:
             return self.habit_tracker
 
+        habit_description = (self.reason_body or "").strip()
+        habit_why_important = (self.reason_headline or "").strip()
+
+        if not habit_description and habit_why_important:
+            habit_description = habit_why_important
+
         tracker = HabitTracker.objects.create(
             user=self.user,
             name=self.name,
+            description=habit_description,
             icon=self.icon,
             category=self.category,
+            why_important=habit_why_important,
             estimated_minutes=self.estimated_minutes,
             suggested_time=self.suggested_time,
             frequency=self.frequency,

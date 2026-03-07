@@ -31,6 +31,7 @@ from routine.services import (
 from routine.wake_service import sync_wake_baseline_for_user
 from routine.habit_recommendation_service import (
     _build_habit_prompt,
+    _normalize_ai_habit,
     generate_habit_recommendations_for_user,
 )
 
@@ -1702,6 +1703,32 @@ class HabitRecommendationServiceTests(APITestCase):
         self.assertIn("lifestyle", prompt)
         self.assertIn("psychology", prompt)
         self.assertIn("Analyze and combine", prompt)
+        self.assertIn("reason_body", prompt)
+        self.assertIn("practical execution steps", prompt)
+
+    def test_normalize_ai_habit_converts_reason_body_steps_list_to_numbered_text(self):
+        normalized = _normalize_ai_habit(
+            {
+                "name": "Morning breath reset",
+                "category": "breathing",
+                "estimated_minutes": 10,
+                "frequency": "daily",
+                "reason_headline": "Calm your mind first thing",
+                "reason_body": [
+                    "Sit upright and relax shoulders.",
+                    "Inhale slowly for 4 seconds.",
+                    "Exhale for 6 seconds and repeat for 10 minutes.",
+                ],
+            }
+        )
+
+        self.assertIsNotNone(normalized)
+        self.assertEqual(
+            normalized["reason_body"],
+            "1. Sit upright and relax shoulders.\n"
+            "2. Inhale slowly for 4 seconds.\n"
+            "3. Exhale for 6 seconds and repeat for 10 minutes.",
+        )
 
     @patch("routine.habit_recommendation_service.ResponseParser")
     @patch("routine.habit_recommendation_service.OllamaProvider")
@@ -1827,6 +1854,9 @@ class HabitRecommendationEndpointTests(APITestCase):
         self.assertEqual(recommendation.status, "accepted")
         self.assertIsNotNone(recommendation.habit_tracker_id)
         self.assertEqual(HabitTracker.objects.filter(user=self.user, name="Box breathing").count(), 1)
+        habit = HabitTracker.objects.get(id=recommendation.habit_tracker_id)
+        self.assertEqual(habit.description, "Helps reduce stress load.")
+        self.assertEqual(habit.why_important, "Calm nervous system")
 
     def test_accept_is_idempotent(self):
         recommendation = self._create_recommendation(name="Hydration reminder")
