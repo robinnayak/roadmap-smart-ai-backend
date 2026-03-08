@@ -30,6 +30,10 @@ from rest_framework.throttling import UserRateThrottle, AnonRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
 from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework_simplejwt.token_blacklist.models import (
+    OutstandingToken,
+    BlacklistedToken,
+)
 from rest_framework.exceptions import NotFound, ValidationError
 
 
@@ -72,6 +76,39 @@ def _build_reactivation_path_payload(reactivation_token):
         "expires_in_seconds": REACTIVATION_TOKEN_MAX_AGE_SECONDS,
         "reactivate_endpoint": "/auth/user-reactivate/",
     }
+
+
+def _enforce_active_session_limit(user, keep_jti=None):
+    """
+    Keep at most MAX_ACTIVE_DEVICE_SESSIONS active refresh-token sessions per user.
+    Older active sessions are blacklisted.
+    """
+    max_sessions = max(1, int(getattr(settings, "MAX_ACTIVE_DEVICE_SESSIONS", 4)))
+
+    active_tokens = []
+    tokens = (
+        OutstandingToken.objects.filter(user=user)
+        .order_by("-created_at")
+    )
+    for token in tokens:
+        if hasattr(token, "blacklistedtoken"):
+            continue
+        active_tokens.append(token)
+
+    if len(active_tokens) <= max_sessions:
+        return
+
+    keep_tokens = active_tokens[:max_sessions]
+    if keep_jti:
+        keep_token = next((token for token in active_tokens if token.jti == keep_jti), None)
+        if keep_token and keep_token not in keep_tokens:
+            keep_tokens[-1] = keep_token
+
+    keep_ids = {token.id for token in keep_tokens}
+    for token in active_tokens:
+        if token.id in keep_ids:
+            continue
+        BlacklistedToken.objects.get_or_create(token=token)
 
 
 class ProductionApiView(APIView):
@@ -179,6 +216,7 @@ class UserRegistrationView(ProductionApiView):
         try:
             user = serializer.save()
             refresh = RefreshToken.for_user(user)
+            _enforce_active_session_limit(user=user, keep_jti=str(refresh["jti"]))
 
             logger.info(f"User registered successfully: {user.email}")
 
@@ -210,6 +248,7 @@ class UserLoginView(ProductionApiView):
     """
 
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [AnonRateThrottle]  # Apply rate limiting to login attempts
 
     def post(self, request):
@@ -236,6 +275,7 @@ class UserLoginView(ProductionApiView):
             )
 
         refresh = RefreshToken.for_user(user)
+        _enforce_active_session_limit(user=user, keep_jti=str(refresh["jti"]))
         response_data = {
             "message": "Login successful",
             "tokens": {
@@ -431,11 +471,22 @@ class CustomTokenRefreshView(TokenRefreshView):
     def post(self, request, *args, **kwargs):
         try:
             response = super().post(request, *args, **kwargs)
+            refreshed_token = response.data.get("refresh")
+            if refreshed_token:
+                parsed_refresh = RefreshToken(refreshed_token)
+                user_id = parsed_refresh.payload.get("user_id")
+                user = User.objects.filter(id=user_id).first()
+                if user:
+                    _enforce_active_session_limit(
+                        user=user,
+                        keep_jti=str(parsed_refresh["jti"]),
+                    )
             # Optionally, you can customize the response format
             return Response(
                 {
                     "tokens": {
                         "access": response.data.get("access"),
+                        "refresh": refreshed_token,
                     },
                     "message": "Token refreshed successfully",
                 },
@@ -548,6 +599,7 @@ class UserReactivateView(ProductionApiView):
         user.is_active = True
         user.save(update_fields=["is_active"])
         refresh = RefreshToken.for_user(user)
+        _enforce_active_session_limit(user=user, keep_jti=str(refresh["jti"]))
         return success_response(
             message="Account reactivated successfully.",
             data={

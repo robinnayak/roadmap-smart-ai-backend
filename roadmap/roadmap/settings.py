@@ -31,7 +31,25 @@ SECRET_KEY = config('DJANGO_SECRET_KEY', default='django-insecure-...change-me..
 
 DEBUG = bool_env('DEBUG', default=True)
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '::1'] + config('ALLOWED_HOSTS', default='').split(',')
+_env_allowed_hosts = [host.strip() for host in config('ALLOWED_HOSTS', default='').split(',') if host.strip()]
+
+
+def _normalize_allowed_host(host: str) -> str:
+    """
+    Django supports subdomain wildcards as '.example.com', not '*.example.com'.
+    """
+    cleaned = host.strip()
+    if cleaned.startswith("*."):
+        return f".{cleaned[2:]}"
+    return cleaned
+
+
+_normalized_env_hosts = [_normalize_allowed_host(host) for host in _env_allowed_hosts]
+ALLOWED_HOSTS = list(
+    dict.fromkeys(
+        ['localhost', '127.0.0.1', '::1', '.ngrok-free.app', '.ngrok.app'] + _normalized_env_hosts
+    )
+)
 
 # =============================================================================
 # INSTALLED_APPS & MIDDLEWARE
@@ -148,7 +166,16 @@ AUTH_USER_MODEL = 'authentication.CustomUser'
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
     'http://127.0.0.1:3000',
-] + config('CORS_ALLOWED_ORIGINS', default='').split(',')
+] + [
+    origin.strip()
+    for origin in config('CORS_ALLOWED_ORIGINS', default='').split(',')
+    if origin.strip()
+]
+
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://[a-z0-9-]+\.ngrok-free\.app$",
+    r"^https://[a-z0-9-]+\.ngrok\.app$",
+]
 
 CORS_ALLOW_CREDENTIALS = True
 
@@ -189,7 +216,7 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=config('ACCESS_TOKEN_LIFETIME_MINUTES', default=1, cast=int)),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=config('ACCESS_TOKEN_LIFETIME_MINUTES', default=1, cast=int)),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=config('REFRESH_TOKEN_LIFETIME_DAYS', default=7, cast=int)),
     
     'ROTATE_REFRESH_TOKENS': True,
@@ -200,6 +227,11 @@ SIMPLE_JWT = {
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
 }
+
+# Maximum number of concurrently active refresh-token sessions per user (device cap).
+MAX_ACTIVE_DEVICE_SESSIONS = max(
+    1, config("MAX_ACTIVE_DEVICE_SESSIONS", default=4, cast=int)
+)
 
 # =============================================================================
 # LOGGING (console only for simplicity in dev)

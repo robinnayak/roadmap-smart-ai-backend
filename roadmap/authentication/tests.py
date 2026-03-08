@@ -13,6 +13,7 @@ from django.urls import reverse
 # from django.test import Client
 from rest_framework.test import APIClient as Client
 from rest_framework_simplejwt.tokens import RefreshToken
+from django.test import override_settings
 from django.core.cache import cache
 from rest_framework import status 
 
@@ -721,4 +722,48 @@ class TokenRefreshSessionExpiredTests(APITestCase):
         self.assertEqual(response.data["error"], "session_expired")
         
         
+@override_settings(MAX_ACTIVE_DEVICE_SESSIONS=4)
+class DeviceSessionLimitTests(APITestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(
+            email="device-limit@test.com",
+            password="StrongPass123!",
+        )
+        self.login_url = reverse("user-login")
+        self.refresh_url = reverse("token-refresh")
+
+    def _login_and_get_refresh(self) -> str:
+        response = self.client.post(
+            self.login_url,
+            data={"email": self.user.email, "password": "StrongPass123!"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("tokens", response.data)
+        return response.data["tokens"]["refresh"]
+
+    def test_login_more_than_max_devices_revokes_oldest_session(self):
+        refresh_tokens = [self._login_and_get_refresh() for _ in range(5)]
+
+        oldest_refresh = refresh_tokens[0]
+        newest_refresh = refresh_tokens[-1]
+
+        oldest_response = self.client.post(
+            self.refresh_url,
+            data={"refresh": oldest_refresh},
+            format="json",
+        )
+        self.assertEqual(oldest_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(oldest_response.data["error"], "session_expired")
+
+        newest_response = self.client.post(
+            self.refresh_url,
+            data={"refresh": newest_refresh},
+            format="json",
+        )
+        self.assertEqual(newest_response.status_code, status.HTTP_200_OK)
+        self.assertIn("tokens", newest_response.data)
+        self.assertIn("access", newest_response.data["tokens"])
+
 
