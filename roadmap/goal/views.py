@@ -686,9 +686,10 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
              The AI prompt should be updated to put step-by-step detail into
              description rather than a separate instructions field.
         """
-        # Merge instructions into description if the AI still sends both
-        description = data.get("description", "")
-        instructions = data.get("instructions", "")
+        # Merge instructions into description if the AI still sends both.
+        # AI payloads can return either field as list/text; normalize to string first.
+        description = self._to_text(data.get("description", ""))
+        instructions = self._to_text(data.get("instructions", ""))
         if instructions and instructions not in description:
             description = f"{description}\n\n{instructions}".strip()
 
