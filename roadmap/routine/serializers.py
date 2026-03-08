@@ -32,6 +32,47 @@ class SkipTaskItemRequestSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True, default="")
 
 
+class ReorderRoutineTasksRequestSerializer(serializers.Serializer):
+    task_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=True,
+        required=True,
+    )
+
+
+class CreateRoutineTaskRequestSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=255)
+    description = serializers.CharField(required=False, allow_blank=True, default="")
+    icon = serializers.CharField(required=False, allow_blank=True, default="✅", max_length=10)
+    priority = serializers.ChoiceField(
+        choices=DailyTaskItem.PRIORITY_CHOICES,
+        required=False,
+        default="medium",
+    )
+    estimated_minutes = serializers.IntegerField(required=False, min_value=1, default=30)
+    time_slot = serializers.ChoiceField(
+        choices=DailyTaskItem.TIME_SLOT_CHOICES,
+        required=False,
+        allow_null=True,
+        default=None,
+    )
+    why_important = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class UpdateRoutineTaskRequestSerializer(serializers.Serializer):
+    title = serializers.CharField(required=False, max_length=255)
+    description = serializers.CharField(required=False, allow_blank=True)
+    icon = serializers.CharField(required=False, allow_blank=True, max_length=10)
+    priority = serializers.ChoiceField(choices=DailyTaskItem.PRIORITY_CHOICES, required=False)
+    estimated_minutes = serializers.IntegerField(required=False, min_value=1)
+    time_slot = serializers.ChoiceField(
+        choices=DailyTaskItem.TIME_SLOT_CHOICES,
+        required=False,
+        allow_null=True,
+    )
+    why_important = serializers.CharField(required=False, allow_blank=True)
+
+
 class HealthProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = HealthProfile
@@ -209,6 +250,7 @@ class DailyTaskItemSerializer(serializers.ModelSerializer):
     habit_info        = serializers.SerializerMethodField()
     event_info        = serializers.SerializerMethodField()
     primary_category  = serializers.SerializerMethodField()
+    goal_task_id      = serializers.UUIDField(source='goal_task.id', read_only=True)
 
     class Meta:
         model = DailyTaskItem
@@ -217,7 +259,9 @@ class DailyTaskItemSerializer(serializers.ModelSerializer):
             'priority', 'estimated_minutes', 'actual_minutes',
             'is_completed', 'completed_at', 'time_slot', 'suggested_time',
             'is_skipped', 'skip_reason', 'completion_notes',
+            'removed_by_user', 'removed_at',
             'why_important', 'display_order', 'points_earned', 'primary_category',
+            'goal_task_id',
             'related_goal_info', 'habit_info', 'event_info',
             'created_at', 'updated_at',
         ]
@@ -277,6 +321,7 @@ class DailyTaskItemSummarySerializer(serializers.ModelSerializer):
             'id', 'item_type', 'title', 'description', 'icon',
             'priority', 'estimated_minutes',
             'is_completed', 'is_skipped', 'display_order',
+            'removed_by_user',
             'primary_category', 'time_slot',
         ]
 
@@ -328,13 +373,14 @@ class DailyTaskListSerializer(serializers.ModelSerializer):
         return request and request.query_params.get('detailed', 'false').lower() == 'true'
 
     def get_tasks(self, obj):
-        qs = obj.tasks.select_related('related_goal', 'habit', 'event')
+        qs = obj.tasks.filter(removed_by_user=False).select_related('related_goal', 'habit', 'event')
         if self._use_detailed():
             return DailyTaskItemSerializer(qs, many=True).data
         return DailyTaskItemSummarySerializer(qs, many=True).data
 
     def get_high_priority_tasks(self, obj):
         qs = obj.tasks.select_related('related_goal', 'habit', 'event').filter(
+            removed_by_user=False,
             priority='high',
             is_completed=False,
         )
@@ -349,7 +395,12 @@ class DailyTaskListSerializer(serializers.ModelSerializer):
             task = (
                 obj.tasks
                 .select_related('related_goal', 'habit', 'event')
-                .filter(is_completed=False, is_skipped=False, priority=priority)
+                .filter(
+                    removed_by_user=False,
+                    is_completed=False,
+                    is_skipped=False,
+                    priority=priority,
+                )
                 .order_by('display_order')
                 .first()
             )

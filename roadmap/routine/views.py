@@ -5,6 +5,7 @@ import logging
 from collections import defaultdict
 
 from django.shortcuts import get_object_or_404
+from django.db import transaction, models
 from django.utils import timezone
 from rest_framework import status as http_status
 from rest_framework.permissions import IsAuthenticated
@@ -33,6 +34,9 @@ from routine.serializers import (
     HabitSuggestionSnoozeRequestSerializer,
     GenerateDailyTaskListRequestSerializer, CompleteTaskItemRequestSerializer,
     SkipTaskItemRequestSerializer,
+    ReorderRoutineTasksRequestSerializer,
+    CreateRoutineTaskRequestSerializer,
+    UpdateRoutineTaskRequestSerializer,
 )
 from routine.daily_brief_service import get_or_generate_today_brief
 from routine.habit_recommendation_service import generate_habit_recommendations_for_user
@@ -147,6 +151,276 @@ class RoutineDetailAPIView(APIView):
         return Response(status=http_status.HTTP_204_NO_CONTENT)
 
 
+class RoutineTaskReorderAPIView(APIView):
+    """
+    PATCH /routines/<routine_id>/reorder/
+    Body: { "task_ids": ["<task_uuid>", ...] }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, routine_id):
+        request_serializer = ReorderRoutineTasksRequestSerializer(data=request.data)
+        if not request_serializer.is_valid():
+            return Response(request_serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
+
+        routine = DailyTaskList.objects.filter(id=routine_id).first()
+        if not routine:
+            return Response({"error": "Routine not found."}, status=http_status.HTTP_404_NOT_FOUND)
+        if routine.user_id != request.user.id:
+            return Response(
+                {"error": "You do not have permission to reorder tasks in this routine."},
+                status=http_status.HTTP_403_FORBIDDEN,
+            )
+
+        ordered_task_ids = [str(task_id) for task_id in request_serializer.validated_data["task_ids"]]
+        if len(ordered_task_ids) != len(set(ordered_task_ids)):
+            return Response(
+                {"error": "task_ids contains duplicate values."},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        routine_tasks = list(
+            DailyTaskItem.objects.filter(task_list=routine, removed_by_user=False)
+        )
+        existing_ids = [str(task.id) for task in routine_tasks]
+        if set(ordered_task_ids) != set(existing_ids) or len(ordered_task_ids) != len(existing_ids):
+            return Response(
+                {"error": "task_ids must include each routine task id exactly once."},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        tasks_by_id = {str(task.id): task for task in routine_tasks}
+        with transaction.atomic():
+            tasks_to_update = []
+            for order, task_id in enumerate(ordered_task_ids):
+                task = tasks_by_id[task_id]
+                if task.display_order != order:
+                    task.display_order = order
+                    tasks_to_update.append(task)
+            if tasks_to_update:
+                DailyTaskItem.objects.bulk_update(tasks_to_update, ["display_order"])
+
+        ordered_tasks = (
+            DailyTaskItem.objects.filter(task_list=routine, removed_by_user=False)
+            .select_related("related_goal", "habit", "event")
+            .order_by("display_order", "created_at")
+        )
+        return Response(
+            {
+                "message": "Routine tasks reordered successfully.",
+                "tasks": DailyTaskItemSerializer(ordered_tasks, many=True).data,
+            },
+            status=http_status.HTTP_200_OK,
+        )
+
+
+class RoutineTaskListCreateAPIView(APIView):
+    """
+    POST /routines/<routine_id>/tasks/
+    Create a manual task directly within an existing routine list.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, routine_id):
+        request_serializer = CreateRoutineTaskRequestSerializer(data=request.data)
+        if not request_serializer.is_valid():
+            return Response(request_serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
+
+        routine = DailyTaskList.objects.filter(id=routine_id).first()
+        if not routine:
+            return Response({"error": "Routine not found."}, status=http_status.HTTP_404_NOT_FOUND)
+        if routine.user_id != request.user.id:
+            return Response(
+                {"error": "You do not have permission to add tasks to this routine."},
+                status=http_status.HTTP_403_FORBIDDEN,
+            )
+
+        max_order = DailyTaskItem.objects.filter(task_list=routine).aggregate(
+            models.Max("display_order")
+        )["display_order__max"]
+        if max_order is None:
+            max_order = -1
+        validated = request_serializer.validated_data
+        task_item = DailyTaskItem.objects.create(
+            task_list=routine,
+            item_type="goal_task",
+            title=validated["title"],
+            description=validated.get("description", ""),
+            icon=validated.get("icon", "✅"),
+            priority=validated.get("priority", "medium"),
+            estimated_minutes=validated.get("estimated_minutes", 30),
+            time_slot=validated.get("time_slot"),
+            why_important=validated.get("why_important", ""),
+            display_order=max_order + 1,
+        )
+        routine.update_progress()
+        return Response(
+            {
+                "message": "Task created successfully.",
+                "task": DailyTaskItemSerializer(task_item).data,
+            },
+            status=http_status.HTTP_201_CREATED,
+        )
+
+
+class RoutineTaskDetailAPIView(APIView):
+    """
+    PATCH /routines/tasks/<task_id>/
+    DELETE /routines/tasks/<task_id>/
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, task_id):
+        request_serializer = UpdateRoutineTaskRequestSerializer(data=request.data, partial=True)
+        if not request_serializer.is_valid():
+            return Response(request_serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
+
+        task_item = DailyTaskItem.objects.filter(id=task_id).select_related("task_list").first()
+        if not task_item:
+            return Response({"error": "Task not found."}, status=http_status.HTTP_404_NOT_FOUND)
+        if task_item.task_list.user_id != request.user.id:
+            return Response(
+                {"error": "You do not have permission to edit this task."},
+                status=http_status.HTTP_403_FORBIDDEN,
+            )
+
+        for field, value in request_serializer.validated_data.items():
+            setattr(task_item, field, value)
+        task_item.save()
+
+        return Response(
+            {
+                "message": "Task updated successfully.",
+                "task": DailyTaskItemSerializer(task_item).data,
+            },
+            status=http_status.HTTP_200_OK,
+        )
+
+    def delete(self, request, task_id):
+        task_item = DailyTaskItem.objects.filter(id=task_id).select_related("task_list").first()
+        if not task_item:
+            return Response({"error": "Task not found."}, status=http_status.HTTP_404_NOT_FOUND)
+        if task_item.task_list.user_id != request.user.id:
+            return Response(
+                {"error": "You do not have permission to delete this task."},
+                status=http_status.HTTP_403_FORBIDDEN,
+            )
+
+        task_list = task_item.task_list
+        task_item.delete()
+        if task_list.tasks.exists():
+            task_list.update_progress()
+        else:
+            task_list.total_tasks = 0
+            task_list.completed_tasks = 0
+            task_list.completion_percentage = 0
+            task_list.is_fully_completed = False
+            task_list.status = "pending"
+            task_list.completed_at = None
+            task_list.completed_on_time = False
+            task_list.save(
+                update_fields=[
+                    "total_tasks",
+                    "completed_tasks",
+                    "completion_percentage",
+                    "is_fully_completed",
+                    "status",
+                    "completed_at",
+                    "completed_on_time",
+                    "updated_at",
+                ]
+            )
+
+        return Response({"message": "Task deleted successfully."}, status=http_status.HTTP_200_OK)
+
+
+class RoutineTaskRemoveAPIView(APIView):
+    """
+    POST /routines/tasks/<task_id>/remove/
+    Soft-remove generated routine tasks from active views.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, task_id):
+        task_item = get_object_or_404(
+            DailyTaskItem.objects.select_related("task_list"),
+            id=task_id,
+            task_list__user=request.user,
+        )
+        if not task_item.is_generated_routine_item:
+            return Response(
+                {"error": "Only generated routine tasks can be removed."},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        if task_item.removed_by_user:
+            return Response(
+                {
+                    "message": "Task already removed.",
+                    "task": DailyTaskItemSerializer(task_item).data,
+                },
+                status=http_status.HTTP_200_OK,
+            )
+
+        task_item.removed_by_user = True
+        task_item.removed_at = timezone.now()
+        task_item.save(update_fields=["removed_by_user", "removed_at", "updated_at"])
+        task_item.task_list.update_progress()
+
+        return Response(
+            {
+                "message": "Task removed successfully.",
+                "task": DailyTaskItemSerializer(task_item).data,
+            },
+            status=http_status.HTTP_200_OK,
+        )
+
+
+class RoutineTaskRestoreAPIView(APIView):
+    """
+    POST /routines/tasks/<task_id>/restore/
+    Restore previously soft-removed generated routine tasks.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, task_id):
+        task_item = get_object_or_404(
+            DailyTaskItem.objects.select_related("task_list"),
+            id=task_id,
+            task_list__user=request.user,
+        )
+        if not task_item.is_generated_routine_item:
+            return Response(
+                {"error": "Only generated routine tasks can be restored."},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        if not task_item.removed_by_user:
+            return Response(
+                {
+                    "message": "Task is already active.",
+                    "task": DailyTaskItemSerializer(task_item).data,
+                },
+                status=http_status.HTTP_200_OK,
+            )
+
+        task_item.removed_by_user = False
+        task_item.removed_at = None
+        task_item.save(update_fields=["removed_by_user", "removed_at", "updated_at"])
+        task_item.task_list.update_progress()
+
+        return Response(
+            {
+                "message": "Task restored successfully.",
+                "task": DailyTaskItemSerializer(task_item).data,
+            },
+            status=http_status.HTTP_200_OK,
+        )
+
+
 class CompleteTaskItemAPIView(APIView):
     """
     POST /api/routines/tasks/<task_id>/complete/
@@ -160,7 +434,10 @@ class CompleteTaskItemAPIView(APIView):
             return Response(request_serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
 
         task_item = get_object_or_404(
-            DailyTaskItem, id=task_id, task_list__user=request.user
+            DailyTaskItem,
+            id=task_id,
+            task_list__user=request.user,
+            removed_by_user=False,
         )
 
         if task_item.is_completed:
@@ -207,7 +484,10 @@ class SkipTaskItemAPIView(APIView):
             return Response(request_serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
 
         task_item = get_object_or_404(
-            DailyTaskItem, id=task_id, task_list__user=request.user
+            DailyTaskItem,
+            id=task_id,
+            task_list__user=request.user,
+            removed_by_user=False,
         )
 
         # Can't skip a completed task

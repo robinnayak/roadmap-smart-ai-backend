@@ -106,6 +106,7 @@ def get_or_generate_today_brief(user) -> DailyBrief:
             yesterday_task_list.tasks.filter(
                 item_type="habit",
                 is_completed=False,
+                removed_by_user=False,
             ).values_list("title", flat=True)
         )
 

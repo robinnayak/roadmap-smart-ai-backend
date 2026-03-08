@@ -253,6 +253,264 @@ class RoutineWriteValidationTests(APITestCase):
         self.assertIn("reason", response.data)
 
 
+class RoutineTaskReorderAPITests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="routine-reorder@test.com",
+            password="Password@123",
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="routine-reorder-other@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+
+        self.task_list = DailyTaskList.objects.create(
+            user=self.user,
+            date=timezone.localdate(),
+        )
+        self.task_a = DailyTaskItem.objects.create(
+            task_list=self.task_list,
+            item_type="goal_task",
+            title="Task A",
+            priority="high",
+            estimated_minutes=30,
+            display_order=0,
+        )
+        self.task_b = DailyTaskItem.objects.create(
+            task_list=self.task_list,
+            item_type="goal_task",
+            title="Task B",
+            priority="medium",
+            estimated_minutes=20,
+            display_order=1,
+        )
+        self.task_c = DailyTaskItem.objects.create(
+            task_list=self.task_list,
+            item_type="goal_task",
+            title="Task C",
+            priority="low",
+            estimated_minutes=15,
+            display_order=2,
+        )
+        self.reorder_url = f"/routines/{self.task_list.id}/reorder/"
+
+    def test_reorder_endpoint_persists_and_returns_ordered_tasks(self):
+        ordered_ids = [self.task_c.id, self.task_a.id, self.task_b.id]
+        response = self.client.patch(
+            self.reorder_url,
+            data={"task_ids": ordered_ids},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in response.data["tasks"]],
+            [str(task_id) for task_id in ordered_ids],
+        )
+
+        db_order = list(
+            DailyTaskItem.objects.filter(task_list=self.task_list)
+            .order_by("display_order")
+            .values_list("id", flat=True)
+        )
+        self.assertEqual(db_order, ordered_ids)
+
+    def test_reorder_endpoint_rejects_invalid_membership_or_duplicates(self):
+        missing_one_response = self.client.patch(
+            self.reorder_url,
+            data={"task_ids": [self.task_a.id, self.task_b.id]},
+            format="json",
+        )
+        self.assertEqual(missing_one_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("task_ids must include each routine task id exactly once", missing_one_response.data["error"])
+
+        duplicate_response = self.client.patch(
+            self.reorder_url,
+            data={"task_ids": [self.task_a.id, self.task_b.id, self.task_b.id]},
+            format="json",
+        )
+        self.assertEqual(duplicate_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("duplicate", duplicate_response.data["error"])
+
+    def test_reorder_endpoint_forbids_non_owner(self):
+        self.client.force_authenticate(self.other_user)
+        response = self.client.patch(
+            self.reorder_url,
+            data={"task_ids": [self.task_a.id, self.task_b.id, self.task_c.id]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class RoutineTaskSoftRemoveAPITests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="routine-remove@test.com",
+            password="Password@123",
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="routine-remove-other@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.task_list = DailyTaskList.objects.create(user=self.user, date=timezone.localdate())
+        self.habit = HabitTracker.objects.create(
+            user=self.user,
+            name="Hydration",
+            frequency="daily",
+            estimated_minutes=5,
+            priority="low",
+        )
+        self.generated_task = DailyTaskItem.objects.create(
+            task_list=self.task_list,
+            item_type="habit",
+            habit=self.habit,
+            title="Drink water",
+            priority="low",
+            estimated_minutes=5,
+            display_order=0,
+        )
+        self.manual_task = DailyTaskItem.objects.create(
+            task_list=self.task_list,
+            item_type="goal_task",
+            title="Manual routine note",
+            priority="medium",
+            estimated_minutes=20,
+            display_order=1,
+        )
+        self.task_list.update_progress()
+
+    def test_remove_generated_task_success_and_today_list_excludes_removed(self):
+        remove_response = self.client.post(
+            f"/routines/tasks/{self.generated_task.id}/remove/",
+            data={},
+            format="json",
+        )
+        self.assertEqual(remove_response.status_code, status.HTTP_200_OK)
+        self.generated_task.refresh_from_db()
+        self.assertTrue(self.generated_task.removed_by_user)
+        self.assertIsNotNone(self.generated_task.removed_at)
+
+        today_response = self.client.get("/routines/today/?detailed=true")
+        self.assertEqual(today_response.status_code, status.HTTP_200_OK)
+        returned_ids = [task["id"] for task in today_response.data["task_list"]["tasks"]]
+        self.assertNotIn(str(self.generated_task.id), returned_ids)
+        self.assertIn(str(self.manual_task.id), returned_ids)
+
+    def test_restore_removed_generated_task_success(self):
+        self.client.post(f"/routines/tasks/{self.generated_task.id}/remove/", data={}, format="json")
+        restore_response = self.client.post(
+            f"/routines/tasks/{self.generated_task.id}/restore/",
+            data={},
+            format="json",
+        )
+        self.assertEqual(restore_response.status_code, status.HTTP_200_OK)
+        self.generated_task.refresh_from_db()
+        self.assertFalse(self.generated_task.removed_by_user)
+        self.assertIsNone(self.generated_task.removed_at)
+
+    def test_remove_and_restore_forbid_non_owner(self):
+        self.client.force_authenticate(self.other_user)
+        remove_response = self.client.post(
+            f"/routines/tasks/{self.generated_task.id}/remove/",
+            data={},
+            format="json",
+        )
+        restore_response = self.client.post(
+            f"/routines/tasks/{self.generated_task.id}/restore/",
+            data={},
+            format="json",
+        )
+        self.assertEqual(remove_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(restore_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_remove_manual_task_rejected(self):
+        remove_response = self.client.post(
+            f"/routines/tasks/{self.manual_task.id}/remove/",
+            data={},
+            format="json",
+        )
+        self.assertEqual(remove_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Only generated routine tasks", remove_response.data["error"])
+
+    def test_reorder_only_requires_active_task_ids(self):
+        self.client.post(f"/routines/tasks/{self.generated_task.id}/remove/", data={}, format="json")
+        reorder_response = self.client.patch(
+            f"/routines/{self.task_list.id}/reorder/",
+            data={"task_ids": [self.manual_task.id]},
+            format="json",
+        )
+        self.assertEqual(reorder_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(reorder_response.data["tasks"]), 1)
+        self.assertEqual(reorder_response.data["tasks"][0]["id"], str(self.manual_task.id))
+
+
+class RoutineTaskInlineManagementAPITests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="routine-inline@test.com",
+            password="Password@123",
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="routine-inline-other@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.task_list = DailyTaskList.objects.create(user=self.user, date=timezone.localdate())
+        self.task_item = DailyTaskItem.objects.create(
+            task_list=self.task_list,
+            item_type="goal_task",
+            title="Existing Task",
+            priority="medium",
+            estimated_minutes=25,
+            display_order=0,
+        )
+
+    def test_create_task_under_routine(self):
+        response = self.client.post(
+            f"/routines/{self.task_list.id}/tasks/",
+            data={
+                "title": "New Routine Task",
+                "description": "Created from routine page",
+                "priority": "high",
+                "estimated_minutes": 40,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["task"]["title"], "New Routine Task")
+        self.assertEqual(response.data["task"]["display_order"], 1)
+
+    def test_patch_task_detail_updates_fields(self):
+        response = self.client.patch(
+            f"/routines/tasks/{self.task_item.id}/",
+            data={"title": "Updated Task Title", "estimated_minutes": 60},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.task_item.refresh_from_db()
+        self.assertEqual(self.task_item.title, "Updated Task Title")
+        self.assertEqual(self.task_item.estimated_minutes, 60)
+
+    def test_delete_task_detail_removes_task(self):
+        response = self.client.delete(f"/routines/tasks/{self.task_item.id}/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(DailyTaskItem.objects.filter(id=self.task_item.id).exists())
+
+    def test_inline_task_endpoints_forbid_non_owner(self):
+        self.client.force_authenticate(self.other_user)
+        patch_response = self.client.patch(
+            f"/routines/tasks/{self.task_item.id}/",
+            data={"title": "Nope"},
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        delete_response = self.client.delete(f"/routines/tasks/{self.task_item.id}/")
+        self.assertEqual(delete_response.status_code, status.HTTP_403_FORBIDDEN)
+
+
 class DailyTaskGenerationTests(APITestCase):
     def setUp(self):
         self.user = CustomUser.objects.create_user(

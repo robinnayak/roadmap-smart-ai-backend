@@ -413,6 +413,7 @@ def build_progress_overview_payload(
         task_list__user=user,
         item_type="habit",
         habit__isnull=False,
+        removed_by_user=False,
     ).select_related("habit", "task_list")
     if start_date:
         habit_items_qs = habit_items_qs.filter(
@@ -602,7 +603,7 @@ def build_progress_overview_payload(
         ).first()
     if selected_task_list:
         selected_items = (
-            DailyTaskItem.objects.filter(task_list=selected_task_list)
+            DailyTaskItem.objects.filter(task_list=selected_task_list, removed_by_user=False)
             .select_related("related_goal", "habit", "event")
             .order_by("display_order")
         )

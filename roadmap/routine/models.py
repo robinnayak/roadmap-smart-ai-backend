@@ -200,7 +200,7 @@ class DailyTaskList(models.Model):
         FIX: Uses update_fields=[...] instead of a full save() to avoid
              overwriting concurrent writes and to reduce DB write load.
         """
-        tasks = self.tasks.all()
+        tasks = self.tasks.filter(removed_by_user=False)
 
         if not tasks.exists():
             return
@@ -308,6 +308,8 @@ class DailyTaskItem(models.Model):
     is_skipped       = models.BooleanField(default=False)
     skip_reason      = models.TextField(blank=True)
     completion_notes = models.TextField(blank=True)
+    removed_by_user = models.BooleanField(default=False)
+    removed_at = models.DateTimeField(null=True, blank=True)
 
     related_goal = models.ForeignKey(
         'goal.Goal',
@@ -336,6 +338,15 @@ class DailyTaskItem(models.Model):
     def __str__(self):
         marker = '✅' if self.is_completed else '⏳'
         return f"{self.task_list.user.email}{marker} {self.title}"
+
+    @property
+    def is_generated_routine_item(self) -> bool:
+        return bool(
+            self.goal_task_id
+            or self.habit_id
+            or self.event_id
+            or self.item_type == "journal"
+        )
 
     def mark_completed(self, notes: str = "", actual_minutes: int | None = None):
         """

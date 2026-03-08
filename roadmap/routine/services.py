@@ -815,6 +815,7 @@ def build_weekly_friction_audit(user, target_date: date, lookback_days: int = 7)
         task_list__user=user,
         task_list__date__range=(window_start, window_end),
         is_skipped=True,
+        removed_by_user=False,
     ).values_list("skip_reason", flat=True)
 
     reason_counts = {

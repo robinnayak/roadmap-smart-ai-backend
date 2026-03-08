@@ -10,6 +10,11 @@ from django.urls import path
 from .views import (
     GenerateDailyTaskListAPIView,
     RoutineDetailAPIView,
+    RoutineTaskReorderAPIView,
+    RoutineTaskListCreateAPIView,
+    RoutineTaskDetailAPIView,
+    RoutineTaskRemoveAPIView,
+    RoutineTaskRestoreAPIView,
     TodayTaskListAPIView,
     CompleteTaskItemAPIView,
     SkipTaskItemAPIView,
@@ -36,6 +41,8 @@ urlpatterns = [
 
     # Delete a specific routine list
     path('<uuid:routine_id>/', RoutineDetailAPIView.as_view(), name='routine-detail'),
+    path('<uuid:routine_id>/reorder/', RoutineTaskReorderAPIView.as_view(), name='routine-task-reorder'),
+    path('<uuid:routine_id>/tasks/', RoutineTaskListCreateAPIView.as_view(), name='routine-task-create'),
     
     # Get today's task list (auto-generates if missing)
     path('today/', TodayTaskListAPIView.as_view(), name='today-task-list'),
@@ -45,6 +52,9 @@ urlpatterns = [
     
     # Skip task
     path('tasks/<uuid:task_id>/skip/', SkipTaskItemAPIView.as_view(), name='skip-task'),
+    path('tasks/<uuid:task_id>/', RoutineTaskDetailAPIView.as_view(), name='routine-task-detail'),
+    path('tasks/<uuid:task_id>/remove/', RoutineTaskRemoveAPIView.as_view(), name='routine-task-remove'),
+    path('tasks/<uuid:task_id>/restore/', RoutineTaskRestoreAPIView.as_view(), name='routine-task-restore'),
     
     # Week overview
     path('week/', WeekOverviewAPIView.as_view(), name='week-overview'),
