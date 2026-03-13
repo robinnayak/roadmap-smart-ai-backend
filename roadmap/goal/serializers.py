@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 from django.core.exceptions import ImproperlyConfigured
 from django.utils import timezone
 from rest_framework import serializers
@@ -11,6 +12,14 @@ from .models import (
     Milestone,
     SubGoal,
     Task,
+    UserFinancialProfile,
+    GoalLink,
+    FinancialProgressEntry,
+)
+from .services.create_contract import (
+    list_missing_required_goal_fields,
+    normalize_why_it_matters,
+    required_goal_fields_error_details,
 )
 
 logger = logging.getLogger(__name__)
@@ -407,6 +416,11 @@ class GoalSerializer(serializers.ModelSerializer):
         allow_blank=True,
         help_text="Optional explicit measurable target for the goal.",
     )
+    financial_proceed_anyway = serializers.BooleanField(
+        write_only=True,
+        required=False,
+        default=False,
+    )
 
     class Meta:
         model = Goal
@@ -434,6 +448,15 @@ class GoalSerializer(serializers.ModelSerializer):
             "commitment_note",
             "why_do_i_want_this",
             "specific_measurable_target",
+            "financial_target_amount",
+            "financial_current_saved",
+            "financial_goal_type",
+            "financial_timeline_flexibility",
+            "financial_feasibility_status",
+            "financial_required_monthly_savings",
+            "financial_months_remaining",
+            "financial_gap_amount",
+            "financial_proceed_anyway",
             "created_at",
             "updated_at",
         ]
@@ -460,6 +483,10 @@ class GoalSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Target date cannot be in the past.")
         return value
 
+    def validate_why_it_matters(self, value):
+        normalized = normalize_why_it_matters(value)
+        return normalized
+
     def validate(self, attrs):
         start = attrs.get("start_date") or (self.instance.start_date if self.instance else None)
         target = attrs.get("target_date") or (self.instance.target_date if self.instance else None)
@@ -468,10 +495,55 @@ class GoalSerializer(serializers.ModelSerializer):
                 {"target_date": "Target date must be after start date."}
             )
 
-        if self.instance is None and not attrs.get("commitment_confirmed", False):
-            raise serializers.ValidationError(
-                {"commitment_confirmed": "You must accept the goal commitment before creating a goal."}
+        if self.instance is None:
+            missing_fields = list_missing_required_goal_fields(attrs)
+            if missing_fields:
+                raise serializers.ValidationError(
+                    required_goal_fields_error_details(missing_fields)
+                )
+
+        primary_category = attrs.get("primary_category") or (
+            self.instance.primary_category if self.instance else None
+        )
+        if primary_category == "financial":
+            request = self.context.get("request")
+            if self.instance is None and request is not None:
+                if not UserFinancialProfile.objects.filter(user=request.user).exists():
+                    raise serializers.ValidationError(
+                        {"financial_profile": "Complete your financial profile before creating a financial goal."}
+                    )
+
+            target_amount = attrs.get("financial_target_amount", getattr(self.instance, "financial_target_amount", None))
+            current_saved = attrs.get("financial_current_saved", getattr(self.instance, "financial_current_saved", None))
+            timeline = attrs.get(
+                "financial_timeline_flexibility",
+                getattr(self.instance, "financial_timeline_flexibility", None),
             )
+            goal_type = attrs.get("financial_goal_type", getattr(self.instance, "financial_goal_type", None))
+            target_date = attrs.get("target_date") or (self.instance.target_date if self.instance else None)
+
+            missing_fields = {}
+            if target_amount is None:
+                missing_fields["financial_target_amount"] = "This field is required for financial goals."
+            if current_saved is None:
+                missing_fields["financial_current_saved"] = "This field is required for financial goals."
+            if timeline in (None, ""):
+                missing_fields["financial_timeline_flexibility"] = "This field is required for financial goals."
+            if goal_type in (None, ""):
+                missing_fields["financial_goal_type"] = "This field is required for financial goals."
+            if not target_date:
+                missing_fields["target_date"] = "Target date is required for financial goals."
+            if missing_fields:
+                raise serializers.ValidationError(missing_fields)
+
+            if target_amount is not None and target_amount <= 0:
+                raise serializers.ValidationError({"financial_target_amount": "Target amount must be greater than 0."})
+            if current_saved is not None and current_saved < 0:
+                raise serializers.ValidationError({"financial_current_saved": "Current saved amount cannot be negative."})
+            if target_amount is not None and current_saved is not None and current_saved > target_amount:
+                raise serializers.ValidationError(
+                    {"financial_current_saved": "Current saved cannot exceed target amount."}
+                )
         return attrs
 
     # --- Attribute extraction helper ---
@@ -535,6 +607,7 @@ class GoalSerializer(serializers.ModelSerializer):
         specific_measurable_target = validated_data.pop(
             "specific_measurable_target", ""
         ).strip()
+        validated_data.pop("financial_proceed_anyway", None)
 
         if why_do_i_want_this or specific_measurable_target:
             impact_dimensions = dict(validated_data.get("impact_dimensions") or {})
@@ -559,6 +632,7 @@ class GoalSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         # Attribute extraction only happens at create time
         validated_data.pop("goal_attributes_input", None)
+        validated_data.pop("financial_proceed_anyway", None)
         why_do_i_want_this = validated_data.pop("why_do_i_want_this", "").strip()
         specific_measurable_target = validated_data.pop(
             "specific_measurable_target", ""
@@ -596,6 +670,7 @@ class GoalListSerializer(serializers.ModelSerializer):
     is_overdue = serializers.ReadOnlyField()
     milestone_count = serializers.SerializerMethodField()
     completed_milestones = serializers.SerializerMethodField()
+    needs_profile_review = serializers.SerializerMethodField()
 
     class Meta:
         model = Goal
@@ -613,6 +688,7 @@ class GoalListSerializer(serializers.ModelSerializer):
             "is_ai_generated",
             "milestone_count",
             "completed_milestones",
+            "needs_profile_review",
         ]
 
     def get_milestone_count(self, obj) -> int:
@@ -620,6 +696,10 @@ class GoalListSerializer(serializers.ModelSerializer):
 
     def get_completed_milestones(self, obj) -> int:
         return obj.milestones.filter(status="completed").count()
+
+    def get_needs_profile_review(self, obj) -> bool:
+        profile = UserFinancialProfile.objects.filter(user=obj.user).first()
+        return bool(profile and profile.needs_review)
 
 
 class GoalDetailSerializer(serializers.ModelSerializer):
@@ -729,3 +809,129 @@ class CommitmentContractSignSerializer(serializers.Serializer):
     identity_statement = serializers.CharField(max_length=2000)
     signature_name = serializers.CharField(max_length=255)
     cc_email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
+
+
+class UserFinancialProfileSerializer(serializers.ModelSerializer):
+    situation_changed = serializers.BooleanField(
+        write_only=True,
+        required=False,
+        default=False,
+    )
+
+    class Meta:
+        model = UserFinancialProfile
+        fields = [
+            "id",
+            "employment_type",
+            "monthly_income_range",
+            "monthly_surplus_range",
+            "primary_skill_area",
+            "total_current_savings_range",
+            "needs_review",
+            "review_reason",
+            "last_updated",
+            "created_at",
+            "updated_at",
+            "situation_changed",
+        ]
+        read_only_fields = [
+            "id",
+            "needs_review",
+            "review_reason",
+            "last_updated",
+            "created_at",
+            "updated_at",
+        ]
+
+    def create(self, validated_data):
+        validated_data.pop("situation_changed", None)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data.pop("situation_changed", None)
+        return super().update(instance, validated_data)
+
+
+class FinancialFeasibilitySerializer(serializers.Serializer):
+    target_amount = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        min_value=Decimal("0.01"),
+    )
+    current_saved = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        min_value=Decimal("0"),
+    )
+    target_date = serializers.DateField()
+    timeline_flexibility = serializers.ChoiceField(
+        choices=["fixed", "somewhat_flexible", "very_flexible"]
+    )
+
+    def validate(self, attrs):
+        if attrs["current_saved"] > attrs["target_amount"]:
+            raise serializers.ValidationError({"current_saved": "Cannot exceed target_amount."})
+        return attrs
+
+
+class GoalLinkSerializer(serializers.ModelSerializer):
+    contributing_goal_title = serializers.CharField(source="contributing_goal.title", read_only=True)
+    contributing_goal_status = serializers.CharField(source="contributing_goal.status", read_only=True)
+    contributing_goal_category = serializers.CharField(source="contributing_goal.primary_category", read_only=True)
+
+    class Meta:
+        model = GoalLink
+        fields = [
+            "id",
+            "source_goal",
+            "contributing_goal",
+            "contributing_goal_title",
+            "contributing_goal_status",
+            "contributing_goal_category",
+            "link_type",
+            "created_at",
+        ]
+        read_only_fields = ["id", "created_at", "source_goal"]
+
+    def validate(self, attrs):
+        source_goal = self.context["source_goal"]
+        contributing_goal = attrs["contributing_goal"]
+        if source_goal.primary_category != "financial":
+            raise serializers.ValidationError("Source goal must be financial.")
+        if contributing_goal.primary_category not in {"career", "personal"}:
+            raise serializers.ValidationError("Contributing goal must be career or personal.")
+        if contributing_goal.user_id != source_goal.user_id:
+            raise serializers.ValidationError("Contributing goal must belong to the same user.")
+        return attrs
+
+
+class FinancialProgressEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FinancialProgressEntry
+        fields = [
+            "id",
+            "goal",
+            "user",
+            "month",
+            "planned_savings",
+            "actual_savings",
+            "running_total_saved",
+            "notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "goal", "user", "running_total_saved", "created_at", "updated_at"]
+
+    def validate_month(self, value):
+        if value.day != 1:
+            raise serializers.ValidationError("Month must be the first day of the month (YYYY-MM-01).")
+        return value
+
+    def validate(self, attrs):
+        planned = attrs.get("planned_savings")
+        actual = attrs.get("actual_savings")
+        if planned is not None and planned < 0:
+            raise serializers.ValidationError({"planned_savings": "Cannot be negative."})
+        if actual is not None and actual < 0:
+            raise serializers.ValidationError({"actual_savings": "Cannot be negative."})
+        return attrs

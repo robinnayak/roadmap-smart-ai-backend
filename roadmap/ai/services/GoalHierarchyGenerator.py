@@ -231,7 +231,7 @@ class GoalHierarchyGenerator(BaseAIService):
                 task_results_by_index: dict[int, dict] = {}
                 with ThreadPoolExecutor(max_workers=min(self.max_task_workers, max(1, len(subgoals_list)))) as executor:
                     future_map = {
-                        executor.submit(self._generate_tasks, subgoal_dict, milestone_dict): sg_idx
+                        executor.submit(self._generate_tasks, subgoal_dict, milestone_dict, goal_data): sg_idx
                         for sg_idx, subgoal_dict in enumerate(subgoals_list, 1)
                     }
                     for future in as_completed(future_map):
@@ -428,14 +428,14 @@ class GoalHierarchyGenerator(BaseAIService):
                 error_code="SUBGOAL_GENERATION_FAILED",
             )
 
-    def _generate_tasks(self, subgoal_data: dict, milestone_data: dict) -> dict:
+    def _generate_tasks(self, subgoal_data: dict, milestone_data: dict, goal_data: dict) -> dict:
         """
         Generate daily tasks for one subgoal.
         milestone_data is passed so the AI knows the broader monthly theme.
         """
         try:
             response = self.provider.generate_response(
-                prompt=self.prompts.get_task_generating_prompt(subgoal_data, milestone_data),
+                prompt=self.prompts.get_task_generating_prompt(subgoal_data, milestone_data, goal_data),
                 system_prompt=(
                     "You are a daily task planner. "
                     "Create exactly 7 specific, actionable tasks (one per day of the week). "

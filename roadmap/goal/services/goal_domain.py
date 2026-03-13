@@ -1,12 +1,14 @@
 from django.utils import timezone
 from django.db.models import Sum
 
-from goal.models import Goal, SubGoal, Task
+from goal.models import Goal, SubGoal, Task, UserFinancialProfile
 from goal.serializers import GoalListSerializer, GoalSerializer
+from goal.services.create_contract import normalize_goal_create_payload
+from goal.services.financial_intelligence import calculate_feasibility
 
 
 def sanitize_goal_payload(request_data):
-    data = request_data.copy()
+    data = normalize_goal_create_payload(request_data.copy())
     if "start_date" not in data:
         data["start_date"] = timezone.localdate()
     data.pop("categories", None)
@@ -14,12 +16,103 @@ def sanitize_goal_payload(request_data):
     return data
 
 
+def _build_infeasible_payload(*, feasibility, needs_profile_review: bool):
+    return {
+        "financial_feasibility": {
+            "status": "infeasible",
+            "message": feasibility.message,
+            "suggested_target_date": (
+                feasibility.suggested_target_date.isoformat()
+                if feasibility.suggested_target_date
+                else None
+            ),
+            "achievable_amount_by_original_date": str(
+                feasibility.achievable_amount_by_original_date
+            ),
+        },
+        "needs_profile_review": needs_profile_review,
+    }
+
+
+def evaluate_financial_goal_feasibility(*, user, validated_data, instance=None):
+    primary_category = validated_data.get("primary_category") or (
+        instance.primary_category if instance else None
+    )
+    if primary_category != "financial":
+        return {}, None
+
+    profile = UserFinancialProfile.objects.filter(user=user).first()
+    if not profile:
+        return {}, {
+            "error": "validation_error",
+            "details": {
+                "financial_profile": [
+                    "Complete your financial profile before creating a financial goal."
+                ]
+            },
+        }
+
+    target_amount = validated_data.get(
+        "financial_target_amount",
+        getattr(instance, "financial_target_amount", None),
+    )
+    current_saved = validated_data.get(
+        "financial_current_saved",
+        getattr(instance, "financial_current_saved", None),
+    )
+    target_date = validated_data.get("target_date") or (
+        instance.target_date if instance else None
+    )
+    proceed_anyway = bool(validated_data.get("financial_proceed_anyway", False))
+
+    if (
+        target_amount is None
+        or current_saved is None
+        or target_date is None
+    ):
+        return {}, None
+
+    feasibility = calculate_feasibility(
+        target_amount=target_amount,
+        current_saved=current_saved,
+        target_date=target_date,
+        surplus_range=profile.monthly_surplus_range,
+        today=timezone.localdate(),
+    )
+    metadata = {
+        "financial_feasibility_status": feasibility.feasibility_status,
+        "financial_gap_amount": feasibility.gap_amount,
+        "financial_months_remaining": feasibility.months_remaining,
+        "financial_required_monthly_savings": feasibility.required_monthly_savings,
+    }
+
+    if feasibility.feasibility_status == "infeasible" and not proceed_anyway:
+        return {}, _build_infeasible_payload(
+            feasibility=feasibility,
+            needs_profile_review=bool(profile.needs_review),
+        )
+
+    return metadata, None
+
+
 def create_goal_for_user(*, request_data, user, request):
     data = sanitize_goal_payload(request_data)
     serializer = GoalSerializer(data=data, context={"request": request})
     if not serializer.is_valid():
         return None, serializer.errors
+
+    feasibility_metadata, feasibility_error = evaluate_financial_goal_feasibility(
+        user=user,
+        validated_data=serializer.validated_data,
+        instance=None,
+    )
+    if feasibility_error:
+        return None, feasibility_error
+
+    if feasibility_metadata:
+        serializer.validated_data.update(feasibility_metadata)
     goal = serializer.save(user=user)
+
     return goal, None
 
 
@@ -31,11 +124,15 @@ def get_user_goals_payload(*, user, detailed: bool):
 
 
 def build_goal_seed_data(goal):
+    impact_dimensions = goal.impact_dimensions or {}
     return {
         "id": str(goal.id),
         "title": goal.title,
         "description": goal.description,
+        "priority": goal.priority,
         "why_it_matters": goal.why_it_matters,
+        "why_do_i_want_this": impact_dimensions.get("why_do_i_want_this", ""),
+        "specific_measurable_target": impact_dimensions.get("specific_measurable_target", ""),
         "primary_category": goal.primary_category,
         "impact_dimensions": goal.impact_dimensions,
         "start_date": goal.start_date,

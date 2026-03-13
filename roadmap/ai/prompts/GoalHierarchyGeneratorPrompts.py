@@ -3,9 +3,19 @@ from ai.prompts.base_prompts import BasePrompt
 class GoalHierarchyGeneratorPrompts(BasePrompt):
 
     def get_subgoal_generating_prompt(self, milestone_data, goal_data):
+        reasons = goal_data.get("why_it_matters", [])
+        if isinstance(reasons, list):
+            reasons_text = "; ".join([str(item).strip() for item in reasons if str(item).strip()])
+        else:
+            reasons_text = str(reasons or "").strip()
         prompt = f"""
 Goal: {goal_data.get('title', 'Unknown')}
 Goal Description: {goal_data.get('description', '')}
+Goal Category: {goal_data.get('primary_category', '')}
+Goal Priority: {goal_data.get('priority', '')}
+Goal Motivation (why_do_i_want_this): {goal_data.get('why_do_i_want_this', '')}
+Goal Measurable Target: {goal_data.get('specific_measurable_target', '')}
+Goal Reasons (why_it_matters): {reasons_text}
 Goal Target Date: {goal_data.get('target_date', '')}
 Milestone: {milestone_data.get('title', 'Unknown')}
 Description: {milestone_data.get('description', '')}
@@ -23,6 +33,7 @@ Each weekly subgoal should:
 3. Be achievable in 5-7 days
 4. Include clear success criteria
 5. Use concrete outcomes, not vague phrases
+6. Explicitly connect to the measurable target and stated motivation
 
 Quality requirements:
 - Specific and actionable: each subgoal must describe exactly what will be done.
@@ -58,12 +69,21 @@ IMPORTANT: Return JSON in this EXACT format:
 """
         return prompt
 
-    def get_task_generating_prompt(self, subgoal_data, milestone_data):
+    def get_task_generating_prompt(self, subgoal_data, milestone_data, goal_data):
+        reasons = goal_data.get("why_it_matters", [])
+        if isinstance(reasons, list):
+            reasons_text = "; ".join([str(item).strip() for item in reasons if str(item).strip()])
+        else:
+            reasons_text = str(reasons or "").strip()
         prompt = f"""
 Weekly Subgoal: {subgoal_data.get('title', 'Unknown')}
 Description: {subgoal_data.get('description', '')}
 Learning Objectives: {subgoal_data.get('learning_objectives', [])}
 Milestone: {milestone_data.get('title', 'Unknown')}
+Goal Motivation (why_do_i_want_this): {goal_data.get('why_do_i_want_this', '')}
+Goal Measurable Target: {goal_data.get('specific_measurable_target', '')}
+Goal Reasons (why_it_matters): {reasons_text}
+Goal Category/Priority: {goal_data.get('primary_category', '')}/{goal_data.get('priority', '')}
 
 Create 7 daily tasks (Monday-Sunday) for this weekly subgoal:
 
@@ -83,6 +103,7 @@ Each daily task should:
 6. Include preferred time slot: morning/afternoon/evening
 7. Be realistically completable in a single day
 8. Maintain progressive difficulty through the week
+9. Include at least one task explicitly reinforcing motivation and long-term relevance
 
 Quality requirements:
 - Avoid vague tasks like "work on it" or "learn more".

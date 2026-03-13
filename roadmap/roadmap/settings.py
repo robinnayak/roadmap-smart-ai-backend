@@ -78,6 +78,7 @@ INSTALLED_APPS = [
     'journal.apps.JournalConfig',
     'community.apps.CommunityConfig',
     'events',
+    'gie.apps.GieConfig',
 ]
 
 MIDDLEWARE = [
@@ -232,6 +233,10 @@ SIMPLE_JWT = {
 MAX_ACTIVE_DEVICE_SESSIONS = max(
     1, config("MAX_ACTIVE_DEVICE_SESSIONS", default=4, cast=int)
 )
+
+# GIE rollout controls
+GIE_ROLLOUT_ENABLED = bool_env("GIE_ROLLOUT_ENABLED", default=True)
+GIE_DEGRADED_MODE = bool_env("GIE_DEGRADED_MODE", default=False)
 
 # =============================================================================
 # LOGGING (console only for simplicity in dev)

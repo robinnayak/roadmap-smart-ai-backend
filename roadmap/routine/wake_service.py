@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, time
 from statistics import median
 from zoneinfo import ZoneInfo
 
+from django.db import OperationalError
 from django.utils import timezone
 
 from authentication.models import Profile
@@ -15,6 +17,7 @@ MIN_VALID_SAMPLES = 4
 OUTLIER_THRESHOLD_MINUTES = 180
 BASELINE_DEVIATION_THRESHOLD_MINUTES = 45
 BASELINE_DEVIATION_TRIGGER_DAYS = 5
+logger = logging.getLogger(__name__)
 
 
 def _safe_zoneinfo(timezone_name: str | None) -> ZoneInfo:
@@ -208,38 +211,49 @@ def sync_wake_baseline_for_user(user) -> dict:
 
 
 def record_first_interaction_for_request(*, user, request_path: str, request_method: str, header_timezone: str | None = None):
-    now = timezone.now()
-    timezone_name = resolve_user_timezone(user=user, header_timezone=header_timezone)
-    zone = _safe_zoneinfo(timezone_name)
-    local_date = now.astimezone(zone).date()
+    try:
+        now = timezone.now()
+        timezone_name = resolve_user_timezone(user=user, header_timezone=header_timezone)
+        zone = _safe_zoneinfo(timezone_name)
+        local_date = now.astimezone(zone).date()
 
-    interaction, created = WakeInteraction.objects.get_or_create(
-        user=user,
-        local_date=local_date,
-        defaults={
-            "first_interaction_at": now,
-            "timezone_name": timezone_name,
-            "source_path": (request_path or "")[:255],
-            "source_method": (request_method or "")[:10].upper(),
-        },
-    )
-
-    if not created and now < interaction.first_interaction_at:
-        interaction.first_interaction_at = now
-        interaction.timezone_name = timezone_name
-        interaction.source_path = (request_path or "")[:255]
-        interaction.source_method = (request_method or "")[:10].upper()
-        interaction.save(
-            update_fields=[
-                "first_interaction_at",
-                "timezone_name",
-                "source_path",
-                "source_method",
-                "updated_at",
-            ]
+        interaction, created = WakeInteraction.objects.get_or_create(
+            user=user,
+            local_date=local_date,
+            defaults={
+                "first_interaction_at": now,
+                "timezone_name": timezone_name,
+                "source_path": (request_path or "")[:255],
+                "source_method": (request_method or "")[:10].upper(),
+            },
         )
 
-    return sync_wake_baseline_for_user(user=user)
+        if not created and now < interaction.first_interaction_at:
+            interaction.first_interaction_at = now
+            interaction.timezone_name = timezone_name
+            interaction.source_path = (request_path or "")[:255]
+            interaction.source_method = (request_method or "")[:10].upper()
+            interaction.save(
+                update_fields=[
+                    "first_interaction_at",
+                    "timezone_name",
+                    "source_path",
+                    "source_method",
+                    "updated_at",
+                ]
+            )
+
+        return sync_wake_baseline_for_user(user=user)
+    except OperationalError as error:
+        if "database is locked" in str(error).lower():
+            logger.warning(
+                "Skipping wake tracking due to sqlite lock (user=%s path=%s method=%s)",
+                getattr(user, "id", "unknown"),
+                (request_path or "")[:120],
+                (request_method or "").upper(),
+            )
+            return _build_baseline_metadata(None, fallback_reason="db_locked")
+        raise
 
 
 def get_wake_baseline_metadata(user) -> dict:

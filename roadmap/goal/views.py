@@ -28,7 +28,18 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
-from .models import UserCurrentSituationGoal, Goal, Milestone, SubGoal, Task, GoalAttributes, CommitmentContract
+from .models import (
+    UserCurrentSituationGoal,
+    Goal,
+    Milestone,
+    SubGoal,
+    Task,
+    GoalAttributes,
+    CommitmentContract,
+    UserFinancialProfile,
+    GoalLink,
+    FinancialProgressEntry,
+)
 from .serializers import (
     GoalSerializer,
     GoalListSerializer,
@@ -37,6 +48,10 @@ from .serializers import (
     TaskSerializer,
     CommitmentContractSerializer,
     CommitmentContractSignSerializer,
+    UserFinancialProfileSerializer,
+    FinancialFeasibilitySerializer,
+    GoalLinkSerializer,
+    FinancialProgressEntrySerializer,
 )
 from django.utils import timezone
 from ai.models import AIProcessingJob
@@ -52,11 +67,12 @@ import threading
 import json
 from authentication.models import UserPersonalDetails
 from django.db.models import Prefetch, Count, Avg, Q, Sum
-from django.db import close_old_connections
+from django.db import close_old_connections, IntegrityError
 from django.db import transaction
 from django.http import Http404
 from rest_framework.throttling import UserRateThrottle
 import logging
+from decimal import Decimal, ROUND_CEILING
 
 from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
 from rest_framework.exceptions import NotFound, ValidationError
@@ -72,8 +88,17 @@ from goal.services.goal_domain import (
     build_goal_hierarchy_payload,
     build_goal_seed_data,
     create_goal_for_user,
+    evaluate_financial_goal_feasibility,
     get_goal_with_hierarchy_for_user,
     get_user_goals_payload,
+)
+from goal.services.financial_intelligence import (
+    calculate_feasibility,
+    evaluate_profile_review_for_goal,
+    evaluate_profile_review_for_user,
+    mark_profile_review_needed,
+    build_profile_plan_hint,
+    build_financial_plan_summary,
 )
 
 
@@ -84,6 +109,14 @@ logger = logging.getLogger(__name__)
 
 # Priority sort order used in Python (CharField can't sort high>medium>low in DB)
 PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def _get_profile_review_state(user):
+    profile = UserFinancialProfile.objects.filter(user=user).first()
+    return {
+        "needs_profile_review": bool(profile and profile.needs_review),
+        "review_reason": profile.review_reason if profile else "",
+    }
 
 
 
@@ -234,6 +267,372 @@ class UserCurrentSituationGoalAPIView(GoalProductionApiView):
 
 
 # =======================
+# Financial Profile API
+# =======================
+
+
+class FinancialProfileAPIView(GoalProductionApiView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        profile = UserFinancialProfile.objects.filter(user=request.user).first()
+        if not profile:
+            return Response(
+                {
+                    "exists": False,
+                    "profile": None,
+                    "needs_profile_review": False,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        return Response(
+            {
+                "exists": True,
+                "profile": UserFinancialProfileSerializer(profile).data,
+                "needs_profile_review": bool(profile.needs_review),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        if UserFinancialProfile.objects.filter(user=request.user).exists():
+            return Response(
+                {
+                    "error": "validation_error",
+                    "details": {
+                        "profile": ["Financial profile already exists. Use PATCH to update."]
+                    },
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = UserFinancialProfileSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"error": "validation_error", "details": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        profile = serializer.save(user=request.user, needs_review=False, review_reason="")
+        return Response(
+            {
+                "profile": UserFinancialProfileSerializer(profile).data,
+                "needs_profile_review": bool(profile.needs_review),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    def patch(self, request):
+        profile = UserFinancialProfile.objects.filter(user=request.user).first()
+        if not profile:
+            return Response(
+                {
+                    "error": "validation_error",
+                    "details": {
+                        "profile": ["Financial profile does not exist. Create it first."]
+                    },
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = UserFinancialProfileSerializer(profile, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(
+                {"error": "validation_error", "details": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        situation_changed = bool(serializer.validated_data.pop("situation_changed", False))
+        updated_fields = list(serializer.validated_data.keys())
+        has_content_updates = bool(updated_fields)
+
+        for field, value in serializer.validated_data.items():
+            setattr(profile, field, value)
+
+        # Contract rule: profile field updates clear stale state by default.
+        if has_content_updates:
+            profile.needs_review = False
+            profile.review_reason = ""
+
+        if has_content_updates or situation_changed:
+            needs_review, review_reason = evaluate_profile_review_for_user(user=request.user)
+            if needs_review:
+                profile.needs_review = True
+                profile.review_reason = review_reason[:255]
+
+        profile.save()
+        return Response(
+            {
+                "profile": UserFinancialProfileSerializer(profile).data,
+                "needs_profile_review": bool(profile.needs_review),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class FinancialFeasibilityAPIView(GoalProductionApiView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        profile = UserFinancialProfile.objects.filter(user=request.user).first()
+        if not profile:
+            return Response(
+                {
+                    "error": "validation_error",
+                    "details": {
+                        "financial_profile": [
+                            "Complete your financial profile before running feasibility."
+                        ]
+                    },
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = FinancialFeasibilitySerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"error": "validation_error", "details": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        validated = serializer.validated_data
+        result = calculate_feasibility(
+            target_amount=validated["target_amount"],
+            current_saved=validated["current_saved"],
+            target_date=validated["target_date"],
+            surplus_range=profile.monthly_surplus_range,
+            today=timezone.localdate(),
+        )
+
+        return Response(
+            {
+                "feasibility_status": result.feasibility_status,
+                "gap_amount": float(result.gap_amount),
+                "months_remaining": result.months_remaining,
+                "required_monthly_savings": float(result.required_monthly_savings),
+                "available_monthly_surplus": float(result.available_monthly_surplus),
+                "message": result.message,
+                "adjustments": {
+                    "suggested_target_date": (
+                        result.suggested_target_date.isoformat()
+                        if result.suggested_target_date
+                        else None
+                    ),
+                    "achievable_amount_by_original_date": float(
+                        result.achievable_amount_by_original_date
+                    ),
+                },
+                "needs_profile_review": bool(profile.needs_review),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class GoalLinkAPIView(GoalProductionApiView):
+    permission_classes = [IsAuthenticated]
+
+    def _get_owned_goal(self, user, goal_id):
+        return get_object_or_404(Goal, id=goal_id, user=user)
+
+    def get(self, request, goal_id):
+        goal = self._get_owned_goal(request.user, goal_id)
+        direction = request.query_params.get("direction", "source")
+
+        if direction == "contributing":
+            links = GoalLink.objects.filter(contributing_goal=goal).select_related(
+                "source_goal",
+                "contributing_goal",
+            )
+            root_payload = {
+                "source_goal_id": None,
+                "contributing_goal_id": str(goal.id),
+            }
+        else:
+            links = GoalLink.objects.filter(source_goal=goal).select_related(
+                "source_goal",
+                "contributing_goal",
+            )
+            root_payload = {
+                "source_goal_id": str(goal.id),
+                "contributing_goal_id": None,
+            }
+
+        profile_review_state = _get_profile_review_state(request.user)
+        return Response(
+            {
+                **root_payload,
+                "links": GoalLinkSerializer(links, many=True).data,
+                "needs_profile_review": profile_review_state["needs_profile_review"],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request, goal_id):
+        source_goal = self._get_owned_goal(request.user, goal_id)
+        serializer = GoalLinkSerializer(
+            data=request.data,
+            context={"source_goal": source_goal},
+        )
+        if not serializer.is_valid():
+            return Response(
+                {"error": "validation_error", "details": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            link = serializer.save(source_goal=source_goal)
+        except IntegrityError:
+            return Response(
+                {
+                    "error": "validation_error",
+                    "details": {"link": ["This goal link already exists."]},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(GoalLinkSerializer(link).data, status=status.HTTP_201_CREATED)
+
+
+class GoalLinkDetailAPIView(GoalProductionApiView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, goal_id, link_id):
+        source_goal = get_object_or_404(Goal, id=goal_id, user=request.user)
+        link = get_object_or_404(
+            GoalLink.objects.select_related("source_goal"),
+            id=link_id,
+            source_goal=source_goal,
+        )
+        link.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class FinancialProgressAPIView(GoalProductionApiView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _add_months(month_anchor, offset: int):
+        year_delta, month_index = divmod((month_anchor.month - 1) + offset, 12)
+        return month_anchor.replace(year=month_anchor.year + year_delta, month=month_index + 1, day=1)
+
+    def _get_goal(self, user, goal_id):
+        return get_object_or_404(Goal, id=goal_id, user=user, primary_category="financial")
+
+    def _recompute_running_totals(self, goal: Goal):
+        entries = FinancialProgressEntry.objects.filter(goal=goal).order_by("month", "created_at")
+        running_total = Decimal(goal.financial_current_saved or 0)
+        for entry in entries:
+            running_total += Decimal(entry.actual_savings or 0)
+            running_total = running_total.quantize(Decimal("0.01"))
+            if entry.running_total_saved != running_total:
+                entry.running_total_saved = running_total
+                entry.save(update_fields=["running_total_saved", "updated_at"])
+        return list(entries)
+
+    def _build_summary(self, goal: Goal, entries):
+        target_amount = Decimal(goal.financial_target_amount or 0).quantize(Decimal("0.01"))
+        running_total = (
+            Decimal(entries[-1].running_total_saved).quantize(Decimal("0.01"))
+            if entries
+            else Decimal(goal.financial_current_saved or 0).quantize(Decimal("0.01"))
+        )
+        remaining_amount = max(Decimal("0.00"), target_amount - running_total).quantize(Decimal("0.01"))
+
+        if running_total >= target_amount and target_amount > 0:
+            return {
+                "running_total_saved": float(running_total),
+                "target_amount": float(target_amount),
+                "remaining_amount": float(remaining_amount),
+                "projected_completion_date": timezone.localdate().replace(day=1).isoformat(),
+                "projection_status": "completed",
+            }
+
+        if entries:
+            months_count = Decimal(len(entries))
+            total_actual = sum((Decimal(entry.actual_savings or 0) for entry in entries), Decimal("0"))
+            monthly_rate = (total_actual / months_count).quantize(Decimal("0.01")) if months_count else Decimal("0.00")
+        else:
+            monthly_rate = Decimal(goal.financial_required_monthly_savings or 0).quantize(Decimal("0.01"))
+
+        projected_completion_date = None
+        projection_status = "behind"
+
+        if monthly_rate > 0 and remaining_amount > 0:
+            months_needed = int((remaining_amount / monthly_rate).to_integral_value(rounding=ROUND_CEILING))
+            months_needed = max(1, months_needed)
+            projected_date = self._add_months(timezone.localdate().replace(day=1), months_needed)
+            projected_completion_date = projected_date.isoformat()
+
+            if goal.target_date:
+                target_month = goal.target_date.replace(day=1)
+                if projected_date < target_month:
+                    projection_status = "ahead"
+                elif projected_date == target_month:
+                    projection_status = "on_track"
+                else:
+                    projection_status = "behind"
+
+        return {
+            "running_total_saved": float(running_total),
+            "target_amount": float(target_amount),
+            "remaining_amount": float(remaining_amount),
+            "projected_completion_date": projected_completion_date,
+            "projection_status": projection_status,
+        }
+
+    def get(self, request, goal_id):
+        goal = self._get_goal(request.user, goal_id)
+        entries = self._recompute_running_totals(goal)
+        summary = self._build_summary(goal, entries)
+        return Response(
+            {
+                "goal_id": str(goal.id),
+                "entries": FinancialProgressEntrySerializer(entries, many=True).data,
+                "summary": summary,
+                "needs_profile_review": _get_profile_review_state(request.user)["needs_profile_review"],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request, goal_id):
+        goal = self._get_goal(request.user, goal_id)
+        serializer = FinancialProgressEntrySerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"error": "validation_error", "details": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        validated = serializer.validated_data
+        entry, _ = FinancialProgressEntry.objects.update_or_create(
+            goal=goal,
+            month=validated["month"],
+            defaults={
+                "user": request.user,
+                "planned_savings": validated["planned_savings"],
+                "actual_savings": validated["actual_savings"],
+                "notes": validated.get("notes", ""),
+            },
+        )
+        if entry.user_id != request.user.id:
+            entry.user = request.user
+            entry.save(update_fields=["user", "updated_at"])
+
+        entries = self._recompute_running_totals(goal)
+        summary = self._build_summary(goal, entries)
+        return Response(
+            {
+                "goal_id": str(goal.id),
+                "entries": FinancialProgressEntrySerializer(entries, many=True).data,
+                "summary": summary,
+                "needs_profile_review": _get_profile_review_state(request.user)["needs_profile_review"],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+# =======================
 # # Create Goal API View Here GET and POST
 # =======================
 
@@ -243,6 +642,18 @@ class UserCurrentSituationGoalAPIView(GoalProductionApiView):
 
 class GoalAPIView(APIView):
     permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _validation_error_response(errors):
+        return Response(
+            {
+                "error": "validation_error",
+                "code": "validation_error",
+                "details": errors,
+                "status": status.HTTP_400_BAD_REQUEST,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     def get(self, request):
         """Return all goals for the authenticated user."""
@@ -261,10 +672,11 @@ class GoalAPIView(APIView):
                 request=request,
             )
             if errors:
-                return Response(
-                    {"message": "Validation failed", "errors": errors},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                if "financial_feasibility" in errors:
+                    return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+                if isinstance(errors, dict) and "error" in errors and "code" in errors and "status" in errors:
+                    return Response(errors, status=errors.get("status", status.HTTP_400_BAD_REQUEST))
+                return self._validation_error_response(errors)
 
             return Response(
                 {
@@ -302,6 +714,18 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
             or "Unknown hierarchy generation error"
         )
 
+    @staticmethod
+    def _validation_error_response(errors):
+        return Response(
+            {
+                "error": "validation_error",
+                "code": "validation_error",
+                "details": errors,
+                "status": status.HTTP_400_BAD_REQUEST,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     def post(self, request):
         try:
             print(f"\n{'='*80}")
@@ -315,7 +739,9 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                 request=request,
             )
             if errors:
-                return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+                if isinstance(errors, dict) and "error" in errors and "code" in errors and "status" in errors:
+                    return Response(errors, status=errors.get("status", status.HTTP_400_BAD_REQUEST))
+                return self._validation_error_response(errors)
 
             logger.info(f"Goal created: {goal.id} - {goal.title}")
             print(f"Goal created: {goal.id} - {goal.title}")
@@ -401,6 +827,7 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                 )
 
             goal_data = build_goal_seed_data(goal)
+            financial_extension = self._build_financial_extension(goal=goal, user=request.user)
             # Get user context
             user_context = self._get_user_context(request.user)
             if missing_ai_env_vars:
@@ -409,6 +836,7 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                         "message": "Goal created, but hierarchy generation is unavailable until AI runtime is configured.",
                         "goal": GoalSerializer(goal).data,
                         "error": ai_runtime_error_message,
+                        **financial_extension,
                     },
                     status=status.HTTP_201_CREATED,
                 )
@@ -434,6 +862,7 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                         "message": "Goal created, but hierarchy generation failed.",
                         "goal": GoalSerializer(goal).data,
                         "error": hierarchy_error,
+                        **financial_extension,
                     },
                     status=status.HTTP_201_CREATED,
                 )
@@ -469,6 +898,7 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                     "tasks_saved": saved_counts["tasks"],
                         "total_items": sum(saved_counts.values()),
                     },
+                    **financial_extension,
                 },
                 status=status.HTTP_201_CREATED,
             )
@@ -542,6 +972,16 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                 logger.exception("Could not mark async job as failed: %s", job_id)
         finally:
             close_old_connections()
+
+    def _build_financial_extension(self, *, goal: Goal, user) -> dict:
+        summary = build_financial_plan_summary(goal=goal, user=user)
+        if not summary:
+            return {}
+        profile_state = _get_profile_review_state(user)
+        return {
+            "financial_plan_summary": summary,
+            "needs_profile_review": profile_state["needs_profile_review"],
+        }
 
     @staticmethod
     def _estimate_generation_seconds(goal: Goal) -> int:
@@ -835,6 +1275,14 @@ class GoalListAPIView(APIView):
                 "days_remaining":      days_left,
                 "is_overdue":          is_overdue,
                 "is_ai_generated":     goal.is_ai_generated,
+                "financial_target_amount": float(goal.financial_target_amount) if goal.financial_target_amount is not None else None,
+                "financial_current_saved": float(goal.financial_current_saved) if goal.financial_current_saved is not None else None,
+                "financial_goal_type": goal.financial_goal_type,
+                "financial_timeline_flexibility": goal.financial_timeline_flexibility,
+                "financial_feasibility_status": goal.financial_feasibility_status,
+                "financial_required_monthly_savings": float(goal.financial_required_monthly_savings) if goal.financial_required_monthly_savings is not None else None,
+                "financial_months_remaining": goal.financial_months_remaining,
+                "financial_gap_amount": float(goal.financial_gap_amount) if goal.financial_gap_amount is not None else None,
                 # Counts for the milestone progress indicator on each card
                 "milestone_count":     goal.milestone_count,
                 "completed_milestones": goal.completed_milestones,
@@ -842,11 +1290,13 @@ class GoalListAPIView(APIView):
                 "attributes":          self._get_attributes(goal),
             })
 
+        profile_review_state = _get_profile_review_state(request.user)
         return Response(
             {
                 "life_areas": life_areas,
-                "count":      len(goals_data),
-                "goals":      goals_data,
+                "count": len(goals_data),
+                "goals": goals_data,
+                **profile_review_state,
             },
             status=status.HTTP_200_OK,
         )
@@ -922,7 +1372,10 @@ class GoalDetailAPIView(APIView):
             return Response({"error": "Goal not found."}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = GoalSerializer(goal)
-        return Response({"goal": serializer.data}, status=status.HTTP_200_OK)
+        return Response(
+            {"goal": serializer.data, **_get_profile_review_state(request.user)},
+            status=status.HTTP_200_OK,
+        )
 
     def put(self, request, goal_id):
         goal = self._get_goal(goal_id, request.user)
@@ -931,8 +1384,22 @@ class GoalDetailAPIView(APIView):
 
         serializer = GoalSerializer(goal, data=request.data)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            feasibility_metadata, feasibility_error = evaluate_financial_goal_feasibility(
+                user=request.user,
+                validated_data=serializer.validated_data,
+                instance=goal,
+            )
+            if feasibility_error:
+                return Response(feasibility_error, status=status.HTTP_400_BAD_REQUEST)
+            if feasibility_metadata:
+                serializer.validated_data.update(feasibility_metadata)
+
+            updated_goal = serializer.save()
+            evaluate_profile_review_for_goal(goal=updated_goal)
+            return Response(
+                {**serializer.data, **_get_profile_review_state(request.user)},
+                status=status.HTTP_200_OK,
+            )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def patch(self, request, goal_id):
@@ -942,8 +1409,22 @@ class GoalDetailAPIView(APIView):
 
         serializer = GoalSerializer(goal, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            feasibility_metadata, feasibility_error = evaluate_financial_goal_feasibility(
+                user=request.user,
+                validated_data=serializer.validated_data,
+                instance=goal,
+            )
+            if feasibility_error:
+                return Response(feasibility_error, status=status.HTTP_400_BAD_REQUEST)
+            if feasibility_metadata:
+                serializer.validated_data.update(feasibility_metadata)
+
+            updated_goal = serializer.save()
+            evaluate_profile_review_for_goal(goal=updated_goal)
+            return Response(
+                {**serializer.data, **_get_profile_review_state(request.user)},
+                status=status.HTTP_200_OK,
+            )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, goal_id):

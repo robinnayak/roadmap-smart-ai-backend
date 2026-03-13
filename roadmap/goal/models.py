@@ -90,6 +90,79 @@ PRIORITY_CHOICES = [
     ("high", "High"),
 ]
 
+EMPLOYMENT_TYPE_CHOICES = [
+    ("student", "Student"),
+    ("aspiring_founder", "Aspiring Founder"),
+    ("early_career", "Early Career"),
+    ("salaried_employee", "Salaried Employee"),
+    ("freelancer", "Freelancer"),
+    ("business_owner", "Business Owner"),
+    ("between_jobs", "Between Jobs"),
+]
+
+MONTHLY_INCOME_RANGE_CHOICES = [
+    ("none", "None"),
+    ("under_20k", "Under 20k"),
+    ("20k_50k", "20k-50k"),
+    ("50k_1l", "50k-1L"),
+    ("1l_3l", "1L-3L"),
+    ("3l_plus", "3L+"),
+]
+
+MONTHLY_SURPLUS_RANGE_CHOICES = [
+    ("nothing_left", "Nothing Left"),
+    ("under_10k", "Under 10k"),
+    ("10k_30k", "10k-30k"),
+    ("30k_70k", "30k-70k"),
+    ("70k_plus", "70k+"),
+]
+
+PRIMARY_SKILL_AREA_CHOICES = [
+    ("technology", "Technology"),
+    ("design", "Design"),
+    ("education", "Education"),
+    ("business", "Business"),
+    ("trade", "Trade"),
+    ("healthcare", "Healthcare"),
+    ("other", "Other"),
+]
+
+TOTAL_SAVINGS_RANGE_CHOICES = [
+    ("none", "None"),
+    ("under_5l", "Under 5L"),
+    ("5l_20l", "5L-20L"),
+    ("20l_50l", "20L-50L"),
+    ("50l_plus", "50L+"),
+]
+
+FINANCIAL_GOAL_TYPE_CHOICES = [
+    ("property_real_estate", "Property / Real Estate"),
+    ("education", "Education"),
+    ("emergency_fund", "Emergency Fund"),
+    ("investment", "Investment"),
+    ("business_capital", "Business Capital"),
+    ("major_purchase", "Major Purchase"),
+    ("other", "Other"),
+]
+
+TIMELINE_FLEXIBILITY_CHOICES = [
+    ("fixed", "Fixed"),
+    ("somewhat_flexible", "Somewhat Flexible"),
+    ("very_flexible", "Very Flexible"),
+]
+
+FEASIBILITY_STATUS_CHOICES = [
+    ("pass", "Pass"),
+    ("stretch", "Stretch"),
+    ("infeasible", "Infeasible"),
+]
+
+GOAL_LINK_TYPE_CHOICES = [
+    ("income_growth", "Income Growth"),
+    ("skill_building", "Skill Building"),
+    ("lifestyle", "Lifestyle"),
+]
+
 # ---------------------------------------------------------------------------
 # 2. Goal
 #    A top-level life goal the user wants to achieve.
@@ -193,6 +266,51 @@ confidence'}
 
     ai_generation_context = models.TextField(
         blank=True, help_text="Context/reasoning behind AI-generated goal"
+    )
+
+    # Financial intelligence fields (used when primary_category == financial)
+    financial_target_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    financial_current_saved = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    financial_goal_type = models.CharField(
+        max_length=40,
+        choices=FINANCIAL_GOAL_TYPE_CHOICES,
+        null=True,
+        blank=True,
+    )
+    financial_timeline_flexibility = models.CharField(
+        max_length=30,
+        choices=TIMELINE_FLEXIBILITY_CHOICES,
+        null=True,
+        blank=True,
+    )
+    financial_feasibility_status = models.CharField(
+        max_length=20,
+        choices=FEASIBILITY_STATUS_CHOICES,
+        null=True,
+        blank=True,
+    )
+    financial_required_monthly_savings = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    financial_months_remaining = models.IntegerField(null=True, blank=True)
+    financial_gap_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
     )
 
     ai_reasoning = models.TextField(
@@ -450,6 +568,100 @@ class GoalAttributes(models.Model):
 
     def __str__(self): 
         return f"[{self.goal.user.email}] Attributes for {self.goal.title}"
+
+
+class UserFinancialProfile(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        "authentication.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="financial_profile",
+    )
+    employment_type = models.CharField(max_length=30, choices=EMPLOYMENT_TYPE_CHOICES)
+    monthly_income_range = models.CharField(
+        max_length=20,
+        choices=MONTHLY_INCOME_RANGE_CHOICES,
+    )
+    monthly_surplus_range = models.CharField(
+        max_length=20,
+        choices=MONTHLY_SURPLUS_RANGE_CHOICES,
+    )
+    primary_skill_area = models.CharField(max_length=20, choices=PRIMARY_SKILL_AREA_CHOICES)
+    total_current_savings_range = models.CharField(
+        max_length=20,
+        choices=TOTAL_SAVINGS_RANGE_CHOICES,
+    )
+    needs_review = models.BooleanField(default=False)
+    review_reason = models.CharField(max_length=255, blank=True, default="")
+    last_updated = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"[{self.user.email}] financial profile"
+
+
+class GoalLink(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_goal = models.ForeignKey(
+        Goal,
+        on_delete=models.CASCADE,
+        related_name="financial_links",
+    )
+    contributing_goal = models.ForeignKey(
+        Goal,
+        on_delete=models.CASCADE,
+        related_name="contributing_links",
+    )
+    link_type = models.CharField(max_length=20, choices=GOAL_LINK_TYPE_CHOICES, default="income_growth")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source_goal", "contributing_goal"],
+                name="unique_financial_goal_link",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.source_goal_id} <- {self.contributing_goal_id}"
+
+
+class FinancialProgressEntry(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    goal = models.ForeignKey(
+        Goal,
+        on_delete=models.CASCADE,
+        related_name="financial_progress_entries",
+    )
+    user = models.ForeignKey(
+        "authentication.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="financial_progress_entries",
+    )
+    month = models.DateField(help_text="First day of month")
+    planned_savings = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    actual_savings = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    running_total_saved = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["goal", "month"],
+                name="unique_financial_progress_month",
+            )
+        ]
+        ordering = ["month"]
+
+    def __str__(self):
+        return f"{self.goal_id} {self.month}"
 
 
 # ===============================================================

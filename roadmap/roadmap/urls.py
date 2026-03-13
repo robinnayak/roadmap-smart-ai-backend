@@ -9,6 +9,7 @@ urlpatterns = [
     path('api-auth/', include('rest_framework.urls')),
     path('auth/', include('authentication.urls')),
     path('ai/', include('ai.urls')),
+    path('gie/', include(('gie.urls', 'gie'), namespace='gie')),
     path('goal/', include('goal.urls')),
     path('routines/', include('routine.urls')),
     path('journal/', include('journal.urls')),
