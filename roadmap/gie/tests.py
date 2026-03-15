@@ -1325,7 +1325,7 @@ class GIETurnStateFinalizeAPITests(APITestCase):
                     {"id": "c1", "decision": "accepted", "revision_note": None},
                     {"id": "c2", "decision": "revised", "revision_note": "Weekdays only"},
                 ],
-                "habit_confirmations": self._habit_confirmations(decision="accepted"),
+                "goal_context": {"commitment_confirmed": True},
             },
             format="json",
         )
@@ -1334,6 +1334,7 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         self.assertEqual(len(response.data["commitments"]), 2)
         self.assertIn("rie_signal", response.data)
         self.assertIn("confirmed_habits", response.data["rie_signal"])
+        self.assertEqual(response.data["rie_signal"]["confirmed_habits"], [])
 
         self.session.refresh_from_db()
         self.assertEqual(self.session.status, GIESession.STATUS_FINALIZED)
@@ -1342,26 +1343,25 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         self.assertEqual(snapshot.status, GIEPlanSnapshot.STATUS_FINALIZED)
         habit_suggestion_state = self._habit_suggestions()
         self.assertLessEqual(len(habit_suggestion_state), 3)
-        self.assertEqual(snapshot.rie_signal["suggested_sequence_order"], [item["habit_name"] for item in habit_suggestion_state])
+        self.assertEqual(snapshot.rie_signal["suggested_sequence_order"], [])
         self.assertEqual(HabitTracker.objects.filter(user=self.user).count(), before_habits)
 
-    def test_finalize_rejects_missing_or_invalid_habit_confirmations(self):
+    def test_finalize_accepts_missing_habit_confirmations_and_rejects_invalid_set(self):
         self._drive_session_to_ready()
         finalize_url = reverse("gie:goals-finalize", kwargs={"session_id": self.session_id})
 
         missing = self.client.post(
             finalize_url,
-            data={"commitments": [], "habit_confirmations": []},
+            data={"goal_context": {"commitment_confirmed": True}},
             format="json",
         )
-        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(missing.data["code"], "invalid_habit_confirmation_payload")
+        self.assertEqual(missing.status_code, status.HTTP_200_OK)
 
         invalid = self.client.post(
             finalize_url,
             data={
-                "commitments": [],
                 "habit_confirmations": [{"habit_name": "Unknown habit", "decision": "accepted"}],
+                "goal_context": {"commitment_confirmed": True},
             },
             format="json",
         )
@@ -1374,11 +1374,7 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         response = self.client.post(
             finalize_url,
             data={
-                "commitments": [
-                    {"id": "c1", "decision": "pending", "revision_note": None},
-                    {"id": "c2", "decision": "pending", "revision_note": None},
-                ],
-                "habit_confirmations": self._habit_confirmations(decision="accepted"),
+                "goal_context": {"commitment_confirmed": False},
             },
             format="json",
         )
@@ -1426,7 +1422,7 @@ class GIETurnStateFinalizeAPITests(APITestCase):
             finalize_url,
             data={
                 "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "habit_confirmations": self._habit_confirmations(decision="accepted"),
+                "goal_context": {"commitment_confirmed": True},
             },
             format="json",
         )
@@ -1446,7 +1442,7 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         finalize_url = reverse("gie:goals-finalize", kwargs={"session_id": self.session_id})
         payload = {
             "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-            "habit_confirmations": self._habit_confirmations(decision="accepted"),
+            "goal_context": {"commitment_confirmed": True},
         }
 
         first_response = self.client.post(finalize_url, data=payload, format="json")
@@ -1496,7 +1492,7 @@ class GIETurnStateFinalizeAPITests(APITestCase):
             finalize_url,
             data={
                 "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "habit_confirmations": self._habit_confirmations(decision="accepted"),
+                "goal_context": {"commitment_confirmed": True},
             },
             format="json",
         )
@@ -1525,7 +1521,7 @@ class GIETurnStateFinalizeAPITests(APITestCase):
             finalize_url,
             data={
                 "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "habit_confirmations": self._habit_confirmations(decision="accepted"),
+                "goal_context": {"commitment_confirmed": True},
             },
             format="json",
         )
@@ -1550,7 +1546,7 @@ class GIETurnStateFinalizeAPITests(APITestCase):
             finalize_url,
             data={
                 "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "habit_confirmations": self._habit_confirmations(decision="accepted"),
+                "goal_context": {"commitment_confirmed": True},
             },
             format="json",
         )
@@ -1629,19 +1625,11 @@ class GIELifecycleContractIntegrationTests(APITestCase):
         self.assertEqual(state_response.status_code, status.HTTP_200_OK)
         self.assertEqual(sorted(state_response.data.keys()), sorted(["session", "schema", "slot_state", "completeness"]))
 
-        suggestion_state = GIESlotState.objects.filter(session_id=session_id, slot_key="__habit_ranked_suggestions").first()
-        self.assertIsNotNone(suggestion_state)
-        assert suggestion_state is not None
-        habit_confirmations = [
-            {"habit_name": item["habit_name"], "decision": "accepted"}
-            for item in suggestion_state.value
-        ]
-
         finalize_response = self.client.post(
             reverse("gie:goals-finalize", kwargs={"session_id": session_id}),
             data={
                 "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "habit_confirmations": habit_confirmations,
+                "goal_context": {"commitment_confirmed": True},
             },
             format="json",
         )
@@ -1726,11 +1714,6 @@ class GIELifecycleContractIntegrationTests(APITestCase):
         self.assertEqual(turn_response.data["session_status"], "ready_to_finalize")
         populate_running_slot_profile(session, timeline_days=180)
 
-        suggestion_state = GIESlotState.objects.filter(session_id=session_id, slot_key="__habit_ranked_suggestions").first()
-        self.assertIsNotNone(suggestion_state)
-        assert suggestion_state is not None
-        habit_confirmations = [{"habit_name": item["habit_name"], "decision": "accepted"} for item in suggestion_state.value]
-
         goals_before = Goal.objects.filter(user=user).count()
         finalize_response = self.client.post(
             reverse("gie:goals-finalize", kwargs={"session_id": session_id}),
@@ -1739,7 +1722,7 @@ class GIELifecycleContractIntegrationTests(APITestCase):
                     {"id": "c1", "decision": "accepted", "revision_note": None},
                     {"id": "c2", "decision": "revised", "revision_note": "Weekdays only"},
                 ],
-                "habit_confirmations": habit_confirmations,
+                "goal_context": {"commitment_confirmed": True},
             },
             format="json",
         )
@@ -2022,16 +2005,12 @@ class GIEObservabilityAndRolloutTests(APITestCase):
         self.assertGreaterEqual(len(analytics.schema_completeness_progress), 1)
 
         _ = self.client.get(reverse("gie:goals-state", kwargs={"session_id": session_id}))
-        suggestion_state = GIESlotState.objects.filter(session_id=session_id, slot_key="__habit_ranked_suggestions").first()
-        self.assertIsNotNone(suggestion_state)
-        assert suggestion_state is not None
-        habit_confirmations = [{"habit_name": item["habit_name"], "decision": "accepted"} for item in suggestion_state.value]
 
         finalize_response = self.client.post(
             reverse("gie:goals-finalize", kwargs={"session_id": session_id}),
             data={
                 "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "habit_confirmations": habit_confirmations,
+                "goal_context": {"commitment_confirmed": True},
             },
             format="json",
         )

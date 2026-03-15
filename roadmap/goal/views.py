@@ -799,16 +799,19 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                     )
 
                 estimated_seconds = self._estimate_generation_seconds(goal)
-                worker = threading.Thread(
-                    target=self._run_hierarchy_generation_async,
-                    kwargs={
-                        "goal_id": str(goal.id),
-                        "user_id": request.user.id,
-                        "job_id": str(job.id),
-                    },
-                    daemon=True,
-                )
-                worker.start()
+                def _start_async_worker_after_commit():
+                    worker = threading.Thread(
+                        target=self._run_hierarchy_generation_async,
+                        kwargs={
+                            "goal_id": str(goal.id),
+                            "user_id": request.user.id,
+                            "job_id": str(job.id),
+                        },
+                        daemon=True,
+                    )
+                    worker.start()
+
+                transaction.on_commit(_start_async_worker_after_commit)
 
                 return Response(
                     {

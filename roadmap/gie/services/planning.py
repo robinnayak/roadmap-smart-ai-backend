@@ -453,15 +453,7 @@ class GIEPlanningService:
             return [], None
 
         if not habit_confirmations_input:
-            return [], {
-                "error": "validation_error",
-                "code": "invalid_habit_confirmation_payload",
-                "details": {
-                    "habit_confirmations": ["Explicit confirmations are required for all suggested habits."],
-                    "suggested_habit_names": expected_names,
-                },
-                "status": 400,
-            }
+            return [], None
 
         seen = set()
         duplicates: list[str] = []
@@ -707,9 +699,11 @@ class GIEPlanningService:
             plan_payload=plan_payload,
             unified_context=unified_context,
         )
-        has_acceptance = any(item.get("decision") in {"accepted", "revised"} for item in commitments)
-        has_rejection = any(item.get("decision") == "rejected" for item in commitments)
-        commitment_confirmed = has_acceptance and not has_rejection
+        context_commitment_confirmed = (
+            bool(form_goal_context.get("commitment_confirmed"))
+            if isinstance(form_goal_context, dict)
+            else False
+        )
         resolved_priority = cls._resolve_goal_priority(slot_states=slot_states, unified_context=unified_context)
         goal_payload = cls.build_goal_autofill_payload(
             session=session,
@@ -719,7 +713,7 @@ class GIEPlanningService:
             form_goal_context=form_goal_context,
             refine_language=True,
         )
-        goal_payload["commitment_confirmed"] = commitment_confirmed
+        goal_payload["commitment_confirmed"] = context_commitment_confirmed
         missing_required_goal_fields = list_missing_required_goal_fields(goal_payload)
         if missing_required_goal_fields:
             return None, commitments, {}, None, {

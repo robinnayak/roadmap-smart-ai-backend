@@ -1,6 +1,7 @@
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -592,6 +593,46 @@ class CreateGoalWithHierarchyConfigFallbackTests(APITestCase):
         self.assertIn("goal", response.data)
         self.assertIn("hierarchy generation is unavailable", response.data["message"].lower())
         self.assertIn("AI runtime is not configured", response.data["error"])
+
+
+class CreateGoalWithHierarchyAsyncCommitSafetyTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="goal-hierarchy-commit-safety@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.payload = {
+            "title": "Commit safety goal",
+            "description": "Verify async worker starts after commit",
+            "why_it_matters": ["Race prevention"],
+            "why_do_i_want_this": "Avoid intermittent hierarchy failures after finalize.",
+            "specific_measurable_target": "Finalize and generate hierarchy reliably.",
+            "primary_category": "career",
+            "priority": "medium",
+            "target_date": str(timezone.localdate() + timedelta(days=45)),
+            "commitment_confirmed": True,
+        }
+
+    @patch("goal.views.get_missing_ai_env_vars", return_value=[])
+    @patch("goal.views.threading.Thread")
+    def test_async_worker_starts_only_after_transaction_commit(
+        self,
+        mocked_thread,
+        _mocked_missing_env,
+    ):
+        with transaction.atomic():
+            with self.captureOnCommitCallbacks(execute=False) as callbacks:
+                response = self.client.post(
+                    "/goal/create-with-hierarchy/",
+                    data=self.payload,
+                    format="json",
+                )
+            self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+            mocked_thread.return_value.start.assert_not_called()
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0]()
+            mocked_thread.return_value.start.assert_called_once()
 
 
 class FinancialProfileAPIViewTests(APITestCase):
