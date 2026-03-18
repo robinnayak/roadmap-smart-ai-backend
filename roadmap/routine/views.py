@@ -724,6 +724,7 @@ class HabitDetailAPIView(APIView):
     """
     GET    /api/routines/habits/<habit_id>/
     PUT    /api/routines/habits/<habit_id>/
+    PATCH  /api/routines/habits/<habit_id>/
     DELETE /api/routines/habits/<habit_id>/
     """
     permission_classes = [IsAuthenticated]
@@ -737,6 +738,44 @@ class HabitDetailAPIView(APIView):
 
     def put(self, request, habit_id):
         habit = get_object_or_404(HabitTracker, id=habit_id, user=request.user)
+        if habit.is_system:
+            return Response(
+                {
+                    "error": "System habits cannot be fully edited. Use PATCH to update allowed fields only."
+                },
+                status=http_status.HTTP_403_FORBIDDEN,
+            )
+        serializer = HabitTrackerSerializer(habit, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=http_status.HTTP_200_OK)
+        return Response(serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
+
+    def patch(self, request, habit_id):
+        habit = get_object_or_404(HabitTracker, id=habit_id, user=request.user)
+
+        if habit.is_system:
+            allowed_fields = {"estimated_minutes", "suggested_time", "time_slot"}
+            disallowed = set(request.data.keys()) - allowed_fields
+
+            if disallowed:
+                return Response(
+                    {
+                        "error": "Only estimated_minutes, suggested_time, and time_slot can be updated on system habits.",
+                        "disallowed_fields": sorted(disallowed),
+                    },
+                    status=http_status.HTTP_403_FORBIDDEN,
+                )
+
+            filtered_data = {
+                key: value for key, value in request.data.items()
+                if key in allowed_fields
+            }
+            serializer = HabitTrackerSerializer(habit, data=filtered_data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data, status=http_status.HTTP_200_OK)
+
         serializer = HabitTrackerSerializer(habit, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -745,6 +784,11 @@ class HabitDetailAPIView(APIView):
 
     def delete(self, request, habit_id):
         habit = get_object_or_404(HabitTracker, id=habit_id, user=request.user)
+        if habit.is_system:
+            return Response(
+                {"error": "System habits cannot be deleted."},
+                status=http_status.HTTP_403_FORBIDDEN,
+            )
         habit.delete()
         return Response(status=http_status.HTTP_204_NO_CONTENT)
 

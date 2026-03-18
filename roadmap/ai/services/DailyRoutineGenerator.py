@@ -1,48 +1,57 @@
-#==============================================================================
+# ==============================================================================
 # roadmap/ai/services/daily_routine_generator.py
 # ==============================================================================
 """
-Generates ONLY the daily motivation message and mantra via AI.
-Task selection is handled by routine/services.py using deterministic DB queries —
-there's no reason to use AI for picking which tasks to show today.
+Deterministic daily motivation and mantra generation.
+
+Task selection remains in routine/services.py. This module only turns the
+already-selected routine inputs into short, predictable text.
 """
-import logging
+from __future__ import annotations
+
+from collections import Counter
 from datetime import date
 
-from ai.services.base_service import BaseAIService
-from ai.config import get_ollama_model
-from ai.providers.ollama_provider import OllamaProvider
-from ai.utils.parsers import ResponseParser
-from ai.utils.formatters import ResponseFormatter
-from ai.prompts.DailyRoutineGeneratorPrompts import DailyRoutineGeneratorPrompts
 
-logger = logging.getLogger(__name__)
-
-ROUTINE_JOB_TYPE = "motivation_generation"
-
-
-class DailyRoutineGenerator(BaseAIService):
-    """
-    Generates personalised daily motivation + mantra.
-
-    Scope is deliberately narrow:
-      - Input:  user context, today's tasks/habits, target date
-      - Output: { motivation: str, mantra: str }
-
-    Task selection is NOT done here — that belongs in routine/services.py
-    where it can be tested without an AI provider.
-    """
-
-    def __init__(self):
-        provider = OllamaProvider(
-            model=get_ollama_model(),
-            temperature=0.7,   # Higher temp is fine for creative motivation text
-            max_tokens=500,    # Motivation + mantra don't need 3000 tokens
-        )
-        super().__init__(provider)
-        self.parser  = ResponseParser()
-        self.formatter = ResponseFormatter()
-        self.prompts = DailyRoutineGeneratorPrompts()
+class DailyRoutineGenerator:
+    CATEGORY_FAMILIES = {
+        "career": {
+            "focus": "career traction",
+            "action": "ship useful progress",
+        },
+        "business": {
+            "focus": "business traction",
+            "action": "move revenue work forward",
+        },
+        "financial": {
+            "focus": "financial discipline",
+            "action": "make the next money move cleanly",
+        },
+        "finance": {
+            "focus": "financial discipline",
+            "action": "make the next money move cleanly",
+        },
+        "health": {
+            "focus": "physical consistency",
+            "action": "protect energy and follow through",
+        },
+        "fitness": {
+            "focus": "physical consistency",
+            "action": "protect energy and follow through",
+        },
+        "personal": {
+            "focus": "personal momentum",
+            "action": "follow through on what matters",
+        },
+        "relationships": {
+            "focus": "relationship consistency",
+            "action": "show up with intention",
+        },
+        "productivity": {
+            "focus": "steady progress",
+            "action": "finish the next meaningful action",
+        },
+    }
 
     def generate_motivation_and_mantra(
         self,
@@ -53,138 +62,181 @@ class DailyRoutineGenerator(BaseAIService):
         target_date: date,
         user=None,
     ) -> dict:
-        """
-        Generate a personalised motivation message and short daily mantra.
+        signals = self._build_signals(
+            user_context=user_context or {},
+            goal_tasks=goal_tasks or [],
+            habits=habits or [],
+            events=events or [],
+            target_date=target_date,
+        )
+        return {
+            "status": "success",
+            "data": {
+                "motivation": self._build_motivation(signals),
+                "mantra": self._build_mantra(signals),
+            },
+        }
 
-        Args:
-            user_context:  Dict from _get_user_context() — role, skills, goals.
-            goal_tasks:    List of Task model instances scheduled for today.
-            habits:        List of HabitTracker instances for today.
-            target_date:   The date being planned.
-            user:          CustomUser instance. If provided, creates an AIProcessingJob
-                           so the call is tracked. Optional to avoid breaking existing
-                           callers that don't pass user.
-
-        Returns:
-            {
-                'status': 'success' | 'error',
-                'data': { 'motivation': '...', 'mantra': '...' }
-            }
-        """
-        job = None
-        if user:
-            job, _ = self.create_or_update_job(
-                user=user,
-                job_type=ROUTINE_JOB_TYPE,
-                input_data={
-                    "target_date":   str(target_date),
-                    "task_count":    len(goal_tasks),
-                    "habit_count":   len(habits),
-                    "event_count":   len(events or []),
-                },
-            )
-            job.start_processing()
-
-        try:
-            # Combine summarized goal tasks and habits for motivation prompt
-            combined_tasks = (
-                self._summarise_tasks(goal_tasks)
-                + self._summarise_habits(habits)
-                + self._summarise_events(events or [])
-            )
-            
-            prompt = self.prompts.get_motivation_prompt(
-                user_context=user_context,
-                tasks=combined_tasks,
-            )
-
-            system_prompt = (
-                "You are a motivational coach. "
-                "Write a short, personal daily motivation message and a one-line mantra "
-                "based on the user's goals and today's tasks. "
-                "Respond with valid JSON only: "
-                '{"motivation": "...", "mantra": "..."}'
-            )
-
-            response = self.provider.generate_response(
-                prompt=prompt,
-                system_prompt=system_prompt,
-            )
-
-            parsed = self.parser.parse_json(response.content)
-
-            if not parsed or "motivation" not in parsed:
-                raise ValueError("AI returned unexpected structure for motivation")
-
-            if job:
-                job.mark_completed(
-                    output_data=parsed,
-                    raw_response=response.content,
-                    model_used=self.provider.model,
-                )
-
-            logger.info("Motivation generated for %s", target_date)
-            return {"status": "success", "data": parsed}
-
-        except Exception as exc:
-            logger.exception("Motivation generation failed for %s: %s", target_date, exc)
-            if job:
-                job.mark_failed(error_message=str(exc))
-            return {"status": "error", "message": str(exc)}
-
-    # -------------------------------------------------------------------------
-    # Private helpers — only format what the prompt actually needs
-    # -------------------------------------------------------------------------
+    def _build_signals(
+        self,
+        *,
+        user_context: dict,
+        goal_tasks: list,
+        habits: list,
+        events: list,
+        target_date: date,
+    ) -> dict:
+        streak_days = int(user_context.get("streak_days", 0) or 0)
+        scale_level = int(user_context.get("current_scale_level", 0) or 0)
+        dominant_category = self._dominant_category(goal_tasks)
+        category_family = self.CATEGORY_FAMILIES.get(
+            dominant_category,
+            self.CATEGORY_FAMILIES["productivity"],
+        )
+        urgency = self._urgency_bucket(goal_tasks, target_date)
+        load_shape = self._load_bucket(goal_tasks, habits, events)
+        return {
+            "streak_bucket": self._streak_bucket(streak_days),
+            "streak_days": streak_days,
+            "scale_bucket": self._scale_bucket(scale_level),
+            "scale_level": scale_level,
+            "urgency_bucket": urgency,
+            "load_bucket": load_shape,
+            "dominant_category": dominant_category,
+            "category_family": category_family,
+            "goal_task_count": len(goal_tasks),
+            "habit_count": len(habits),
+            "event_count": len(events),
+        }
 
     @staticmethod
-    def _summarise_tasks(tasks: list) -> list[dict]:
-        """
-        Return a minimal summary of each task for the prompt.
-        FIX: Uses select_related data already in memory — no extra DB queries.
-        """
-        result = []
-        for task in tasks:
+    def _streak_bucket(streak_days: int) -> str:
+        if streak_days >= 7:
+            return "strong"
+        if streak_days >= 2:
+            return "building"
+        return "cold"
+
+    @staticmethod
+    def _scale_bucket(scale_level: int) -> str:
+        if scale_level <= -1:
+            return "recovery"
+        if scale_level >= 1:
+            return "stretch"
+        return "neutral"
+
+    @staticmethod
+    def _dominant_category(goal_tasks: list) -> str:
+        counts: Counter[str] = Counter()
+        for task in goal_tasks:
             try:
-                result.append({
-                    "title":    task.title,
-                    "goal":     task.subgoal.milestone.goal.title,
-                    "category": task.subgoal.milestone.goal.primary_category,
-                    "priority": task.priority,
-                    "minutes":  task.estimated_duration_minutes,
-                })
+                category = (task.subgoal.milestone.goal.primary_category or "").strip().lower()
             except AttributeError:
-                # Defensive: if select_related wasn't used, skip rather than crash
-                result.append({"title": task.title})
-        return result
+                category = ""
+            if category:
+                counts[category] += 1
+
+        if not counts:
+            return "productivity"
+        return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
     @staticmethod
-    def _summarise_habits(habits: list) -> list[dict]:
-        """
-        Return a minimal summary of each habit for the prompt.
-        FIX: No longer references habit.category which doesn't exist on the model.
-        """
-        return [
-            {
-                "name":    habit.name,
-                "minutes": habit.estimated_minutes,
-                "priority": habit.priority,
-            }
-            for habit in habits
-        ]
+    def _urgency_bucket(goal_tasks: list, target_date: date) -> str:
+        goal_deadlines: list[int] = []
+        for task in goal_tasks:
+            try:
+                goal_target = task.subgoal.milestone.goal.target_date
+            except AttributeError:
+                goal_target = None
+            if goal_target:
+                goal_deadlines.append((goal_target - target_date).days)
+
+        if not goal_deadlines:
+            return "no_target"
+
+        nearest_deadline = min(goal_deadlines)
+        if nearest_deadline < 0:
+            return "overdue"
+        if nearest_deadline <= 7:
+            return "near_deadline"
+        return "normal_horizon"
 
     @staticmethod
-    def _summarise_events(events: list) -> list[dict]:
-        """Return a minimal summary of each event occurrence for the prompt."""
-        result = []
+    def _load_bucket(goal_tasks: list, habits: list, events: list) -> str:
+        high_priority_items = 0
+        total_minutes = 0
+
+        for task in goal_tasks:
+            if getattr(task, "priority", "") == "high":
+                high_priority_items += 1
+            total_minutes += int(getattr(task, "estimated_duration_minutes", 0) or 0)
+
+        for habit in habits:
+            if getattr(habit, "priority", "") == "high":
+                high_priority_items += 1
+            total_minutes += int(getattr(habit, "estimated_minutes", 0) or 0)
+
         for event in events:
-            result.append(
-                {
-                    "title": event.get("title", ""),
-                    "type": event.get("event_type", ""),
-                    "minutes": event.get("duration_minutes", 0),
-                    "constraint_mode": event.get("constraint_mode", "hard"),
-                    "time_slot": event.get("time_slot"),
-                }
-            )
-        return result
+            if event.get("constraint_mode", "hard") == "hard":
+                high_priority_items += 1
+            total_minutes += int(event.get("duration_minutes", 0) or 0)
 
+        actionable_count = len(goal_tasks) + len(habits)
+        if high_priority_items >= 3 or total_minutes >= 240:
+            return "high_priority_heavy"
+        if actionable_count <= 2 and total_minutes <= 90:
+            return "low_pressure"
+        return "balanced"
+
+    def _build_motivation(self, signals: dict) -> str:
+        focus = signals["category_family"]["focus"]
+        action = signals["category_family"]["action"]
+
+        opening = {
+            ("cold", "recovery"): "Today is a reset day, so keep the bar clear and kind.",
+            ("cold", "neutral"): "Today is a fresh start, so begin with one clean win.",
+            ("cold", "stretch"): "Start clean, then lean into one meaningful stretch step.",
+            ("building", "recovery"): "You already have momentum, so protect it with a manageable plan.",
+            ("building", "neutral"): "Momentum is building, so stay steady and keep the next action obvious.",
+            ("building", "stretch"): "Momentum is building, so use it to push one stretch level higher with control.",
+            ("strong", "recovery"): "Your streak is strong, and protecting consistency matters more than forcing volume.",
+            ("strong", "neutral"): "Your streak is strong, so keep the standard high and the execution calm.",
+            ("strong", "stretch"): "Your streak is strong, so this is a good day to press into a stretch task.",
+        }[(signals["streak_bucket"], signals["scale_bucket"])]
+
+        urgency_clause = {
+            "overdue": "There is overdue work in play, so close one important loop before anything else.",
+            "near_deadline": "A deadline is close, so put the most time-sensitive work first.",
+            "normal_horizon": f"Keep today's attention on {focus} and {action}.",
+            "no_target": f"Use today to build {focus} through deliberate follow-through.",
+        }[signals["urgency_bucket"]]
+
+        load_clause = {
+            "high_priority_heavy": "The load is heavy, so protect focus and finish the highest-value task before expanding scope.",
+            "balanced": "The load is balanced, so move deliberately and stack solid completions.",
+            "low_pressure": "The load is lighter, so finish cleanly and leave yourself with usable energy.",
+        }[signals["load_bucket"]]
+
+        return f"{opening} {urgency_clause} {load_clause}"
+
+    def _build_mantra(self, signals: dict) -> str:
+        starter = {
+            "cold": "Start simple",
+            "building": "Stay consistent",
+            "strong": "Protect the streak",
+        }[signals["streak_bucket"]]
+
+        middle = {
+            "recovery": "pace it cleanly",
+            "neutral": "keep the standard",
+            "stretch": "push the stretch task",
+        }[signals["scale_bucket"]]
+
+        finish = {
+            "overdue": "clear the overdue priority",
+            "near_deadline": "honor the deadline",
+            "normal_horizon": signals["category_family"]["action"],
+            "no_target": "finish the next meaningful action",
+        }[signals["urgency_bucket"]]
+
+        return f"{starter}, {middle}, {finish}."

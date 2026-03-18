@@ -442,6 +442,11 @@ class HabitTracker(models.Model):
         ('sleep', 'Sleep'),
         ('other', 'Other'),
     ]
+    TIME_SLOT_CHOICES = [
+        ('morning', 'Morning'),
+        ('afternoon', 'Afternoon'),
+        ('evening', 'Evening'),
+    ]
 
     id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -468,6 +473,7 @@ class HabitTracker(models.Model):
     )
     estimated_minutes = models.IntegerField(default=30)
     suggested_time = models.TimeField(null=True, blank=True)
+    time_slot = models.CharField(max_length=10, choices=TIME_SLOT_CHOICES, null=True, blank=True)
     priority    = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default='medium')
 
     linked_goal = models.ForeignKey(
@@ -478,6 +484,8 @@ class HabitTracker(models.Model):
     )
     ai_suggested = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
+    is_system = models.BooleanField(default=False)
+    is_deletable = models.BooleanField(default=True)
 
     # Streak counters — updated by record_completion()
     current_streak    = models.IntegerField(default=0)

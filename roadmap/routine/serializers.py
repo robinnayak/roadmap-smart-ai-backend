@@ -211,6 +211,8 @@ class HabitTrackerSerializer(serializers.ModelSerializer):
     """
     linked_goal_info = serializers.SerializerMethodField()
     current_proof = serializers.SerializerMethodField()
+    is_system = serializers.BooleanField(read_only=True)
+    is_deletable = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = HabitTracker
@@ -219,15 +221,17 @@ class HabitTrackerSerializer(serializers.ModelSerializer):
             'category', 'why_important',
             'reason_headline', 'reason_body', 'science_badge', 'rewards',
             'proof_metric_name', 'ai_suggested',
-            'frequency', 'custom_days', 'estimated_minutes', 'suggested_time', 'priority',
-            'linked_goal', 'linked_goal_info',          # raw FK + summary
+            'frequency', 'custom_days', 'estimated_minutes', 'suggested_time', 'time_slot', 'priority',
+            'linked_goal', 'linked_goal_info',
             'current_proof',
-            'is_active', 'current_streak', 'longest_streak',
+            'is_active', 'is_system', 'is_deletable',
+            'current_streak', 'longest_streak',
             'total_completions', 'last_completed_date',
             'created_at', 'updated_at',
         ]
         read_only_fields = [
-            'id', 'current_streak', 'longest_streak',
+            'id', 'user', 'is_system', 'is_deletable',
+            'current_streak', 'longest_streak',
             'total_completions', 'last_completed_date',
             'created_at', 'updated_at', 'current_proof',
         ]

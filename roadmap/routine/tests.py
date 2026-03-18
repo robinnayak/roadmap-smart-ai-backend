@@ -1,14 +1,17 @@
 from datetime import date, datetime, timedelta
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from django.core.management import call_command
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from authentication.models import CustomUser
+from authentication.models import CustomUser, Profile
+from ai.services.DailyRoutineGenerator import DailyRoutineGenerator
 from events.models import Event
 from goal.models import Goal, Milestone, SubGoal, Task
 from journal.models import JournalEntry
@@ -26,9 +29,11 @@ from routine.models import (
     WakeInteraction,
 )
 from routine.services import (
+    _select_balanced_goal_tasks,
     build_adaptive_roadmap_adjustment,
     get_or_create_today_task_list,
 )
+from routine.system_habits_service import seed_system_habits_for_user
 from routine.wake_service import sync_wake_baseline_for_user
 from routine.habit_recommendation_service import (
     _build_habit_prompt,
@@ -518,7 +523,15 @@ class DailyTaskGenerationTests(APITestCase):
             password="Password@123",
         )
 
-    def _create_goal_with_subgoal(self, title: str, priority: str = "medium", status: str = "in_progress"):
+    def _create_goal_with_subgoal(
+        self,
+        title: str,
+        priority: str = "medium",
+        status: str = "in_progress",
+        *,
+        target_date: date | None = None,
+        milestone_status: str = "in_progress",
+    ):
         today = timezone.localdate()
         goal = Goal.objects.create(
             user=self.user,
@@ -526,7 +539,7 @@ class DailyTaskGenerationTests(APITestCase):
             description=f"{title} description",
             primary_category="career",
             priority=priority,
-            target_date=today + timedelta(days=60),
+            target_date=target_date or (today + timedelta(days=60)),
             status=status,
         )
         milestone = Milestone.objects.create(
@@ -534,7 +547,7 @@ class DailyTaskGenerationTests(APITestCase):
             title=f"{title} Milestone",
             display_order=1,
             priority=priority,
-            status="in_progress",
+            status=milestone_status,
         )
         subgoal = SubGoal.objects.create(
             milestone=milestone,
@@ -626,7 +639,7 @@ class DailyTaskGenerationTests(APITestCase):
 
         habit_items = [i for i in items if i.item_type == "habit"]
         goal_items = [i for i in items if i.item_type == "goal_task"]
-        self.assertEqual(len(habit_items), 1)
+        self.assertTrue(any(item.title == "Target day reading" for item in habit_items))
         self.assertEqual(len(goal_items), 3)
 
         by_task_id = {str(i.goal_task_id): i for i in goal_items if i.goal_task_id}
@@ -634,7 +647,32 @@ class DailyTaskGenerationTests(APITestCase):
         self.assertEqual(by_task_id[str(task_inferred_evening.id)].time_slot, "evening")
         self.assertEqual(by_task_id[str(task_fallback_afternoon.id)].time_slot, "afternoon")
 
-    def test_generation_always_places_journal_task_last(self):
+    def test_generation_always_includes_system_habits_and_prefers_explicit_habit_time_slot(self):
+        target_date = timezone.localdate() + timedelta(days=1)
+
+        HabitTracker.objects.create(
+            user=self.user,
+            name="System Evening Habit",
+            frequency="custom",
+            custom_days=[(target_date.weekday() + 1) % 7],
+            is_active=True,
+            is_system=True,
+            is_deletable=False,
+            estimated_minutes=15,
+            suggested_time=datetime.strptime("05:30:00", "%H:%M:%S").time(),
+            time_slot="evening",
+            priority="high",
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+
+        habit_item = task_list.tasks.filter(item_type="habit", title="System Evening Habit").first()
+        self.assertIsNotNone(habit_item)
+        self.assertEqual(habit_item.time_slot, "evening")
+        self.assertEqual(str(habit_item.suggested_time), "05:30:00")
+
+    def test_generation_places_journal_before_sleep_preparation(self):
         target_date = timezone.localdate()
         goal, subgoal = self._create_goal_with_subgoal("Journal Rule Goal", priority="medium")
         Task.objects.create(
@@ -645,13 +683,171 @@ class DailyTaskGenerationTests(APITestCase):
             estimated_duration_minutes=45,
             display_order=1,
         )
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Sleep Preparation",
+            description="Wind down and prepare for sleep.",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=30,
+            suggested_time=datetime.strptime("22:00:00", "%H:%M:%S").time(),
+            time_slot="evening",
+            priority="high",
+        )
 
         task_list, created = get_or_create_today_task_list(self.user, target_date)
         self.assertTrue(created)
-        last_item = task_list.tasks.order_by("display_order").last()
-        self.assertIsNotNone(last_item)
-        self.assertEqual(last_item.item_type, "journal")
-        self.assertEqual(last_item.title, "Evening journal entry")
+        ordered_titles = list(task_list.tasks.order_by("display_order").values_list("title", flat=True))
+        self.assertGreaterEqual(len(ordered_titles), 2)
+        self.assertEqual(ordered_titles[-2], "Evening journal entry")
+        self.assertEqual(ordered_titles[-1], "Sleep Preparation")
+
+    def test_generation_orders_same_time_morning_tasks_by_phase(self):
+        target_date = timezone.localdate()
+        goal, subgoal = self._create_goal_with_subgoal("Morning Ordering Goal", priority="high")
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Deep Work Session",
+            status="pending",
+            priority="high",
+            preferred_time_slot="morning",
+            scheduled_time=datetime.strptime("08:00:00", "%H:%M:%S").time(),
+            estimated_duration_minutes=90,
+            display_order=1,
+        )
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Review Today's Plan",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=10,
+            suggested_time=datetime.strptime("08:00:00", "%H:%M:%S").time(),
+            time_slot="morning",
+            priority="medium",
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+        morning_titles = list(
+            task_list.tasks.filter(time_slot="morning").order_by("display_order").values_list("title", flat=True)
+        )
+        self.assertLess(morning_titles.index("Review Today's Plan"), morning_titles.index("Deep Work Session"))
+
+    def test_generation_orders_prep_goal_tasks_before_analysis_tasks_at_same_time(self):
+        target_date = timezone.localdate()
+        goal, subgoal = self._create_goal_with_subgoal("Trade Review Goal", priority="high")
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Analyze Weekly Trade Journal and Calculate Metrics",
+            status="pending",
+            priority="high",
+            preferred_time_slot="evening",
+            scheduled_time=datetime.strptime("19:00:00", "%H:%M:%S").time(),
+            estimated_duration_minutes=150,
+            display_order=2,
+        )
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Organize Trade Journal & Define Review Scope",
+            status="pending",
+            priority="high",
+            preferred_time_slot="evening",
+            scheduled_time=datetime.strptime("19:00:00", "%H:%M:%S").time(),
+            estimated_duration_minutes=120,
+            display_order=1,
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+        evening_goal_titles = list(
+            task_list.tasks.filter(item_type="goal_task", time_slot="evening")
+            .order_by("display_order")
+            .values_list("title", flat=True)
+        )
+        self.assertLess(
+            evening_goal_titles.index("Organize Trade Journal & Define Review Scope"),
+            evening_goal_titles.index("Analyze Weekly Trade Journal and Calculate Metrics"),
+        )
+
+    def test_generation_prefers_explicit_suggested_time_over_text_inference(self):
+        target_date = timezone.localdate()
+        goal, subgoal = self._create_goal_with_subgoal("Explicit Time Goal", priority="medium")
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Morning reading block",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=30,
+            display_order=1,
+        )
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Hydration Reminder",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=10,
+            suggested_time=datetime.strptime("07:00:00", "%H:%M:%S").time(),
+            priority="medium",
+        )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+        morning_titles = list(
+            task_list.tasks.filter(time_slot="morning").order_by("display_order").values_list("title", flat=True)
+        )
+        self.assertLess(morning_titles.index("Hydration Reminder"), morning_titles.index("Morning reading block"))
+
+    def test_force_regenerate_keeps_deterministic_display_order(self):
+        target_date = timezone.localdate()
+        goal, subgoal = self._create_goal_with_subgoal("Deterministic Ordering Goal", priority="high")
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Analyze Weekly Trade Journal and Calculate Metrics",
+            status="pending",
+            priority="high",
+            preferred_time_slot="evening",
+            scheduled_time=datetime.strptime("19:00:00", "%H:%M:%S").time(),
+            estimated_duration_minutes=150,
+            display_order=2,
+        )
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Organize Trade Journal & Define Review Scope",
+            status="pending",
+            priority="high",
+            preferred_time_slot="evening",
+            scheduled_time=datetime.strptime("19:00:00", "%H:%M:%S").time(),
+            estimated_duration_minutes=120,
+            display_order=1,
+        )
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Sleep Preparation",
+            description="Wind down and prepare for sleep.",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=30,
+            suggested_time=datetime.strptime("22:00:00", "%H:%M:%S").time(),
+            time_slot="evening",
+            priority="high",
+        )
+
+        first_list, first_created = get_or_create_today_task_list(self.user, target_date)
+        regenerated_list, regenerated_created = get_or_create_today_task_list(
+            self.user,
+            target_date,
+            force_regenerate=True,
+        )
+
+        self.assertTrue(first_created)
+        self.assertTrue(regenerated_created)
+        first_titles = list(first_list.tasks.order_by("display_order").values_list("title", flat=True))
+        regenerated_titles = list(regenerated_list.tasks.order_by("display_order").values_list("title", flat=True))
+        self.assertEqual(first_titles, regenerated_titles)
+        self.assertEqual(
+            first_list.schedule_constraints.get("organization_policy"),
+            regenerated_list.schedule_constraints.get("organization_policy"),
+        )
 
     def test_flex_day_profile_caps_actionable_non_event_work_to_two_items(self):
         target_date = timezone.localdate()
@@ -816,6 +1012,241 @@ class DailyTaskGenerationTests(APITestCase):
             ordered_goals,
             [g_high.id, g_med.id, g_low.id, g_high.id, g_med.id, g_high.id],
         )
+
+    def test_selector_prioritizes_prerequisites_within_goal(self):
+        goal, subgoal = self._create_goal_with_subgoal("Prerequisite Goal", priority="high")
+        non_prerequisite = Task.objects.create(
+            subgoal=subgoal,
+            title="Regular follow-up task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=30,
+            display_order=1,
+            difficulty_level=2,
+            is_prerequisite=False,
+        )
+        prerequisite = Task.objects.create(
+            subgoal=subgoal,
+            title="Foundation prerequisite task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=30,
+            display_order=2,
+            difficulty_level=2,
+            is_prerequisite=True,
+        )
+
+        selected = _select_balanced_goal_tasks(user=self.user, limit=2)
+
+        self.assertEqual([task.id for task in selected], [prerequisite.id, non_prerequisite.id])
+        self.assertEqual(goal.id, selected[0].subgoal.milestone.goal_id)
+
+    def test_selector_applies_deadline_urgency_across_goal_buckets(self):
+        today = timezone.localdate()
+        near_goal, near_subgoal = self._create_goal_with_subgoal(
+            "Near Deadline Goal",
+            priority="high",
+            target_date=today + timedelta(days=3),
+        )
+        far_goal, far_subgoal = self._create_goal_with_subgoal(
+            "Far Deadline Goal",
+            priority="high",
+            target_date=today + timedelta(days=90),
+        )
+        near_task = Task.objects.create(
+            subgoal=near_subgoal,
+            title="Near deadline task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=30,
+            display_order=1,
+        )
+        far_task = Task.objects.create(
+            subgoal=far_subgoal,
+            title="Far deadline task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=30,
+            display_order=1,
+        )
+
+        selected = _select_balanced_goal_tasks(user=self.user, limit=2)
+
+        self.assertEqual([task.id for task in selected], [near_task.id, far_task.id])
+        self.assertEqual([task.subgoal.milestone.goal_id for task in selected], [near_goal.id, far_goal.id])
+
+    def test_selector_penalizes_higher_difficulty_tasks(self):
+        _, subgoal = self._create_goal_with_subgoal("Difficulty Goal", priority="medium")
+        hard_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Hard task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=45,
+            display_order=1,
+            difficulty_level=5,
+        )
+        easier_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Easier task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=45,
+            display_order=2,
+            difficulty_level=1,
+        )
+
+        selected = _select_balanced_goal_tasks(user=self.user, limit=2)
+
+        self.assertEqual([task.id for task in selected], [easier_task.id, hard_task.id])
+
+    def test_selector_excludes_completed_milestones_from_candidates(self):
+        _, active_subgoal = self._create_goal_with_subgoal(
+            "Active Milestone Goal",
+            priority="medium",
+            milestone_status="in_progress",
+        )
+        _, completed_subgoal = self._create_goal_with_subgoal(
+            "Completed Milestone Goal",
+            priority="high",
+            milestone_status="completed",
+        )
+        active_task = Task.objects.create(
+            subgoal=active_subgoal,
+            title="Active task",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=30,
+            display_order=1,
+        )
+        Task.objects.create(
+            subgoal=completed_subgoal,
+            title="Completed milestone task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=30,
+            display_order=1,
+            is_prerequisite=True,
+        )
+
+        selected = _select_balanced_goal_tasks(user=self.user, limit=5)
+
+        self.assertEqual([task.id for task in selected], [active_task.id])
+
+    def test_daily_generation_scored_selection_still_balances_across_goals(self):
+        target_date = timezone.localdate()
+        urgent_goal, urgent_subgoal = self._create_goal_with_subgoal(
+            "Urgent Goal",
+            priority="high",
+            status="in_progress",
+            target_date=target_date + timedelta(days=2),
+        )
+        steady_goal, steady_subgoal = self._create_goal_with_subgoal(
+            "Steady Goal",
+            priority="high",
+            status="in_progress",
+            target_date=target_date + timedelta(days=90),
+        )
+        support_goal, support_subgoal = self._create_goal_with_subgoal(
+            "Support Goal",
+            priority="medium",
+            status="in_progress",
+            target_date=target_date + timedelta(days=45),
+        )
+
+        for idx in range(1, 8):
+            Task.objects.create(
+                subgoal=urgent_subgoal,
+                title=f"Urgent {idx}",
+                status="pending",
+                priority="high",
+                estimated_duration_minutes=30,
+                display_order=idx,
+                is_prerequisite=idx <= 3,
+                difficulty_level=1 if idx <= 3 else 4,
+            )
+        for idx in range(1, 5):
+            Task.objects.create(
+                subgoal=steady_subgoal,
+                title=f"Steady {idx}",
+                status="pending",
+                priority="medium",
+                estimated_duration_minutes=30,
+                display_order=idx,
+                difficulty_level=2,
+            )
+        for idx in range(1, 4):
+            Task.objects.create(
+                subgoal=support_subgoal,
+                title=f"Support {idx}",
+                status="pending",
+                priority="low",
+                estimated_duration_minutes=30,
+                display_order=idx,
+                difficulty_level=1,
+            )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+
+        goal_items = list(task_list.tasks.filter(item_type="goal_task").order_by("display_order"))
+        present_goal_ids = {item.related_goal_id for item in goal_items if item.related_goal_id}
+        self.assertTrue(urgent_goal.id in present_goal_ids)
+        self.assertTrue(steady_goal.id in present_goal_ids)
+        self.assertTrue(support_goal.id in present_goal_ids)
+
+    def test_generation_keeps_adaptive_adjustments_with_scored_selection(self):
+        target_date = timezone.localdate()
+        if target_date.weekday() == 6:
+            target_date = target_date + timedelta(days=1)
+
+        _, subgoal = self._create_goal_with_subgoal(
+            "Adaptive Scored Goal",
+            priority="high",
+            status="in_progress",
+        )
+        lower_ranked = Task.objects.create(
+            subgoal=subgoal,
+            title="Later regular task",
+            description="Regular follow-up work",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=100,
+            display_order=1,
+            difficulty_level=4,
+        )
+        scored_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Prerequisite recovery task",
+            description="Important prerequisite step",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=60,
+            display_order=2,
+            difficulty_level=1,
+            is_prerequisite=True,
+        )
+
+        for offset in range(1, 6):
+            missed_date = target_date - timedelta(days=offset)
+            DailyTaskList.objects.create(
+                user=self.user,
+                date=missed_date,
+                total_tasks=3,
+                completed_tasks=0,
+                completion_percentage=0,
+                is_fully_completed=False,
+                status="pending",
+            )
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+
+        goal_items = list(task_list.tasks.filter(item_type="goal_task").order_by("display_order"))
+        self.assertGreaterEqual(len(goal_items), 2)
+        self.assertEqual([item.goal_task_id for item in goal_items[:2]], [scored_task.id, lower_ranked.id])
+        self.assertEqual(goal_items[0].priority, "medium")
+        self.assertEqual(goal_items[0].estimated_minutes, 43)
 
     def test_habits_still_included_daily_after_completion(self):
         day_one = timezone.localdate()
@@ -1299,6 +1730,95 @@ class DailyTaskGenerationTests(APITestCase):
             second_list.schedule_constraints.get("adaptive_roadmap"),
         )
 
+    def test_force_regenerate_keeps_deterministic_motivation_and_mantra(self):
+        target_date = timezone.localdate()
+        goal, subgoal = self._create_goal_with_subgoal("Deterministic Motivation Goal", priority="high")
+        goal.target_date = target_date + timedelta(days=14)
+        goal.save(update_fields=["target_date", "updated_at"])
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Finalize the investor update",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=75,
+            display_order=1,
+        )
+        HabitTracker.objects.create(
+            user=self.user,
+            name="Morning review",
+            frequency="daily",
+            is_active=True,
+            estimated_minutes=15,
+            priority="medium",
+        )
+
+        first_list, first_created = get_or_create_today_task_list(self.user, target_date)
+        regenerated_list, regenerated_created = get_or_create_today_task_list(
+            self.user,
+            target_date,
+            force_regenerate=True,
+        )
+
+        self.assertTrue(first_created)
+        self.assertTrue(regenerated_created)
+        self.assertTrue(first_list.daily_motivation)
+        self.assertTrue(first_list.daily_mantra)
+        self.assertEqual(first_list.daily_motivation, regenerated_list.daily_motivation)
+        self.assertEqual(first_list.daily_mantra, regenerated_list.daily_mantra)
+
+    def test_generator_uses_recovery_and_stretch_deadline_signals(self):
+        target_date = timezone.localdate()
+        stretch_goal, stretch_subgoal = self._create_goal_with_subgoal("Stretch Goal", priority="high")
+        stretch_goal.primary_category = "career"
+        stretch_goal.target_date = target_date + timedelta(days=3)
+        stretch_goal.save(update_fields=["primary_category", "target_date", "updated_at"])
+        stretch_task = Task.objects.create(
+            subgoal=stretch_subgoal,
+            title="Ship deadline deliverable",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=120,
+            display_order=1,
+        )
+
+        recovery_goal, recovery_subgoal = self._create_goal_with_subgoal("Recovery Goal", priority="medium")
+        recovery_goal.primary_category = "health"
+        recovery_goal.target_date = target_date + timedelta(days=30)
+        recovery_goal.save(update_fields=["primary_category", "target_date", "updated_at"])
+        recovery_task = Task.objects.create(
+            subgoal=recovery_subgoal,
+            title="Restore baseline workout",
+            status="pending",
+            priority="medium",
+            estimated_duration_minutes=30,
+            display_order=1,
+        )
+
+        generator = DailyRoutineGenerator()
+        stretch_result = generator.generate_motivation_and_mantra(
+            user_context={"streak_days": 5, "current_scale_level": 2},
+            goal_tasks=[stretch_task],
+            habits=[],
+            events=[],
+            target_date=target_date,
+        )
+        recovery_result = generator.generate_motivation_and_mantra(
+            user_context={"streak_days": 0, "current_scale_level": -2},
+            goal_tasks=[recovery_task],
+            habits=[],
+            events=[],
+            target_date=target_date,
+        )
+
+        stretch_data = stretch_result["data"]
+        recovery_data = recovery_result["data"]
+
+        self.assertIn("deadline is close", stretch_data["motivation"].lower())
+        self.assertIn("stretch", stretch_data["motivation"].lower())
+        self.assertIn("push the stretch task", stretch_data["mantra"].lower())
+        self.assertIn("reset day", recovery_data["motivation"].lower())
+        self.assertIn("pace it cleanly", recovery_data["mantra"].lower())
+
 
 class RoutineProgressEndpointTests(APITestCase):
     def setUp(self):
@@ -1736,8 +2256,9 @@ class RoutineEventConstraintIntegrationTests(APITestCase):
         )
 
         task_list, _ = get_or_create_today_task_list(self.user, target_date)
-        self.assertEqual(task_list.tasks.exclude(item_type="event").count(), 0)
+        self.assertEqual(task_list.tasks.exclude(item_type__in=["event", "journal"]).count(), 0)
         self.assertGreaterEqual(task_list.tasks.filter(item_type="event").count(), 1)
+        self.assertIsNotNone(task_list.tasks.filter(item_type="journal").first())
         self.assertEqual(task_list.schedule_constraints["fit_summary"]["fallback_strategy"], "partial")
         self.assertEqual(task_list.schedule_constraints["fit_summary"]["fit_status"], "partial_fit")
 
@@ -1778,6 +2299,9 @@ class HabitTrackerMotivationFieldsTests(APITestCase):
         self.assertEqual(serialized_habit["proof_metric_name"], "")
         self.assertFalse(serialized_habit["ai_suggested"])
         self.assertIsNone(serialized_habit["suggested_time"])
+        self.assertIsNone(serialized_habit["time_slot"])
+        self.assertFalse(serialized_habit["is_system"])
+        self.assertTrue(serialized_habit["is_deletable"])
         self.assertIsNone(serialized_habit["current_proof"])
 
         detail_response = self.client.get(f"/routines/habits/{habit.id}/")
@@ -1785,7 +2309,29 @@ class HabitTrackerMotivationFieldsTests(APITestCase):
         detail_payload = detail_response.data["habit"]
         self.assertEqual(detail_payload["category"], "other")
         self.assertEqual(detail_payload["rewards"], [])
+        self.assertIsNone(detail_payload["time_slot"])
+        self.assertFalse(detail_payload["is_system"])
+        self.assertTrue(detail_payload["is_deletable"])
         self.assertIsNone(detail_payload["current_proof"])
+
+    def test_serializer_ignores_read_only_system_flags_on_create(self):
+        response = self.client.post(
+            "/routines/habits/",
+            data={
+                "name": "User Habit",
+                "frequency": "daily",
+                "is_system": True,
+                "is_deletable": False,
+                "time_slot": "morning",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        habit = HabitTracker.objects.get(id=response.data["id"])
+        self.assertFalse(habit.is_system)
+        self.assertTrue(habit.is_deletable)
+        self.assertEqual(habit.time_slot, "morning")
 
     def test_get_current_proof_returns_none_when_not_configured(self):
         habit = HabitTracker.objects.create(
@@ -1833,6 +2379,136 @@ class HabitTrackerMotivationFieldsTests(APITestCase):
             "progress_pct": 43,
             "days_tracked": 8,
         })
+
+
+class SystemHabitsServiceTests(APITestCase):
+    def test_seed_service_is_idempotent(self):
+        user = CustomUser.objects.create_user(
+            email="seed-service@test.com",
+            password="Password@123",
+        )
+        HabitTracker.objects.filter(user=user, is_system=True).delete()
+
+        first_count = seed_system_habits_for_user(user)
+        second_count = seed_system_habits_for_user(user)
+
+        self.assertEqual(first_count, 7)
+        self.assertEqual(second_count, 0)
+        self.assertEqual(HabitTracker.objects.filter(user=user, is_system=True).count(), 7)
+
+    def test_management_command_backfills_missing_system_habits_only(self):
+        user = CustomUser.objects.create_user(
+            email="seed-command@test.com",
+            password="Password@123",
+        )
+        HabitTracker.objects.filter(user=user, is_system=True).first().delete()
+
+        output = StringIO()
+        call_command("seed_system_habits", stdout=output)
+
+        self.assertEqual(HabitTracker.objects.filter(user=user, is_system=True).count(), 7)
+        self.assertIn("Seeded 1 habits for user", output.getvalue())
+
+    @patch("authentication.signals.seed_system_habits_for_user", side_effect=RuntimeError("boom"))
+    def test_user_creation_does_not_fail_when_seed_raises(self, mock_seed):
+        with self.assertLogs("authentication.signals", level="ERROR") as captured:
+            user = CustomUser.objects.create_user(
+                email="seed-failure@test.com",
+                password="Password@123",
+            )
+
+        self.assertTrue(Profile.objects.filter(user=user).exists())
+        self.assertEqual(HabitTracker.objects.filter(user=user, is_system=True).count(), 0)
+        self.assertIn("Failed to seed system habits for user", "\n".join(captured.output))
+        mock_seed.assert_called_once()
+
+
+class SystemHabitDetailApiTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="system-habit-detail@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.system_habit = HabitTracker.objects.create(
+            user=self.user,
+            name="Protected System Habit",
+            frequency="daily",
+            is_system=True,
+            is_deletable=False,
+            estimated_minutes=10,
+            time_slot="morning",
+            suggested_time=datetime.strptime("06:00:00", "%H:%M:%S").time(),
+        )
+        self.user_habit = HabitTracker.objects.create(
+            user=self.user,
+            name="Editable Habit",
+            frequency="daily",
+            estimated_minutes=20,
+        )
+
+    def test_system_habit_delete_is_forbidden(self):
+        response = self.client.delete(f"/routines/habits/{self.system_habit.id}/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(HabitTracker.objects.filter(id=self.system_habit.id).exists())
+
+    def test_system_habit_put_is_forbidden(self):
+        response = self.client.put(
+            f"/routines/habits/{self.system_habit.id}/",
+            data={"name": "Renamed"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.system_habit.refresh_from_db()
+        self.assertEqual(self.system_habit.name, "Protected System Habit")
+
+    def test_system_habit_patch_allows_only_safe_fields(self):
+        response = self.client.patch(
+            f"/routines/habits/{self.system_habit.id}/",
+            data={
+                "estimated_minutes": 25,
+                "time_slot": "evening",
+                "suggested_time": "20:30:00",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.system_habit.refresh_from_db()
+        self.assertEqual(self.system_habit.estimated_minutes, 25)
+        self.assertEqual(self.system_habit.time_slot, "evening")
+        self.assertEqual(str(self.system_habit.suggested_time), "20:30:00")
+
+    def test_system_habit_patch_rejects_disallowed_fields(self):
+        response = self.client.patch(
+            f"/routines/habits/{self.system_habit.id}/",
+            data={"name": "Blocked Rename", "estimated_minutes": 12},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["disallowed_fields"], ["name"])
+        self.system_habit.refresh_from_db()
+        self.assertEqual(self.system_habit.name, "Protected System Habit")
+
+    def test_non_system_habit_keeps_existing_put_patch_and_delete_behavior(self):
+        patch_response = self.client.patch(
+            f"/routines/habits/{self.user_habit.id}/",
+            data={"name": "Partially Updated"},
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+
+        put_response = self.client.put(
+            f"/routines/habits/{self.user_habit.id}/",
+            data={"name": "Fully Updated"},
+            format="json",
+        )
+        self.assertEqual(put_response.status_code, status.HTTP_200_OK)
+
+        delete_response = self.client.delete(f"/routines/habits/{self.user_habit.id}/")
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(HabitTracker.objects.filter(id=self.user_habit.id).exists())
 
 
 class HealthProfileEndpointTests(APITestCase):
@@ -2404,25 +3080,96 @@ class DailyBriefAPITests(APITestCase):
         self.today_url = "/routines/brief/today/"
         self.track_status_url = "/routines/brief/track-status/"
 
-    @patch("routine.daily_brief_service.OllamaProvider")
-    def test_get_generates_brief_when_missing(self, mock_provider_cls):
-        mock_provider = mock_provider_cls.return_value
-        mock_provider.generate_response.return_value = SimpleNamespace(
-            content="Sentence one. Sentence two. Sentence three."
+    def test_get_generates_deterministic_three_sentence_brief_when_missing(self):
+        today = timezone.localdate()
+        yesterday = today - timedelta(days=1)
+
+        yesterday_list = DailyTaskList.objects.create(
+            user=self.user,
+            date=yesterday,
+            total_tasks=2,
+            completed_tasks=1,
+            completion_percentage=50,
+            is_fully_completed=False,
+            status="in_progress",
+        )
+        DailyTaskItem.objects.create(
+            task_list=yesterday_list,
+            item_type="habit",
+            title="Hydration",
+            description="Drink water",
+            priority="medium",
+            estimated_minutes=10,
+            removed_by_user=False,
+            display_order=0,
+        )
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Revenue Goal",
+            description="Increase recurring revenue",
+            primary_category="financial",
+            status="in_progress",
+            target_date=today + timedelta(days=20),
+        )
+        GoalProgressEntry.objects.create(
+            user=self.user,
+            goal=goal,
+            date=yesterday,
+            metric_name="MRR",
+            metric_unit="$",
+            metric_value=2500,
+            metric_start=1000,
+            metric_target=5000,
+            metric_direction="up",
+        )
+        Event.objects.create(
+            user=self.user,
+            title="Client Call",
+            description="Morning sync",
+            event_type="one_time",
+            start_at=datetime.fromisoformat(f"{today.isoformat()}T10:00:00+00:00"),
+            end_at=datetime.fromisoformat(f"{today.isoformat()}T11:00:00+00:00"),
+            is_all_day=False,
+            timezone="UTC",
+            recurrence=None,
+        )
+        HealthProfile.objects.create(
+            user=self.user,
+            stress_level="high",
+            willpower_level="low",
+            sleep_pattern="night_owl",
+        )
+        DailyBrief.objects.create(
+            user=self.user,
+            date=yesterday,
+            brief_text="Yesterday brief.",
+            habit_completion_yesterday=60.0,
+            missed_habits_yesterday=[],
+            goal_metrics_snapshot={},
+            upcoming_events_today=[],
+            streak_at_generation=2,
+            track_status="behind",
         )
 
         response = self.client.get(self.today_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(DailyBrief.objects.filter(user=self.user, date=timezone.localdate()).exists())
         self.assertIn("brief", response.data)
-        self.assertIn("Sentence one", response.data["brief"]["brief_text"])
+        brief_text = response.data["brief"]["brief_text"]
+        self.assertEqual(len([part for part in brief_text.rstrip(".").split(". ") if part]), 3)
+        self.assertIn("50% completion", brief_text)
+        self.assertIn("hydration", brief_text.lower())
+        self.assertIn("client call", brief_text.lower())
+        self.assertIn("lighter than your ambition", brief_text.lower())
 
-    @patch("routine.daily_brief_service.OllamaProvider")
-    def test_get_returns_cached_brief_on_second_call(self, mock_provider_cls):
-        mock_provider = mock_provider_cls.return_value
-        mock_provider.generate_response.return_value = SimpleNamespace(
-            content="Cached brief line one. Line two. Line three."
-        )
+        brief = DailyBrief.objects.get(user=self.user, date=timezone.localdate())
+        self.assertEqual(brief.habit_completion_yesterday, 50.0)
+        self.assertEqual(brief.missed_habits_yesterday, ["Hydration"])
+        self.assertEqual(brief.streak_at_generation, 0)
+        self.assertTrue(brief.goal_metrics_snapshot)
+        self.assertEqual(len(brief.upcoming_events_today), 1)
+
+    def test_get_returns_cached_brief_on_second_call(self):
 
         first_response = self.client.get(self.today_url)
         second_response = self.client.get(self.today_url)
@@ -2430,16 +3177,9 @@ class DailyBriefAPITests(APITestCase):
         self.assertEqual(first_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.assertEqual(DailyBrief.objects.filter(user=self.user, date=timezone.localdate()).count(), 1)
-        self.assertEqual(mock_provider.generate_response.call_count, 1)
         self.assertEqual(first_response.data["brief"]["id"], second_response.data["brief"]["id"])
 
-    @patch("routine.daily_brief_service.OllamaProvider")
-    def test_get_reconciles_streak_snapshot_before_brief_creation(self, mock_provider_cls):
-        mock_provider = mock_provider_cls.return_value
-        mock_provider.generate_response.return_value = SimpleNamespace(
-            content="Keep moving today. One clear action first. Then build momentum."
-        )
-
+    def test_get_reconciles_streak_snapshot_before_brief_creation(self):
         today = timezone.localdate()
         completed_day = today - timedelta(days=2)
         missed_day = today - timedelta(days=1)

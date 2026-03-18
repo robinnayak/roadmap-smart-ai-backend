@@ -2,8 +2,8 @@
 # roadmap/routine/services.py
 # ==============================================================================
 """
-Routine selection logic - pure database queries, no AI needed for task picking.
-AI is only used to generate the daily motivation + mantra (two short strings).
+Routine selection logic - pure database queries for task picking plus
+deterministic routine text generation.
 """
 import logging
 from collections import deque
@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.db.utils import IntegrityError
+from django.utils import timezone
 
 from goal.models import Task
 from routine.models import (
@@ -79,6 +80,102 @@ BAD_HABIT_SIGNAL_KEYWORDS = {
     "sleep_disruption": ("late night", "slept late", "overslept", "sleep debt", "poor sleep"),
     "impulsive_distraction": ("distracted", "mindless", "binge", "gaming too much"),
 }
+
+ROUTINE_SLOT_DEFAULT_MINUTES = {
+    "morning": 8 * 60,
+    "afternoon": 14 * 60,
+    "evening": 19 * 60,
+    "night": 22 * 60,
+}
+ROUTINE_PHASE_ORDER = {
+    "startup": 0,
+    "execution": 1,
+    "admin_review": 2,
+    "wind_down": 3,
+}
+ROUTINE_DEPENDENCY_ORDER = {
+    "prep": 0,
+    "neutral": 1,
+    "follow_through": 2,
+}
+ROUTINE_ANCHOR_TAIL_ORDER = {
+    "none": 0,
+    "journal_penultimate": 1,
+    "sleep_last": 2,
+}
+SLEEP_ANCHOR_KEYWORDS = (
+    "sleep preparation",
+    "bedtime",
+    "wind down",
+    "wind-down",
+    "prepare for sleep",
+)
+SLEEP_TITLE_KEYWORDS = ("sleep", "bed")
+EVENING_JOURNAL_KEYWORDS = (
+    "evening journal",
+    "journal & reflection",
+    "journal and reflection",
+    "review your day",
+    "end the day",
+    "day review",
+)
+STARTUP_KEYWORDS = (
+    "today's intention",
+    "todays intention",
+    "review today's plan",
+    "review todays plan",
+    "plan review",
+    "visualization",
+    "gratitude",
+    "meditation",
+    "hydrate",
+    "hydration",
+)
+EXECUTION_KEYWORDS = (
+    "workout",
+    "deep work",
+    "study",
+    "learn",
+    "practice",
+    "build",
+    "ship",
+    "write code",
+)
+ADMIN_REVIEW_KEYWORDS = (
+    "analyze",
+    "review",
+    "journal",
+    "metrics",
+    "calculate",
+    "audit",
+)
+WIND_DOWN_KEYWORDS = (
+    "reflection",
+    "shutdown",
+    "sleep",
+    "bedtime",
+    "wind down",
+    "wind-down",
+)
+PREP_ACTION_KEYWORDS = (
+    "organize",
+    "define",
+    "setup",
+    "set up",
+    "install",
+    "initialize",
+    "init",
+    "prepare",
+    "warm-up",
+    "warm up",
+)
+FOLLOW_THROUGH_ACTION_KEYWORDS = (
+    "analyze",
+    "review",
+    "execute",
+    "publish",
+    "calculate",
+)
 
 
 def _minutes_to_time(value: int) -> time:
@@ -427,21 +524,60 @@ def _apply_overbooked_fallback(
     return habits, limited, minutes_multiplier, "partial", partial_required
 
 
+def _goal_deadline_urgency_score(goal) -> int:
+    target_date = getattr(goal, "target_date", None)
+    if not target_date:
+        return 0
+
+    days_remaining = (target_date - timezone.localdate()).days
+    if days_remaining <= 0:
+        return 35
+    if days_remaining <= 7:
+        return 25
+    if days_remaining <= 21:
+        return 15
+    if days_remaining <= 45:
+        return 8
+    return 0
+
+
+def _score_goal_task(task: Task) -> int:
+    score = 0
+    if task.is_prerequisite:
+        score += 40
+
+    score += _goal_deadline_urgency_score(task.subgoal.milestone.goal)
+    score -= int(task.difficulty_level or 0) * 3
+    return score
+
+
+def _goal_task_sort_key(task: Task) -> tuple:
+    return (
+        -_score_goal_task(task),
+        task.subgoal.milestone.display_order,
+        task.subgoal.display_order,
+        task.display_order,
+        str(task.id),
+    )
+
+
 def _select_balanced_goal_tasks(user, limit: int = MAX_DAILY_GOAL_TASKS) -> list[Task]:
     """
-    Pick pending tasks across active goals using balanced round-robin.
+    Pick pending tasks across active goals using scored balanced round-robin.
 
     Goal ordering is deterministic:
       1) goal priority (high > medium > low)
-      2) goal UUID (string) as tie-breaker
+      2) top candidate score within each goal bucket
+      3) goal UUID (string) as tie-breaker
 
     Task ordering inside each goal is deterministic:
-      milestone.display_order -> subgoal.display_order -> task.display_order -> task.id
+      task score -> milestone.display_order -> subgoal.display_order -> task.display_order -> task.id
     """
     goal_tasks_qs = (
         Task.objects.filter(
             subgoal__milestone__goal__user=user,
             subgoal__milestone__goal__status__in=["not_started", "in_progress"],
+            subgoal__milestone__status__in=["not_started", "in_progress", "blocked"],
             status="pending",
         )
         .select_related(
@@ -465,16 +601,22 @@ def _select_balanced_goal_tasks(user, limit: int = MAX_DAILY_GOAL_TASKS) -> list
         goal = task.subgoal.milestone.goal
         goal_id = str(goal.id)
         if goal_id not in goals_to_tasks:
-            goals_to_tasks[goal_id] = {"goal": goal, "tasks": deque()}
+            goals_to_tasks[goal_id] = {"goal": goal, "tasks": []}
         goals_to_tasks[goal_id]["tasks"].append(task)
 
     if not goals_to_tasks:
         return []
 
+    for bucket in goals_to_tasks.values():
+        ranked_tasks = sorted(bucket["tasks"], key=_goal_task_sort_key)
+        bucket["tasks"] = deque(ranked_tasks)
+        bucket["top_score"] = _score_goal_task(ranked_tasks[0]) if ranked_tasks else 0
+
     goal_buckets = sorted(
         goals_to_tasks.values(),
         key=lambda bucket: (
             -GOAL_PRIORITY_ORDER.get(bucket["goal"].priority, 0),
+            -bucket["top_score"],
             str(bucket["goal"].id),
         ),
     )
@@ -619,7 +761,7 @@ def _apply_flex_day_profile(habits, goal_tasks, minutes_multiplier: float):
 
 
 def _build_journal_last_task(task_list: DailyTaskList, display_order: int, day_mode: str) -> DailyTaskItem:
-    description = "End the day with an honest reflection. This task is always scheduled last."
+    description = "End the day with an honest reflection before your final wind-down step."
     if day_mode == DAY_MODE_FLEX:
         description = (
             "Flex-day reflection: capture what happened, one win, and the smallest next step."
@@ -634,9 +776,141 @@ def _build_journal_last_task(task_list: DailyTaskList, display_order: int, day_m
         estimated_minutes=15,
         time_slot="evening",
         suggested_time=time(hour=21, minute=0),
-        why_important="Deterministic ordering rule: journal is always the final task.",
+        why_important="Deterministic ordering rule: evening reflection belongs near the end of the day.",
         display_order=display_order,
     )
+
+
+def _normalize_routine_text(*values: str | None) -> str:
+    return " ".join(str(value or "").strip().lower() for value in values if value).strip()
+
+
+def _infer_routine_slot_from_values(*values: str | None, fallback: str = "morning") -> str:
+    text = _normalize_routine_text(*values)
+    if any(word in text for word in ("morning", "breakfast", "wake", "sunrise")):
+        return "morning"
+    if any(word in text for word in ("afternoon", "noon", "midday", "lunch")):
+        return "afternoon"
+    if any(word in text for word in ("evening", "night", "journal", "reflect", "bedtime", "sleep")):
+        return "evening"
+    return fallback
+
+
+def _classify_anchor_role(item: DailyTaskItem) -> str:
+    title = str(getattr(item, "title", "") or "").strip().lower()
+    text = _normalize_routine_text(
+        title,
+        getattr(item, "description", ""),
+        getattr(item, "why_important", ""),
+    )
+
+    if any(keyword in text for keyword in SLEEP_ANCHOR_KEYWORDS):
+        return "sleep_last"
+    if title.startswith(SLEEP_TITLE_KEYWORDS) or title == "sleep":
+        return "sleep_last"
+    if getattr(item, "item_type", "") == "journal":
+        return "journal_penultimate"
+    if any(keyword in text for keyword in EVENING_JOURNAL_KEYWORDS):
+        return "journal_penultimate"
+    return "none"
+
+
+def _effective_slot_for_item(item: DailyTaskItem) -> str:
+    suggested_time = getattr(item, "suggested_time", None)
+    if suggested_time:
+        hour = suggested_time.hour
+        if 4 <= hour < 12:
+            return "morning"
+        if 12 <= hour < 17:
+            return "afternoon"
+        if 17 <= hour < 21:
+            return "evening"
+        return "night"
+
+    if getattr(item, "time_slot", None):
+        return str(item.time_slot)
+
+    return _infer_routine_slot_from_values(
+        getattr(item, "title", ""),
+        getattr(item, "description", ""),
+        fallback="morning",
+    )
+
+
+def _effective_minutes_for_item(item: DailyTaskItem) -> int:
+    suggested_time = getattr(item, "suggested_time", None)
+    if suggested_time:
+        return suggested_time.hour * 60 + suggested_time.minute
+    return ROUTINE_SLOT_DEFAULT_MINUTES.get(_effective_slot_for_item(item), ROUTINE_SLOT_DEFAULT_MINUTES["morning"])
+
+
+def _classify_routine_phase(item: DailyTaskItem) -> str:
+    text = _normalize_routine_text(
+        getattr(item, "title", ""),
+        getattr(item, "description", ""),
+    )
+    if any(keyword in text for keyword in WIND_DOWN_KEYWORDS):
+        return "wind_down"
+    if any(keyword in text for keyword in STARTUP_KEYWORDS):
+        return "startup"
+    if any(keyword in text for keyword in ADMIN_REVIEW_KEYWORDS):
+        return "admin_review"
+    if getattr(item, "item_type", "") == "goal_task":
+        return "execution"
+    if any(keyword in text for keyword in EXECUTION_KEYWORDS):
+        return "execution"
+    return "execution"
+
+
+def _classify_dependency_stage(item: DailyTaskItem) -> str:
+    text = _normalize_routine_text(getattr(item, "title", ""))
+    if any(keyword in text for keyword in PREP_ACTION_KEYWORDS):
+        return "prep"
+    if any(keyword in text for keyword in FOLLOW_THROUGH_ACTION_KEYWORDS):
+        return "follow_through"
+    return "neutral"
+
+
+def _duration_sort_value(item: DailyTaskItem, phase: str) -> int:
+    minutes = int(getattr(item, "estimated_minutes", 0) or 0)
+    if phase in {"startup", "admin_review", "wind_down"}:
+        return minutes
+    if phase == "execution":
+        return -minutes
+    return minutes
+
+
+def _startup_type_rank(item: DailyTaskItem, phase: str) -> int:
+    if phase != "startup":
+        return 0
+    return 0 if getattr(item, "item_type", "") == "habit" else 1
+
+
+def _canonical_routine_sort_key(item: DailyTaskItem) -> tuple:
+    anchor_role = _classify_anchor_role(item)
+    phase = _classify_routine_phase(item)
+    priority_rank = GOAL_PRIORITY_ORDER.get(getattr(item, "priority", ""), 0)
+    generation_order = int(getattr(item, "_generation_index", getattr(item, "display_order", 0)) or 0)
+    return (
+        ROUTINE_ANCHOR_TAIL_ORDER[anchor_role],
+        _effective_minutes_for_item(item),
+        ROUTINE_PHASE_ORDER[phase],
+        _startup_type_rank(item, phase),
+        ROUTINE_DEPENDENCY_ORDER[_classify_dependency_stage(item)],
+        -priority_rank,
+        _duration_sort_value(item, phase),
+        str(getattr(item, "title", "")).lower(),
+        generation_order,
+    )
+
+
+def _apply_canonical_routine_order(items: list[DailyTaskItem]) -> list[DailyTaskItem]:
+    for index, item in enumerate(items):
+        setattr(item, "_generation_index", index)
+    ordered_items = sorted(items, key=_canonical_routine_sort_key)
+    for index, item in enumerate(ordered_items):
+        item.display_order = index
+    return ordered_items
 
 
 def _journal_tone_note(tone_style: str) -> str:
@@ -1146,7 +1420,7 @@ def get_or_create_today_task_list(
     # 2) Fetch habits that should run on target_date
     habits = [
         h for h in HabitTracker.objects.filter(user=user, is_active=True)
-        if h.should_include_on_date(target_date)
+        if h.is_system or h.should_include_on_date(target_date)
     ]
 
     event_occurrences = _get_event_occurrences_for_day(user=user, target_date=target_date)
@@ -1184,56 +1458,39 @@ def get_or_create_today_task_list(
         )
         fallback_strategy = "flex_profile"
 
-    # 3) Ask AI for motivation + mantra only
-    motivation = ""
-    mantra = ""
-    try:
-        from ai.services.DailyRoutineGenerator import DailyRoutineGenerator
+    # 3) Build deterministic motivation + mantra
+    from ai.services.DailyRoutineGenerator import DailyRoutineGenerator
 
-        user_context = _get_user_context(user)
-        user_context["routine_tone_style"] = tone_style
-        user_context["event_constraints"] = {
-            "available_minutes": total_available_minutes,
-            "required_minutes": required_minutes_before_fallback,
-            "fallback_strategy": fallback_strategy,
-            "occupied_window_count": len(schedule_constraints.get("occupied_windows", [])),
-        }
-        user_context["journal_load_signal"] = {
-            "average_sentiment_score": journal_adaptation["average_sentiment_score"],
-            "total_bad_habit_hits": journal_adaptation["total_bad_habit_hits"],
-            "entries_considered": journal_adaptation["entries_considered"],
-        }
-        generator = DailyRoutineGenerator()
-        ai_result = generator.generate_motivation_and_mantra(
-            user_context=user_context,
-            goal_tasks=list(goal_tasks),
-            habits=habits,
-            events=event_occurrences,
-            target_date=target_date,
-        )
-        if ai_result.get("status") == "success":
-            data = ai_result.get("data", {})
-            motivation = data.get("motivation", "")
-            mantra = data.get("mantra", "")
-    except Exception:
-        logger.exception(
-            "Could not generate motivation for user %s - continuing without it",
-            user.id,
-        )
-    if not motivation:
-        if tone_style == "supportive":
-            motivation = "Small consistent wins count today. Keep the plan gentle and finish the first step."
-        elif tone_style == "challenge":
-            motivation = "Momentum is on your side. Focus deep and execute one stretch task with intent."
-        else:
-            motivation = "Stay consistent today and complete the next meaningful actions."
-    if not mantra:
-        if tone_style == "supportive":
-            mantra = "Gentle pace, strong consistency."
-        elif tone_style == "challenge":
-            mantra = "Focused effort compounds fast."
-        else:
-            mantra = "One clear task at a time."
+    streak, _ = DisciplineStreak.objects.get_or_create(user=user)
+    user_context = _get_user_context(user)
+    user_context["routine_tone_style"] = tone_style
+    user_context["event_constraints"] = {
+        "available_minutes": total_available_minutes,
+        "required_minutes": required_minutes_before_fallback,
+        "fallback_strategy": fallback_strategy,
+        "occupied_window_count": len(schedule_constraints.get("occupied_windows", [])),
+    }
+    user_context["journal_load_signal"] = {
+        "average_sentiment_score": journal_adaptation["average_sentiment_score"],
+        "total_bad_habit_hits": journal_adaptation["total_bad_habit_hits"],
+        "entries_considered": journal_adaptation["entries_considered"],
+    }
+    user_context["streak_days"] = int(getattr(streak, "current_streak_days", 0) or 0)
+    user_context["current_scale_level"] = int(
+        adaptive_adjustment.get("state", {}).get("current_scale_level", 0) or 0
+    )
+
+    generator = DailyRoutineGenerator()
+    generation_result = generator.generate_motivation_and_mantra(
+        user_context=user_context,
+        goal_tasks=list(goal_tasks),
+        habits=habits,
+        events=event_occurrences,
+        target_date=target_date,
+    )
+    generation_data = generation_result.get("data", {})
+    motivation = generation_data.get("motivation", "")
+    mantra = generation_data.get("mantra", "")
 
     # 4) Build list + items, race-safe against concurrent calls
     try:
@@ -1283,6 +1540,10 @@ def get_or_create_today_task_list(
                     },
                     "adaptive_roadmap": _build_adaptive_response_metadata(adaptive_adjustment),
                     "wake_baseline": wake_baseline,
+                    "organization_policy": {
+                        "name": "routine_organization_v1",
+                        "owner": "backend_canonical",
+                    },
                 },
             )
 
@@ -1331,7 +1592,10 @@ def get_or_create_today_task_list(
                 habit_description = (habit.description or "").strip() or (habit.reason_body or "").strip()
                 habit_why_important = (habit.why_important or "").strip() or (habit.reason_headline or "").strip()
                 habit_minutes = _scale_minutes(habit.estimated_minutes, minutes_multiplier)
-                if habit.suggested_time:
+                if habit.time_slot:
+                    habit_slot = habit.time_slot
+                    habit_uses_fallback = False
+                elif habit.suggested_time:
                     habit_slot = _infer_time_slot_from_datetime(
                         datetime.combine(target_date, habit.suggested_time),
                         fallback=wake_default_slot if wake_has_baseline else "morning",
@@ -1440,7 +1704,6 @@ def get_or_create_today_task_list(
                 )
                 order += 1
 
-            # Deterministic ordering rule: journal is always the final task.
             items_to_create.append(
                 _build_journal_last_task(
                     task_list=task_list,
@@ -1449,6 +1712,7 @@ def get_or_create_today_task_list(
                 )
             )
 
+            items_to_create = _apply_canonical_routine_order(items_to_create)
             DailyTaskItem.objects.bulk_create(items_to_create)
             task_list.update_progress()
     except IntegrityError:
