@@ -1,0 +1,18 @@
+Identify only substantially similar active goals for the current goal.
+
+CURRENT GOAL
+{current_goal}
+
+ACTIVE GOALS
+{active_goals}
+
+Instructions:
+- Flag only near-duplicates or clearly overlapping outcomes.
+- Ignore goals that are merely in the same category.
+- Return at most 3 findings.
+- Each finding must mention the active goal title and why the overlap matters.
+
+Return JSON only in this exact shape:
+{
+  "findings": ["string"]
+}

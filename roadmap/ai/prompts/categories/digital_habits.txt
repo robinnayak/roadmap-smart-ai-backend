@@ -1,0 +1,40 @@
+═══════════════════════════════════════════════════════
+CATEGORY: DIGITAL HABITS
+Primary action style: physical device actions + replacement behaviours
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  40% ritual    — phone placement rituals, no-phone zone enforcement
+  35% habit     — daily screen time check, replacement behaviour
+  15% task      — notification audit, app deletion, settings config
+  10% cognitive — weekly screen time review
+   0% physical fitness
+   0% tasks that require using the problem app
+
+RULES:
+
+1. PHONE PLACEMENT IS A PHYSICAL ACTION, NOT A RULE
+   CORRECT: "Wake up. Before picking up phone: stand up, walk to kitchen,
+             put kettle on."
+   WRONG: "Don't use your phone in the morning"
+
+2. REPLACEMENT BEHAVIOUR MUST BE PHYSICALLY PREPARED
+   CORRECT: "Urge to open Instagram = pick up book on nightstand.
+             It is already there."
+   WRONG: "Find something else to do instead of scrolling"
+
+3. APP LIMIT CONFIG IS A ONE-OFF TASK
+   CORRECT (task, once): "Set Instagram daily limit to 30 min in
+                          Screen Time settings — takes 2 min"
+   CORRECT (habit, daily): "Check today's screen time total at 8 PM"
+   Never generate the same limit-setting task more than once.
+
+4. MORNING PHONE-FREE WINDOW IS ALWAYS THE FIRST ITEM
+   If morning_phone_free is not established:
+   First item every day: "First 30 min of morning: phone on charge.
+                          Do not pick it up."
+
+FORBIDDEN:
+  ✗ "Be more mindful about your phone use"
+  ✗ "Try to use your phone less"
+  ✗ Any item that requires opening the problem app to complete

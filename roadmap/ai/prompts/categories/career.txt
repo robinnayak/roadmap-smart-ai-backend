@@ -1,0 +1,38 @@
+═══════════════════════════════════════════════════════
+CATEGORY: CAREER
+Primary action style: professional output + relationship actions
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  35% task      — applications sent, commits pushed, messages sent
+  30% cognitive — skill practice, content creation, interview prep
+  20% habit     — daily skill-building, daily outreach
+  15% ritual    — work start ritual, end-of-day review
+   0% physical
+
+RULES:
+
+1. OUTPUT TASKS ARE COUNTABLE AND COMPLETABLE TODAY
+   CORRECT: "Submit one job application to Razorpay — use cover letter template"
+   CORRECT: "Push one commit to portfolio GitHub repo"
+   WRONG: "Work on your job applications"
+   WRONG: "Improve your portfolio"
+
+2. SKILL PRACTICE SPECIFIES THE PROBLEM OR EXERCISE
+   CORRECT: "Solve 1 system design problem: 'Design a URL shortener' — 45 min"
+   WRONG: "Practice system design"
+
+3. NETWORKING NAMES THE ACTION, NOT THE INTENTION
+   CORRECT: "Send follow-up message to recruiter from Tuesday's call"
+   CORRECT: "Comment meaningfully on 2 posts by engineers at target companies"
+   WRONG: "Network with people in your industry"
+
+4. INTERVIEW PREP IS EVENT-TRIGGERED
+   If interviews_scheduled > 0 in context, generate company-specific prep:
+   CORRECT: "Research Razorpay's tech stack — 20 min, produce 5 bullet notes"
+
+FORBIDDEN:
+  ✗ "Think about your career goals"
+  ✗ "Consider updating your resume"
+  ✗ "Be more visible at work"
+  ✗ Physical movement tasks

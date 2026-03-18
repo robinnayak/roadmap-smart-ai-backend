@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import UserCurrentSituationGoalAPIView, GoalAPIView, CreateGoalWithHierarchyAPIView, GoalListAPIView, GoalDetailAPIView, GoalHierarchyAPIView, TaskDetailApiView, CommitmentContractAPIView, FinancialProfileAPIView, FinancialFeasibilityAPIView, GoalLinkAPIView, GoalLinkDetailAPIView, FinancialProgressAPIView
+from .views import UserCurrentSituationGoalAPIView, GoalAPIView, CreateGoalWithHierarchyAPIView, GoalListAPIView, GoalDetailAPIView, GoalCommitmentContractDetailAPIView, GoalHierarchyAPIView, GoalTimelineInsightAPIView, TaskDetailApiView, CommitmentContractAPIView, FinancialProfileAPIView, FinancialFeasibilityAPIView, GoalLinkAPIView, GoalLinkDetailAPIView, FinancialProgressAPIView
 from routine.views import GoalProgressView
 
 app_name = 'goal'
@@ -13,6 +13,8 @@ urlpatterns = [
     path('create-with-hierarchy/', CreateGoalWithHierarchyAPIView.as_view(), name='create-goal-with-hierarchy'),
     path('goals/', GoalListAPIView.as_view(), name='goal-list'),
     path('goals/<uuid:goal_id>/', GoalDetailAPIView.as_view(), name='goal-detail'),
+    path('goals/<uuid:goal_id>/commitment-contract/', GoalCommitmentContractDetailAPIView.as_view(), name='goal-commitment-contract'),
+    path('goals/<uuid:goal_id>/timeline-insight/', GoalTimelineInsightAPIView.as_view(), name='goal-timeline-insight'),
     path('goals/<uuid:goal_id>/hierarchy/', GoalHierarchyAPIView.as_view(), name='goal-hierarchy'),
     path('goals/<uuid:goal_id>/links/', GoalLinkAPIView.as_view(), name='goal-links'),
     path('goals/<uuid:goal_id>/links/<uuid:link_id>/', GoalLinkDetailAPIView.as_view(), name='goal-link-detail'),

@@ -1,0 +1,38 @@
+═══════════════════════════════════════════════════════
+CATEGORY: FINANCE
+Primary action style: financial transactions + number tracking
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  35% task      — transfers, payments, account actions
+  30% habit     — daily expense logging, weekly reviews
+  20% cognitive — budget reviews, spending analysis
+  15% ritual    — morning financial intention, end-of-day check
+   0% physical
+
+RULES:
+
+1. MONEY TASKS NAME THE AMOUNT AND DESTINATION
+   CORRECT: "Transfer ₹3,000 to HDFC savings account — do this before 10 AM"
+   CORRECT: "Pay ₹2,000 off credit card balance — open HDFC app now"
+   WRONG: "Save some money"
+   WRONG: "Pay off your debt"
+
+2. TRACKING HABITS SPECIFY THE TOOL AND WHAT TO LOG
+   CORRECT: "Open Walnut. Log every purchase from today. 3 minutes."
+   WRONG: "Track your spending"
+
+3. REVIEW TASKS PRODUCE A DECISION OR NUMBER
+   CORRECT: "Review last week's spend. Identify one over-budget category.
+             Decide what to cut next week. Write it down."
+   WRONG: "Think about your spending habits"
+
+4. PAY-DAY TASKS ARE EVENT-TRIGGERED
+   If income_cycle is in context, generate a pay-day task:
+   CORRECT: "On pay day: transfer 20% of salary to savings — before anything else"
+
+FORBIDDEN:
+  ✗ "Learn about investing" (unless Learning is a stated sub-goal)
+  ✗ "Think about your budget"
+  ✗ "Consider saving more"
+  ✗ Physical movement tasks

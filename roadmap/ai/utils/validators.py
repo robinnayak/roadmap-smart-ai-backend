@@ -1,9 +1,31 @@
 # roadmap\ai\utils\validators.py
 
-
+import logging
 from typing import Dict, Any, List, Tuple
 from datetime import datetime, date
 import re
+from goal.services.category_resolver import GOAL_CATEGORIES
+
+
+logger = logging.getLogger(__name__)
+
+# The five valid internal task types
+VALID_TASK_TYPES = {'physical', 'cognitive', 'habit', 'ritual', 'task'}
+VALID_ITEM_TYPES = VALID_TASK_TYPES
+
+# Map from AI-generated types (old and invented) to valid internal types
+# Key insight: 'practice' maps to 'physical' for fitness, 'cognitive' for others
+LEGACY_TYPE_MAP = {
+    'learning':   'cognitive',
+    'project':    'task',
+    'review':     'cognitive',
+    'assessment': 'cognitive',
+    'planning':   'task',
+    'evaluation': 'cognitive',
+    'exercise':   'physical',
+    'habit':      'habit',      # already valid
+    'ritual':     'ritual',     # already valid
+}
 
 
 class InputValidator:
@@ -72,7 +94,7 @@ class InputValidator:
     @staticmethod
     def validate_category(category: str) -> bool:
         """Validate goal category"""
-        return category.lower() in ['financial', 'career', 'health', 'personal']
+        return category.lower() in GOAL_CATEGORIES
 
 
 class OutputValidator:
@@ -161,12 +183,16 @@ class OutputValidator:
         for task in tasks:
             title = (task.get("title") or "").strip().lower()
             description = (task.get("description") or "").strip().lower()
-            minutes = int(task.get("estimated_duration_minutes", 0) or 0)
-            task_type = (task.get("task_type") or "").strip().lower()
+            minutes = int(
+                task.get("estimated_duration_minutes", task.get("duration_minutes", 0)) or 0
+            )
+            task_type = (task.get("task_type") or task.get("item_type") or "").strip().lower()
 
             has_verb = any(title.startswith(v + " ") for v in action_verbs)
             has_detail = len(description) >= 30
-            if has_verb and has_detail and task_type in {"learning", "practice", "project", "review", "assessment"}:
+            if has_verb and has_detail and task_type in (
+                {"learning", "practice", "project", "review", "assessment"} | VALID_ITEM_TYPES
+            ):
                 specific_tasks += 1
 
             # Basic realism guard by skill level.
@@ -230,3 +256,50 @@ class OutputValidator:
                 "patterns back into prompts for future generations."
             ),
         }
+
+
+def normalize_task_type(raw_type: str, goal_category: str = "") -> str:
+    """
+    Map an AI-generated task_type string to a valid internal task type.
+
+    Handles:
+    - Already-valid types (pass through)
+    - Legacy types from old prompt (map to nearest equivalent)
+    - Invented types from model hallucination (map to 'task' with warning)
+    - Context-sensitive mapping: 'practice' → 'physical' for fitness goals
+
+    Args:
+        raw_type: The task_type string from AI output
+        goal_category: The resolved internal category (e.g. 'fitness')
+
+    Returns:
+        One of: 'physical', 'cognitive', 'habit', 'ritual', 'task'
+        Never raises. Never returns an invalid type.
+    """
+    if not raw_type:
+        return 'task'
+
+    normalized = raw_type.lower().strip()
+
+    # Already valid — pass through
+    if normalized in VALID_TASK_TYPES:
+        return normalized
+
+    # Context-sensitive: 'practice' means physical movement for fitness
+    if normalized == "practice":
+        if goal_category in {'fitness', 'nutrition', 'wellness'}:
+            return 'physical'
+        return 'cognitive'
+
+    # Legacy or invented type — map to nearest valid
+    mapped = LEGACY_TYPE_MAP.get(normalized)
+    if mapped:
+        return mapped
+
+    # Completely unknown — log warning, default to 'task'
+    logger.warning(
+        f"normalize_task_type: unknown type '{raw_type}' for category "
+        f"'{goal_category}' — defaulting to 'task'. "
+        f"Add this type to LEGACY_TYPE_MAP if it appears frequently."
+    )
+    return 'task'

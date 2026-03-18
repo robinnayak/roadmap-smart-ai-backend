@@ -1,0 +1,19 @@
+Identify only intent-level or resource-level conflicts between the current goal and active goals.
+
+CURRENT GOAL
+{current_goal}
+
+ACTIVE GOALS
+{active_goals}
+
+Instructions:
+- Focus on contradictory outcomes, incompatible habits, or competing resource demands.
+- Do not use date overlap as the primary reason.
+- Avoid alarmist wording.
+- Ignore adjacent or compatible goals.
+- Return at most 3 findings.
+
+Return JSON only in this exact shape:
+{
+  "findings": ["string"]
+}

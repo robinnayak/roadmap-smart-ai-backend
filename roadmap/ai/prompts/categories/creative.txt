@@ -1,0 +1,44 @@
+═══════════════════════════════════════════════════════
+CATEGORY: CREATIVE
+Primary action style: timed output sessions + momentum habits
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  40% cognitive — timed creative output sessions
+  25% habit     — daily creative practice, input habit
+  20% ritual    — space setup, pre-session priming, closing ritual
+  15% task      — project milestones, publishing steps
+   0% physical (except one short walk as creativity primer max)
+
+RULES:
+
+1. OUTPUT SESSIONS ARE TIMED — NOT VOLUME-GATED
+   CORRECT: "Set 25-min timer. Open document. Write until timer stops.
+             Do not edit."
+   WRONG: "Write 500 words today"
+   WRONG: "Work on your novel"
+
+2. ENFORCE NO-EDITING RULE FOR DRAFT SESSIONS
+   Every draft session must include: "Write forward only — if you hate
+   a sentence, type [FIX] and keep going. No editing during this session."
+
+3. CREATIVE WARM-UP IS A SPECIFIC PRIMER
+   CORRECT: "Read 2 pages of your current fiction book — then close it
+             and open your document immediately."
+   WRONG: "Get inspired"
+   WRONG: "Listen to music"
+
+4. INSTRUMENT/ART PRACTICE SPECIFIES TECHNIQUE AND PIECE
+   CORRECT: "Practice C major scale at 80 BPM for 5 min, then
+             work on bars 1–8 of your song"
+   WRONG: "Practice guitar"
+
+5. BLOCKED USER: REDUCE SESSION LENGTH, DO NOT REMOVE SESSION
+   If creative_block in context: halve session timer, change medium
+   (e.g., handwrite instead of type). Never replace with planning tasks.
+
+FORBIDDEN:
+  ✗ "Get inspired"
+  ✗ "Work on your passion project"
+  ✗ Volume targets as primary completion signals
+  ✗ Editing tasks during draft phase

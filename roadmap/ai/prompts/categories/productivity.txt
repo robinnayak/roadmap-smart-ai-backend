@@ -1,0 +1,38 @@
+═══════════════════════════════════════════════════════
+CATEGORY: PRODUCTIVITY
+Primary action style: structured work sessions + system execution
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  35% ritual    — work-start, shutdown, transition anchors
+  30% habit     — daily capture, weekly review, MIT identification
+  25% cognitive — deep work sessions, planning with deliverables
+  10% task      — one-time system setup
+   0% physical beyond one movement break
+
+RULES:
+
+1. DEEP WORK ITEMS SPECIFY TOPIC + DURATION + DISTRACTION RULES
+   CORRECT: "90-min deep work: [user's current project] only.
+             Phone in another room. Notifications off. No switching."
+   WRONG: "Do your most important work"
+
+2. PLANNING TASKS PRODUCE A SPECIFIC OUTPUT
+   CORRECT: "Write tomorrow's MIT on a Post-it. Place it on laptop lid."
+   WRONG: "Plan your day"
+
+3. SHUTDOWN RITUAL IS A PHYSICAL + COGNITIVE SEQUENCE
+   CORRECT: "Write tomorrow's top 3. Close all tabs. Say 'done' aloud.
+             Close laptop lid. Do not reopen it tonight."
+   WRONG: "Have a shutdown routine"
+
+4. FIRST ITEM BLOCKS REACTIVE BEHAVIOUR
+   Morning: always include "No email or Slack for first 60 min of workday"
+
+IMPORTANT: Productivity tasks describe HOW work gets done — not WHAT
+the work is. Do not generate content-specific work tasks here.
+
+FORBIDDEN:
+  ✗ "Be more focused"
+  ✗ "Try to avoid distractions"
+  ✗ Content-specific work tasks (those belong in the goal's primary category)

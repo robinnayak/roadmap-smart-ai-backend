@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from django.utils import timezone
+from django.db.models import Q
 
 from goal.models import Goal, GoalLink, UserFinancialProfile
 
@@ -105,14 +106,14 @@ def evaluate_profile_review_for_goal(*, goal: Goal) -> None:
         return
 
     # Only linked contributing-goal events should trigger profile review.
-    if goal.primary_category == "career" and goal.status == "completed":
+    if goal.primary_category in {"career", "business"} and goal.status == "completed":
         mark_profile_review_needed(
             user=goal.user,
             reason="A linked career goal was completed and may change income.",
         )
         return
 
-    if goal.primary_category in {"career", "personal"} and goal.status in {"paused", "cancelled"}:
+    if goal.primary_category != "finance" and goal.status in {"paused", "cancelled"}:
         mark_profile_review_needed(
             user=goal.user,
             reason="A contributing goal was paused/cancelled. Review financial profile.",
@@ -125,11 +126,11 @@ def evaluate_profile_review_for_user(*, user) -> tuple[bool, str]:
         contributing_links__isnull=False,
     ).distinct()
 
-    if linked_goals.filter(primary_category="career", status="completed").exists():
+    if linked_goals.filter(primary_category__in=["career", "business"], status="completed").exists():
         return True, "A linked career goal was completed and may change income."
 
     if linked_goals.filter(
-        primary_category__in=["career", "personal"],
+        ~Q(primary_category="finance"),
         status__in=["paused", "cancelled"],
     ).exists():
         return True, "A contributing goal was paused/cancelled. Review financial profile."
@@ -206,7 +207,7 @@ def _add_months(month_anchor: date, offset: int) -> date:
 
 
 def build_financial_plan_summary(*, goal: Goal, user) -> dict | None:
-    if goal.primary_category != "financial":
+    if goal.primary_category != "finance":
         return None
 
     profile = UserFinancialProfile.objects.filter(user=user).first()

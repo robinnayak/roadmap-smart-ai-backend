@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from datetime import timedelta
 from django.test import TestCase
 from django.contrib.auth import get_user_model
@@ -15,6 +16,7 @@ from rest_framework.test import APITestCase
 from authentication.models import NotificationSettings
 from ai.models import AIReengagementAction, AIUserChurnState
 from ai.providers.ollama_provider import OllamaProvider
+from ai.prompts.GoalHierarchyGeneratorPrompts import GoalHierarchyGeneratorPrompts, _load
 from ai.services.churn_reengagement import ChurnReengagementService
 from goal.models import Goal, Milestone
 from ai.utils.validators import OutputValidator
@@ -64,6 +66,255 @@ class HierarchyQualityAssessmentTests(TestCase):
         self.assertIn("issues", report)
         self.assertLess(report["sequencing_score"], 100)
         self.assertGreater(len(report["issues"]), 0)
+
+
+class PromptAssetTests(TestCase):
+    def test_prompt_assets_exist_and_are_utf8_readable(self):
+        prompts_dir = Path(__file__).resolve().parent / "prompts"
+        txt_files = sorted(prompts_dir.rglob("*.txt"))
+        self.assertGreater(len(txt_files), 0)
+        for path in txt_files:
+            content = path.read_text(encoding="utf-8")
+            self.assertTrue(content.strip(), msg=f"{path} should not be empty")
+
+    def test_shared_prompt_assets_exist(self):
+        prompts_dir = Path(__file__).resolve().parent / "prompts"
+        self.assertTrue((prompts_dir / "shared" / "base_rules.txt").exists())
+        self.assertTrue((prompts_dir / "shared" / "task_type_schema.txt").exists())
+
+    def test_shared_base_rules_include_all_required_rules(self):
+        prompts_dir = Path(__file__).resolve().parent / "prompts"
+        base_rules = (prompts_dir / "shared" / "base_rules.txt").read_text(encoding="utf-8")
+        for marker in (
+            "RULE 1 · ACTION-FIRST TITLES",
+            "RULE 2 · SPECIFIC COMPLETION SIGNAL",
+            "RULE 3 · DESCRIPTIONS ARE INSTRUCTIONS, NOT EXPLANATIONS",
+            "RULE 4 · NO FILLER TASKS",
+            "RULE 5 · RATIONALE IS PERSONAL",
+            "RULE 6 · MATCH THE CATEGORY ACTION STYLE",
+        ):
+            self.assertIn(marker, base_rules)
+
+    def test_shared_task_type_schema_includes_all_valid_types_and_decision_tree(self):
+        prompts_dir = Path(__file__).resolve().parent / "prompts"
+        type_schema = (prompts_dir / "shared" / "task_type_schema.txt").read_text(encoding="utf-8")
+        self.assertIn("There are exactly five valid task types.", type_schema)
+        for marker in (
+            "TYPE: physical",
+            "TYPE: cognitive",
+            "TYPE: habit",
+            "TYPE: ritual",
+            "TYPE: task",
+            "TYPE ASSIGNMENT DECISION TREE",
+        ):
+            self.assertIn(marker, type_schema)
+
+    def test_goal_task_prompt_assets_include_required_contract_markers(self):
+        prompts_dir = Path(__file__).resolve().parent / "prompts"
+        system_path = prompts_dir / "goal_task" / "system.txt"
+        output_schema_path = prompts_dir / "goal_task" / "output_schema.txt"
+        self.assertTrue(system_path.exists())
+        self.assertTrue(output_schema_path.exists())
+
+        system_text = system_path.read_text(encoding="utf-8")
+        output_schema = output_schema_path.read_text(encoding="utf-8")
+
+        self.assertIn("RULE · DO NOT PATTERN-LOCK TO SUBGOAL TITLES", system_text)
+        self.assertIn("RULE · NO REPEATED TASK TITLES ACROSS THE FULL GOAL", system_text)
+        self.assertIn("OUTPUT QUALITY SELF-CHECK", system_text)
+        self.assertEqual(system_text.count("□ "), 9)
+
+        self.assertIn('"item_type": "physical | cognitive | habit | ritual | task"', output_schema)
+        self.assertIn("VALIDATION RULES FOR YOUR OUTPUT", output_schema)
+        self.assertIn(
+            "Do not use: practice, learning,\n   project, review, assessment, planning, evaluation, exercise.",
+            output_schema,
+        )
+
+    def test_all_category_prompt_assets_exist(self):
+        prompts_dir = Path(__file__).resolve().parent / "prompts" / "categories"
+        expected = {
+            "fitness.txt",
+            "finance.txt",
+            "learning.txt",
+            "career.txt",
+            "wellness.txt",
+            "creative.txt",
+            "business.txt",
+            "nutrition.txt",
+            "relationships.txt",
+            "productivity.txt",
+            "travel.txt",
+            "spiritual.txt",
+            "parenting.txt",
+            "education.txt",
+            "digital_habits.txt",
+        }
+        actual = {path.name for path in prompts_dir.glob("*.txt")}
+        self.assertEqual(actual, expected)
+
+    def test_category_prompt_assets_include_required_markers(self):
+        prompts_dir = Path(__file__).resolve().parent / "prompts" / "categories"
+        fitness = (prompts_dir / "fitness.txt").read_text(encoding="utf-8")
+        self.assertIn("40% physical", fitness)
+        self.assertIn("RULES:", fitness)
+        self.assertIn("FORBIDDEN:", fitness)
+
+        finance = (prompts_dir / "finance.txt").read_text(encoding="utf-8")
+        self.assertIn("35% task", finance)
+        self.assertIn("RULES:", finance)
+        self.assertIn("FORBIDDEN:", finance)
+
+        business = (prompts_dir / "business.txt").read_text(encoding="utf-8")
+        self.assertIn("VALIDATION STAGE: NO BUILD TASKS", business)
+        self.assertIn("Generate ZERO build tasks.", business)
+
+        wellness = (prompts_dir / "wellness.txt").read_text(encoding="utf-8")
+        self.assertIn("If therapy_active and today is therapy_day:", wellness)
+
+        creative = (prompts_dir / "creative.txt").read_text(encoding="utf-8")
+        self.assertIn("ENFORCE NO-EDITING RULE FOR DRAFT SESSIONS", creative)
+        self.assertIn("No editing during this session.", creative)
+
+        digital_habits = (prompts_dir / "digital_habits.txt").read_text(encoding="utf-8")
+        self.assertIn("REPLACEMENT BEHAVIOUR MUST BE PHYSICALLY PREPARED", digital_habits)
+
+
+class GoalHierarchyPromptBuilderTests(TestCase):
+    def test_task_prompt_builder_assembles_all_six_sections_in_order(self):
+        prompt = GoalHierarchyGeneratorPrompts().get_task_generating_prompt(
+            subgoal_data={
+                "title": "Week 1",
+                "description": "Ship first version",
+                "week_number": 1,
+            },
+            milestone_data={
+                "id": 11,
+                "title": "Month 1",
+                "description": "Foundation",
+                "success_criteria": ["First release shipped"],
+            },
+            goal_data={
+                "title": "Launch MVP",
+                "description": "Build and launch SaaS MVP",
+                "primary_category": "personal",
+                "resolved_category": "business",
+                "why_it_matters": ["Revenue"],
+                "target_date": "2026-04-15",
+                "available_daily_minutes": 90,
+                "user_strengths": ["Shipping quickly"],
+                "user_blockers": ["Limited time"],
+                "motivation_style": "outcome-driven",
+            },
+        )
+
+        markers = [
+            "SHARED BASE RULES",
+            "TASK TYPE DEFINITIONS",
+            "SYSTEM: GOAL-TASK GENERATION ENGINE",
+            "CATEGORY: BUSINESS",
+            "USER AND GOAL CONTEXT",
+            "OUTPUT — RETURN THIS JSON ONLY",
+        ]
+        positions = [prompt.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_resolved_category_overrides_primary_category(self):
+        prompt = GoalHierarchyGeneratorPrompts().get_task_generating_prompt(
+            subgoal_data={"title": "Week 1"},
+            milestone_data={"title": "Month 1"},
+            goal_data={
+                "title": "Launch MVP",
+                "primary_category": "career",
+                "resolved_category": "business",
+            },
+        )
+
+        self.assertIn("CATEGORY: BUSINESS", prompt)
+        self.assertNotIn("CATEGORY: CAREER", prompt)
+        self.assertIn("Category: business", prompt)
+
+    def test_primary_category_is_used_when_resolved_category_missing(self):
+        prompt = GoalHierarchyGeneratorPrompts().get_task_generating_prompt(
+            subgoal_data={"title": "Week 1"},
+            milestone_data={"title": "Month 1"},
+            goal_data={"title": "Prepare for marathon", "primary_category": "fitness"},
+        )
+
+        self.assertIn("CATEGORY: FITNESS", prompt)
+        self.assertIn("Category: fitness", prompt)
+
+    def test_unknown_category_falls_back_to_productivity_prompt(self):
+        with self.assertLogs("ai.prompts.GoalHierarchyGeneratorPrompts", level="WARNING") as captured:
+            prompt = GoalHierarchyGeneratorPrompts().get_task_generating_prompt(
+                subgoal_data={"title": "Week 1"},
+                milestone_data={"title": "Month 1"},
+                goal_data={
+                    "title": "Unclear",
+                    "primary_category": "personal",
+                    "resolved_category": "unknown",
+                },
+            )
+
+        self.assertIn("CATEGORY: PRODUCTIVITY", prompt)
+        self.assertIn("Category: unknown", prompt)
+        self.assertTrue(
+            any("falling back to 'productivity'" in message for message in captured.output)
+        )
+
+    def test_rendered_context_includes_required_goal_milestone_subgoal_and_capacity_fields(self):
+        prompt = GoalHierarchyGeneratorPrompts().get_task_generating_prompt(
+            subgoal_data={
+                "title": "Week 2: Validation",
+                "description": "Test onboarding with users",
+                "week_number": 2,
+            },
+            milestone_data={
+                "id": 23,
+                "title": "Month 1: MVP foundation",
+                "description": "Build the first usable version",
+                "success_criteria": ["Working auth", "Usable onboarding"],
+            },
+            goal_data={
+                "title": "Launch MVP",
+                "primary_category": "personal",
+                "resolved_category": "business",
+                "description": "Build and ship a usable MVP",
+                "why_it_matters": ["Revenue", "Momentum"],
+                "target_date": "2026-05-01",
+                "available_daily_minutes": 75,
+                "user_strengths": ["Fast iteration"],
+                "user_blockers": ["Day job"],
+                "motivation_style": "intrinsic",
+            },
+        )
+
+        for expected in (
+            "Title: Launch MVP",
+            "Category: business",
+            "Description: Build and ship a usable MVP",
+            "Why It Matters: Revenue, Momentum",
+            "Target Date: 2026-05-01",
+            "ID: 23",
+            "Title: Month 1: MVP foundation",
+            "Description: Build the first usable version",
+            "Success Criteria: Working auth, Usable onboarding",
+            "Title: Week 2: Validation",
+            "Description: Test onboarding with users",
+            "Week Number: 2",
+            "Available Daily Time: 75 min",
+            "Strengths: Fast iteration",
+            "Blockers: Day job",
+            "Motivation Style: intrinsic",
+        ):
+            self.assertIn(expected, prompt)
+
+    def test_load_raises_useful_file_not_found_error_for_required_prompt_assets(self):
+        with self.assertRaises(FileNotFoundError) as exc:
+            _load("shared/does_not_exist.txt")
+
+        self.assertIn("Required prompt file not found:", str(exc.exception))
+        self.assertIn("does_not_exist.txt", str(exc.exception))
 
 
 class GenerateMilestonesOwnershipTests(APITestCase):

@@ -9,13 +9,15 @@ from gie.models import GIEPlanSnapshot, GIESession, GIESlotState
 from gie.services.habit_ranking import GIEHabitRankingService
 from gie.services.language_refinement import GIEGoalLanguageRefinementService
 from gie.services.timeline_feasibility import GIETimelineFeasibilityService
-from gie.services.turn_pipeline import GIETurnPipelineService, map_goal_domain_to_primary_category
+from gie.services.turn_pipeline import GIETurnPipelineService
 from gie.services.unified_context import GIEUnifiedContextService
 from goal.services.create_contract import (
     list_missing_required_goal_fields,
     normalize_why_it_matters,
     required_goal_fields_error_details,
 )
+from goal.services.category_resolver import classify_goal_category_deterministic
+from goal.services.contract_template import GoalContractTemplateService
 from goal.views import CreateGoalWithHierarchyAPIView
 
 
@@ -88,6 +90,7 @@ class GIEPlanningService:
         "daily_practice_minutes",
         "daily_session_minutes",
     )
+    CONTRACT_TEMPLATE_SERVICE = GoalContractTemplateService()
 
     @staticmethod
     def get_latest_health_profile(*, user):
@@ -184,7 +187,10 @@ class GIEPlanningService:
         timeline_context = unified_context.get("timeline", {})
         base_payload = {
             "title": str(goal_details.get("title") or session.goal_text.strip())[:255],
-            "primary_category": map_goal_domain_to_primary_category(session.goal_domain),
+            "primary_category": classify_goal_category_deterministic(
+                goal_title=str(goal_details.get("title") or session.goal_text.strip()),
+                goal_description=str(goal_details.get("description") or ""),
+            ),
             "priority": resolved_priority,
             "description": str(goal_details.get("description") or ""),
             "why_do_i_want_this": str(goal_details.get("why") or ""),
@@ -205,12 +211,6 @@ class GIEPlanningService:
             override = _string_override(key)
             if override:
                 base_payload[key] = override[:255] if key == "title" else override
-
-        primary_category = context.get("primary_category")
-        if isinstance(primary_category, str):
-            normalized_category = primary_category.strip().lower()
-            if normalized_category in {"financial", "career", "health", "personal"}:
-                base_payload["primary_category"] = normalized_category
 
         priority = context.get("priority")
         if isinstance(priority, str):
@@ -310,6 +310,96 @@ class GIEPlanningService:
             else:
                 merged.append(item)
         return merged
+
+    @classmethod
+    def _validate_binding_commitments(
+        cls,
+        *,
+        generated_commitments: list[dict],
+        commitments_input: list[dict],
+    ) -> tuple[list[dict], dict | None]:
+        expected_ids = [item["id"] for item in generated_commitments]
+        if not expected_ids:
+            return [], None
+
+        if not commitments_input:
+            return [], {
+                "error": "validation_error",
+                "code": "binding_commitments_incomplete",
+                "details": {
+                    "commitments": ["All generated commitment items must be explicitly accepted before finalize."],
+                    "missing_commitment_ids": expected_ids,
+                },
+                "status": 400,
+            }
+
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        by_id: dict[str, dict] = {}
+        for item in commitments_input:
+            item_id = str(item.get("id") or "").strip()
+            if not item_id:
+                continue
+            if item_id in seen:
+                duplicates.append(item_id)
+                continue
+            seen.add(item_id)
+            by_id[item_id] = item
+
+        unknown_ids = sorted([item_id for item_id in by_id if item_id not in expected_ids])
+        missing_ids = sorted([item_id for item_id in expected_ids if item_id not in by_id])
+        invalid_decisions = sorted(
+            [
+                item_id
+                for item_id, item in by_id.items()
+                if item_id in expected_ids and item.get("decision") != "accepted"
+            ]
+        )
+        if duplicates or unknown_ids or missing_ids or invalid_decisions:
+            details = {
+                "commitments": ["Every generated commitment item must be present exactly once and explicitly accepted."],
+            }
+            if duplicates:
+                details["duplicate_commitment_ids"] = sorted(list(set(duplicates)))
+            if unknown_ids:
+                details["unknown_commitment_ids"] = unknown_ids
+            if missing_ids:
+                details["missing_commitment_ids"] = missing_ids
+            if invalid_decisions:
+                details["non_accepted_commitment_ids"] = invalid_decisions
+            return [], {
+                "error": "validation_error",
+                "code": "binding_commitments_incomplete",
+                "details": details,
+                "status": 400,
+            }
+
+        accepted = []
+        generated_by_id = {item["id"]: item for item in generated_commitments}
+        for item_id in expected_ids:
+            accepted.append(
+                {
+                    **generated_by_id[item_id],
+                    "decision": "accepted",
+                }
+            )
+        return accepted, None
+
+    @classmethod
+    def _build_goal_contract_snapshot(
+        cls,
+        *,
+        goal_payload: dict,
+        user,
+        accepted_commitments: list[dict],
+    ) -> dict:
+        return cls.CONTRACT_TEMPLATE_SERVICE.render_snapshot(
+            goal_data=goal_payload,
+            user=user,
+            signed_name=str(goal_payload["signed_name"]).strip(),
+            signed_at=goal_payload["signed_at"],
+            accepted_gie_commitments=accepted_commitments,
+        )
 
     @staticmethod
     def _build_commitment_statements_from_context(*, plan_payload: dict, unified_context: dict) -> tuple[str, str]:
@@ -614,19 +704,22 @@ class GIEPlanningService:
         *,
         session: GIESession,
         goal_payload: dict,
-        commitment_note: str,
     ) -> GIEFinalizeBridgeResult:
         request_payload = {
             "title": goal_payload["title"],
             "description": goal_payload["description"],
-            "primary_category": goal_payload["primary_category"],
             "priority": goal_payload["priority"],
             "target_date": goal_payload["target_date"],
             "why_it_matters": goal_payload["why_it_matters"],
             "why_do_i_want_this": goal_payload["why_do_i_want_this"],
             "specific_measurable_target": goal_payload["specific_measurable_target"],
-            "commitment_confirmed": True,
-            "commitment_note": commitment_note[:500],
+            "commitment_confirmed": goal_payload["commitment_confirmed"],
+            "commitment_intent": goal_payload["commitment_intent"],
+            "commitment_effort": goal_payload["commitment_effort"],
+            "commitment_responsibility": goal_payload["commitment_responsibility"],
+            "signed_name": goal_payload["signed_name"],
+            "signed_at": goal_payload["signed_at"],
+            "contract_snapshot": goal_payload["contract_snapshot"],
         }
         factory = APIRequestFactory()
         request = factory.post("/goal/create-with-hierarchy/", request_payload, format="json")
@@ -699,11 +792,13 @@ class GIEPlanningService:
             plan_payload=plan_payload,
             unified_context=unified_context,
         )
-        context_commitment_confirmed = (
-            bool(form_goal_context.get("commitment_confirmed"))
-            if isinstance(form_goal_context, dict)
-            else False
+        accepted_commitments, commitment_error = cls._validate_binding_commitments(
+            generated_commitments=commitments,
+            commitments_input=commitments_input,
         )
+        if commitment_error:
+            return None, commitments, {}, None, commitment_error, feasibility_payload
+        resolved_goal_context = form_goal_context if isinstance(form_goal_context, dict) else {}
         resolved_priority = cls._resolve_goal_priority(slot_states=slot_states, unified_context=unified_context)
         goal_payload = cls.build_goal_autofill_payload(
             session=session,
@@ -713,7 +808,36 @@ class GIEPlanningService:
             form_goal_context=form_goal_context,
             refine_language=True,
         )
-        goal_payload["commitment_confirmed"] = context_commitment_confirmed
+        for field in (
+            "commitment_confirmed",
+            "commitment_intent",
+            "commitment_effort",
+            "commitment_responsibility",
+            "signed_name",
+            "signed_at",
+        ):
+            goal_payload[field] = resolved_goal_context.get(field)
+        expected_snapshot = cls._build_goal_contract_snapshot(
+            goal_payload=goal_payload,
+            user=session.user,
+            accepted_commitments=accepted_commitments,
+        )
+        provided_snapshot = resolved_goal_context.get("contract_snapshot")
+        if provided_snapshot not in (None, "") and not cls.CONTRACT_TEMPLATE_SERVICE.validate_snapshot_matches(
+            expected_snapshot=expected_snapshot,
+            provided_snapshot=provided_snapshot,
+        ):
+            return None, commitments, {}, None, {
+                "error": "validation_error",
+                "code": "contract_snapshot_mismatch",
+                "details": {
+                    "contract_snapshot": [
+                        "Provided contract snapshot does not match the required template-rendered commitment contract."
+                    ]
+                },
+                "status": 400,
+            }, feasibility_payload
+        goal_payload["contract_snapshot"] = expected_snapshot
         missing_required_goal_fields = list_missing_required_goal_fields(goal_payload)
         if missing_required_goal_fields:
             return None, commitments, {}, None, {
@@ -732,36 +856,25 @@ class GIEPlanningService:
             ranked_habit_suggestions=ranked_habit_suggestions,
             habit_confirmations=normalized_habit_confirmations,
         )
-        commitment_note = "; ".join(
-            [
-                item["revision_note"] or item["statement"]
-                for item in commitments
-                if item["decision"] in {"accepted", "revised"}
-            ]
+        bridge_result = cls.run_finalize_bridge(
+            session=session,
+            goal_payload=goal_payload,
         )
+        if not bridge_result.ok:
+            downstream_payload = bridge_result.payload if isinstance(bridge_result.payload, dict) else {}
+            return None, commitments, {}, bridge_result, {
+                "error": "conflict",
+                "code": "finalize_bridge_failed",
+                "details": {
+                    "session_status": ["Session remains ready_to_finalize."],
+                    "downstream_status": [str(bridge_result.status_code)],
+                    "downstream_error": downstream_payload,
+                },
+                "status": 409,
+            }, feasibility_payload
 
         with transaction.atomic():
             locked_session = GIESession.objects.select_for_update().get(pk=session.pk)
-            bridge_result = cls.run_finalize_bridge(
-                session=locked_session,
-                goal_payload=goal_payload,
-                commitment_note=commitment_note,
-            )
-            if not bridge_result.ok:
-                locked_session.status = GIESession.STATUS_READY_TO_FINALIZE
-                locked_session.phase = GIESession.PHASE_REVIEW
-                locked_session.current_question = None
-                locked_session.finalized_at = None
-                locked_session.save(update_fields=["status", "phase", "current_question", "finalized_at", "updated_at"])
-                return None, commitments, {}, bridge_result, {
-                    "error": "conflict",
-                    "code": "finalize_bridge_failed",
-                    "details": {
-                        "session_status": ["Session rolled back to ready_to_finalize."],
-                        "downstream_status": [str(bridge_result.status_code)],
-                    },
-                    "status": 409,
-                }, feasibility_payload
 
             GIEPlanSnapshot.objects.filter(
                 session=locked_session,
@@ -785,4 +898,4 @@ class GIEPlanningService:
             locked_session.finalized_at = timezone.now()
             locked_session.save(update_fields=["status", "phase", "current_question", "finalized_at", "updated_at"])
 
-        return snapshot, commitments, rie_signal, bridge_result, None, feasibility_payload
+        return snapshot, accepted_commitments, rie_signal, bridge_result, None, feasibility_payload

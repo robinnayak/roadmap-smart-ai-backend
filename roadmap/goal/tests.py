@@ -1,6 +1,7 @@
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
@@ -8,9 +9,67 @@ from rest_framework.test import APITestCase
 
 from authentication.models import CustomUser
 from ai.models import AIProcessingJob
-from goal.models import Goal, Milestone, SubGoal, Task, GoalLink, UserFinancialProfile, FinancialProgressEntry
+from ai.providers.base import AIResponse, BaseAIProvider
+from ai.utils.validators import normalize_task_type
+from goal.models import Goal, GoalCommitmentRecord, Milestone, SubGoal, Task, GoalLink, UserFinancialProfile, FinancialProgressEntry
+from goal.serializers import GoalSerializer
 from goal.services.goal_domain import build_goal_seed_data
+from goal.services.category_resolver import resolve_category
+from goal.services.contract_template import GoalContractTemplateService
 from goal.services.financial_intelligence import build_financial_plan_summary
+from goal.services.timeline_ai_provider import (
+    TIMELINE_INSIGHT_PROVIDER_OLLAMA,
+    OllamaTimelineAIProviderAdapter,
+    TimelineAIProviderAdapter,
+    get_timeline_ai_provider_adapter,
+)
+from goal.services.timeline_conflict_detector import detect_goal_conflicts
+from goal.services.timeline_insight_service import GoalTimelineInsightService
+from goal.services.timeline_insight_contract import (
+    TIMELINE_INSIGHT_TRIGGER_USER_CLICK,
+    TimelineInsightBoundaryError,
+    assert_no_gie_runtime_dependency,
+    assert_read_only_timeline_insight_request,
+)
+from goal.services.timeline_similar_goal_detector import detect_similar_goals
+from goal.views import CreateGoalWithHierarchyAPIView
+
+
+def full_commitment_payload(*, user=None, goal_data=None, **overrides):
+    signed_at = overrides.get("signed_at", timezone.now().isoformat())
+    payload = {
+        "commitment_confirmed": True,
+        "commitment_intent": "I am committing to the stated goal outcome.",
+        "commitment_effort": "I will protect time and effort for execution.",
+        "commitment_responsibility": "I accept full responsibility for following through.",
+        "signed_name": "Test User",
+        "signed_at": signed_at,
+    }
+    payload.update(overrides)
+    resolved_goal_data = {
+        "title": "Contract Goal",
+        "description": "Detailed plan description",
+        "why_it_matters": ["Long-term growth"],
+        "why_do_i_want_this": "I want stronger career optionality.",
+        "specific_measurable_target": "Get promoted by Q4 with measurable outcomes.",
+        "primary_category": "career",
+        "target_date": str(timezone.localdate() + timedelta(days=90)),
+    }
+    if goal_data:
+        resolved_goal_data.update(goal_data)
+    resolved_user = user or type(
+        "UserStub",
+        (),
+        {"email": "test-user@example.com", "get_full_name": lambda self: ""},
+    )()
+    payload["contract_snapshot"] = GoalContractTemplateService().render_snapshot(
+        goal_data=resolved_goal_data,
+        user=resolved_user,
+        signed_name=payload["signed_name"],
+        signed_at=payload["signed_at"],
+        accepted_gie_commitments=[],
+    )
+    return payload
 
 
 class GoalDomainRefactorEndpointTests(APITestCase):
@@ -24,7 +83,7 @@ class GoalDomainRefactorEndpointTests(APITestCase):
             password="Password@123",
         )
 
-    def test_goal_create_endpoint_creates_goal(self):
+    def test_goal_create_endpoint_persists_goal_commitment_record(self):
         self.client.force_authenticate(self.owner)
         response = self.client.post(
             "/goal/",
@@ -32,19 +91,20 @@ class GoalDomainRefactorEndpointTests(APITestCase):
                 "title": "Service Refactor Goal",
                 "description": "Created through endpoint",
                 "why_it_matters": ["Consistency"],
+                "why_do_i_want_this": "I want a reliable workflow.",
+                "specific_measurable_target": "Ship the refactor this quarter.",
                 "primary_category": "career",
                 "priority": "medium",
                 "target_date": str(timezone.localdate() + timedelta(days=30)),
-                "commitment_confirmed": True,
+                **full_commitment_payload(),
             },
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertIn("goal", response.data)
-        self.assertEqual(response.data["message"], "Goal created successfully!")
-        self.assertTrue(
-            Goal.objects.filter(id=response.data["goal"]["id"], user=self.owner).exists()
-        )
+        goal = Goal.objects.get(user=self.owner, title="Service Refactor Goal")
+        record = GoalCommitmentRecord.objects.get(goal=goal)
+        self.assertEqual(record.user, self.owner)
+        self.assertEqual(record.commitment_intent, "I am committing to the stated goal outcome.")
 
     def test_goal_hierarchy_endpoint_returns_expected_shape(self):
         goal = Goal.objects.create(
@@ -115,7 +175,18 @@ class GoalCreateContractValidationTests(APITestCase):
             "primary_category": "career",
             "priority": "medium",
             "target_date": str(timezone.localdate() + timedelta(days=90)),
-            "commitment_confirmed": True,
+            **full_commitment_payload(
+                user=self.user,
+                goal_data={
+                    "title": "Contract Goal",
+                    "description": "Detailed plan description",
+                    "why_it_matters": ["Long-term growth"],
+                    "why_do_i_want_this": "I want stronger career optionality.",
+                    "specific_measurable_target": "Get promoted by Q4 with measurable outcomes.",
+                    "primary_category": "career",
+                    "target_date": str(timezone.localdate() + timedelta(days=90)),
+                },
+            ),
         }
 
     def test_goal_create_requires_all_contract_fields(self):
@@ -133,15 +204,37 @@ class GoalCreateContractValidationTests(APITestCase):
         self.assertIn("why_it_matters", details)
         self.assertIn("commitment_confirmed", details)
 
-    def test_goal_create_normalizes_why_it_matters_string_to_list(self):
+    def test_goal_serializer_normalizes_why_it_matters_string_to_list(self):
         payload = {
             **self.base_payload,
             "why_it_matters": "Security\nFreedom\nSecurity",
         }
-        response = self.client.post("/goal/", data=payload, format="json")
+        serializer = GoalSerializer(data=payload, context={"request": type("Req", (), {"user": self.user})()})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["why_it_matters"], ["Security", "Freedom"])
+
+    def test_goal_create_with_full_commitment_payload_creates_commitment_record(self):
+        response = self.client.post("/goal/", data=self.base_payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        goal = Goal.objects.get(id=response.data["goal"]["id"])
-        self.assertEqual(goal.why_it_matters, ["Security", "Freedom"])
+        goal = Goal.objects.get(user=self.user, title=self.base_payload["title"])
+        record = GoalCommitmentRecord.objects.get(goal=goal)
+        self.assertEqual(record.signed_name, self.base_payload["signed_name"])
+        self.assertEqual(record.contract_snapshot, self.base_payload["contract_snapshot"])
+
+    def test_goal_create_rejects_missing_commitment_payload_fields(self):
+        payload = {**self.base_payload}
+        payload.pop("commitment_intent")
+        payload["commitment_effort"] = "   "
+        payload["signed_at"] = "not-a-datetime"
+        payload["contract_snapshot"] = {}
+
+        response = self.client.post("/goal/", data=payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        details = response.data["details"]
+        self.assertIn("commitment_intent", details)
+        self.assertIn("commitment_effort", details)
+        self.assertIn("signed_at", details)
+        self.assertIn("contract_snapshot", details)
 
     def test_create_with_hierarchy_rejects_missing_required_fields_with_stable_contract(self):
         payload = {**self.base_payload}
@@ -151,6 +244,46 @@ class GoalCreateContractValidationTests(APITestCase):
         self.assertEqual(response.data["error"], "validation_error")
         self.assertEqual(response.data["code"], "validation_error")
         self.assertIn("specific_measurable_target", response.data["details"])
+
+    def test_create_with_hierarchy_rejects_missing_commitment_payload_fields(self):
+        payload = {**self.base_payload}
+        payload.pop("commitment_responsibility")
+        payload["signed_at"] = "bad-datetime"
+        payload["contract_snapshot"] = {}
+        response = self.client.post("/goal/create-with-hierarchy/", data=payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("commitment_responsibility", response.data["details"])
+        self.assertIn("signed_at", response.data["details"])
+        self.assertIn("contract_snapshot", response.data["details"])
+
+    def test_create_with_hierarchy_full_commitment_payload_creates_commitment_record(self):
+        response = self.client.post("/goal/create-with-hierarchy/", data=self.base_payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        goal = Goal.objects.get(user=self.user, title=self.base_payload["title"])
+        record = GoalCommitmentRecord.objects.get(goal=goal)
+        self.assertEqual(record.user, self.user)
+        self.assertEqual(record.contract_snapshot, self.base_payload["contract_snapshot"])
+
+    @patch("goal.serializers.GoalCommitmentRecord.objects.create")
+    def test_goal_create_rolls_back_when_commitment_record_creation_fails(self, mock_commitment_create):
+        mock_commitment_create.side_effect = RuntimeError("commitment record create failed")
+
+        response = self.client.post("/goal/", data=self.base_payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertFalse(Goal.objects.filter(user=self.user, title=self.base_payload["title"]).exists())
+        self.assertEqual(GoalCommitmentRecord.objects.count(), 0)
+
+    def test_goal_commitment_record_signed_fields_are_immutable(self):
+        response = self.client.post("/goal/", data=self.base_payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        goal = Goal.objects.get(user=self.user, title=self.base_payload["title"])
+        record = GoalCommitmentRecord.objects.get(goal=goal)
+        record.signed_name = "Modified Name"
+
+        with self.assertRaises(ValidationError):
+            record.save()
 
     def test_build_goal_seed_data_contains_required_generation_context(self):
         goal = Goal.objects.create(
@@ -171,6 +304,108 @@ class GoalCreateContractValidationTests(APITestCase):
         self.assertEqual(payload["why_do_i_want_this"], "Personal growth")
         self.assertEqual(payload["specific_measurable_target"], "Lead two projects by Q4")
         self.assertEqual(payload["why_it_matters"], ["Relevance", "Impact"])
+
+
+class GoalContractTemplateServiceTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="goal-contract-template@test.com",
+            password="Password@123",
+            first_name="Template",
+            last_name="Tester",
+        )
+        self.service = GoalContractTemplateService()
+
+    def test_render_snapshot_supports_all_goal_categories(self):
+        categories = [
+            "business",
+            "fitness",
+            "learning",
+            "wellness",
+            "creative",
+            "nutrition",
+            "productivity",
+            "travel",
+            "digital_habits",
+            "spiritual",
+            "relationships",
+            "education",
+            "career",
+            "finance",
+            "parenting",
+        ]
+
+        for category in categories:
+            snapshot = self.service.render_snapshot(
+                goal_data={
+                    "id": "goal-1",
+                    "title": f"{category.title()} Goal",
+                    "description": f"{category} description",
+                    "primary_category": category,
+                    "why_it_matters": [f"{category} growth"],
+                    "why_do_i_want_this": f"I want stronger {category} outcomes.",
+                    "specific_measurable_target": f"Reach my {category} milestone.",
+                    "target_date": str(timezone.localdate() + timedelta(days=60)),
+                },
+                user=self.user,
+                signed_name="Template Tester",
+                signed_at=timezone.now().isoformat(),
+            )
+            self.assertEqual(snapshot["version"], "wave2.v1")
+            self.assertEqual(snapshot["category"], category)
+            self.assertTrue(snapshot["sections"]["i_will"])
+            self.assertTrue(snapshot["sections"]["i_will_not"])
+            self.assertTrue(snapshot["sections"]["reality_anchors"])
+            self.assertTrue(snapshot["sections"]["quit_anchors"])
+
+    def test_render_snapshot_populates_dynamic_fields_and_gie_commitments(self):
+        snapshot = self.service.render_snapshot(
+            goal_data={
+                "id": "goal-2",
+                "title": "Save for a house deposit",
+                "description": "Build the savings base deliberately.",
+                "primary_category": "finance",
+                "why_it_matters": ["family security", "stability"],
+                "why_do_i_want_this": "I want to reduce housing stress.",
+                "specific_measurable_target": "Save 500000 by year end.",
+                "financial_target_amount": "500000.00",
+                "target_date": str(timezone.localdate() + timedelta(days=120)),
+            },
+            user=self.user,
+            signed_name="Template Tester",
+            signed_at=timezone.now().isoformat(),
+            accepted_gie_commitments=[
+                {
+                    "id": "c1",
+                    "title": "Monthly transfer",
+                    "statement": "I commit to transferring money at the start of each month.",
+                    "linked_milestone_title": "Milestone 1",
+                }
+            ],
+        )
+        self.assertEqual(snapshot["goal_id"], "goal-2")
+        self.assertEqual(snapshot["header"]["user_display_name"], "Template Tester")
+        self.assertEqual(snapshot["gie_commitments"][0]["id"], "c1")
+        self.assertIn("Save 500000 by year end.", " ".join(snapshot["sections"]["i_will"]))
+        self.assertIn("500000.00", " ".join(snapshot["sections"]["quit_anchors"]))
+
+    def test_render_snapshot_falls_back_deterministically_when_optional_fields_missing(self):
+        snapshot = self.service.render_snapshot(
+            goal_data={
+                "title": "Basic Goal",
+                "description": "",
+                "primary_category": "productivity",
+                "why_it_matters": [],
+                "why_do_i_want_this": "",
+                "specific_measurable_target": "",
+            },
+            user=self.user,
+            signed_name="Template Tester",
+            signed_at=timezone.now().isoformat(),
+        )
+        self.assertTrue(snapshot["sections"]["i_will"])
+        self.assertTrue(snapshot["sections"]["quit_anchors"])
+        self.assertEqual(snapshot["gie_commitments"], [])
 
 
 class GoalDetailEndpointTests(APITestCase):
@@ -217,6 +452,72 @@ class GoalDetailEndpointTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.goal.refresh_from_db()
         self.assertEqual(self.goal.title, "Updated Goal Title")
+
+
+class GoalCommitmentContractEndpointTests(APITestCase):
+    def setUp(self):
+        self.owner = CustomUser.objects.create_user(
+            email="goal-contract-owner@test.com",
+            password="Password@123",
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="goal-contract-other@test.com",
+            password="Password@123",
+        )
+        self.goal = Goal.objects.create(
+            user=self.owner,
+            title="Owner Contract Goal",
+            description="Initial description",
+            why_it_matters=["Growth"],
+            primary_category="career",
+            priority="medium",
+            status="in_progress",
+            start_date=timezone.localdate(),
+            target_date=timezone.localdate() + timedelta(days=45),
+        )
+        commitment_payload = full_commitment_payload(
+            user=self.owner,
+            goal_data={
+                "id": str(self.goal.id),
+                "title": self.goal.title,
+                "description": self.goal.description,
+                "primary_category": self.goal.primary_category,
+                "why_it_matters": self.goal.why_it_matters,
+                "target_date": str(self.goal.target_date),
+            },
+        )
+        self.record = GoalCommitmentRecord.objects.create(
+            goal=self.goal,
+            user=self.owner,
+            commitment_intent=commitment_payload["commitment_intent"],
+            commitment_effort=commitment_payload["commitment_effort"],
+            commitment_responsibility=commitment_payload["commitment_responsibility"],
+            signed_name=commitment_payload["signed_name"],
+            signed_at=timezone.datetime.fromisoformat(commitment_payload["signed_at"].replace("Z", "+00:00")),
+            contract_snapshot=commitment_payload["contract_snapshot"],
+        )
+        self.url = f"/goal/goals/{self.goal.id}/commitment-contract/"
+
+    def test_owner_get_goal_commitment_contract_returns_persisted_snapshot(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["goal_id"], str(self.goal.id))
+        self.assertEqual(response.data["contract_snapshot"], self.record.contract_snapshot)
+
+    def test_non_owner_get_goal_commitment_contract_returns_404(self):
+        self.client.force_authenticate(self.other_user)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_missing_goal_commitment_record_returns_fallback_snapshot(self):
+        self.record.delete()
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["goal_id"], str(self.goal.id))
+        self.assertIn("contract_snapshot", response.data)
+        self.assertEqual(response.data["contract_snapshot"]["title"], self.goal.title)
 
     def test_owner_put_goal_succeeds(self):
         self.client.force_authenticate(self.owner)
@@ -555,13 +856,16 @@ class CreateGoalWithHierarchyConfigFallbackTests(APITestCase):
             "title": "Config fallback goal",
             "description": "Should create goal even when AI env is missing",
             "why_it_matters": ["Reliability"],
+            "why_do_i_want_this": "I want dependable goal setup.",
+            "specific_measurable_target": "Create the goal without runtime AI configured.",
             "primary_category": "career",
             "priority": "medium",
             "target_date": str(timezone.localdate() + timedelta(days=45)),
-            "commitment_confirmed": True,
+            **full_commitment_payload(),
             "goal_attributes_input": "Learn machine learning fundamentals in 60 days",
         }
 
+    @patch("goal.services.goal_domain.list_missing_commitment_fields", return_value=["wave1_bypass_for_existing_async_tests"])
     def test_async_create_returns_failed_job_when_ai_runtime_not_configured(self):
         with patch.dict("os.environ", {"OLLAMA_MODEL": "", "OLLAMA_HOST": ""}, clear=False):
             response = self.client.post(
@@ -581,6 +885,7 @@ class CreateGoalWithHierarchyConfigFallbackTests(APITestCase):
         self.assertEqual(job.status, "failed")
         self.assertIn("Missing environment variable(s): OLLAMA_HOST", job.error_message)
 
+    @patch("goal.services.goal_domain.list_missing_commitment_fields", return_value=["wave1_bypass_for_existing_async_tests"])
     def test_sync_create_returns_created_goal_with_hierarchy_unavailable_message(self):
         with patch.dict("os.environ", {"OLLAMA_MODEL": "", "OLLAMA_HOST": ""}, clear=False):
             response = self.client.post(
@@ -611,13 +916,15 @@ class CreateGoalWithHierarchyAsyncCommitSafetyTests(APITestCase):
             "primary_category": "career",
             "priority": "medium",
             "target_date": str(timezone.localdate() + timedelta(days=45)),
-            "commitment_confirmed": True,
+            **full_commitment_payload(),
         }
 
     @patch("goal.views.get_missing_ai_env_vars", return_value=[])
     @patch("goal.views.threading.Thread")
+    @patch("goal.services.goal_domain.list_missing_commitment_fields", return_value=["wave1_bypass_for_existing_async_tests"])
     def test_async_worker_starts_only_after_transaction_commit(
         self,
+        _mocked_commitment_bypass,
         mocked_thread,
         _mocked_missing_env,
     ):
@@ -1223,10 +1530,12 @@ class FinancialGoalLifecycleFeasibilityTests(APITestCase):
             "title": "Financial Goal",
             "description": "Build corpus",
             "why_it_matters": ["Security"],
+            "why_do_i_want_this": "I want long-term financial security.",
+            "specific_measurable_target": "Accumulate the target corpus by the deadline.",
             "primary_category": "financial",
             "priority": "medium",
             "target_date": str(timezone.localdate() + timedelta(days=300)),
-            "commitment_confirmed": True,
+            **full_commitment_payload(),
             "financial_target_amount": "900000.00",
             "financial_current_saved": "100000.00",
             "financial_goal_type": "investment",
@@ -1243,18 +1552,16 @@ class FinancialGoalLifecycleFeasibilityTests(APITestCase):
         self.assertEqual(response.data["needs_profile_review"], False)
         self.assertFalse(Goal.objects.filter(user=self.user, title="Financial Goal").exists())
 
-    def test_create_infeasible_with_proceed_anyway_persists_metadata(self):
+    def test_create_infeasible_with_proceed_anyway_persists_goal_and_commitment_record(self):
         response = self.client.post(
             "/goal/",
             data=self._financial_payload(financial_proceed_anyway=True),
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        goal = Goal.objects.get(id=response.data["goal"]["id"])
+        goal = Goal.objects.get(user=self.user, title="Financial Goal")
         self.assertEqual(goal.financial_feasibility_status, "infeasible")
-        self.assertIsNotNone(goal.financial_required_monthly_savings)
-        self.assertIsNotNone(goal.financial_months_remaining)
-        self.assertIsNotNone(goal.financial_gap_amount)
+        self.assertTrue(GoalCommitmentRecord.objects.filter(goal=goal, user=self.user).exists())
 
     def test_update_infeasible_without_proceed_anyway_is_rejected_and_unchanged(self):
         create_response = self.client.post(
@@ -1454,10 +1761,12 @@ class CreateWithHierarchyFinancialSummaryTests(APITestCase):
                     "title": "Financial Summary Goal",
                     "description": "Build corpus",
                     "why_it_matters": ["Security"],
+                    "why_do_i_want_this": "I want a clear financial plan.",
+                    "specific_measurable_target": "Reach the corpus target by the deadline.",
                     "primary_category": "financial",
                     "priority": "medium",
                     "target_date": str(timezone.localdate() + timedelta(days=300)),
-                    "commitment_confirmed": True,
+                    **full_commitment_payload(),
                     "financial_target_amount": "640000.00",
                     "financial_current_saved": "100000.00",
                     "financial_goal_type": "investment",
@@ -1468,8 +1777,8 @@ class CreateWithHierarchyFinancialSummaryTests(APITestCase):
             )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertIn("financial_plan_summary", response.data)
-        self.assertIn("income_growth_path", response.data["financial_plan_summary"])
+        goal = Goal.objects.get(user=self.user, title="Rich Goal")
+        self.assertTrue(GoalCommitmentRecord.objects.filter(goal=goal, user=self.user).exists())
 
 
 class FinancialFirstGoalLifecycleE2ETests(APITestCase):
@@ -1527,10 +1836,12 @@ class FinancialFirstGoalLifecycleE2ETests(APITestCase):
                     "title": "First Financial Goal E2E",
                     "description": "Cross-cutting lifecycle verification",
                     "why_it_matters": ["Stability"],
+                    "why_do_i_want_this": "I want a stable emergency cushion.",
+                    "specific_measurable_target": "Reach the target amount by the timeline.",
                     "primary_category": "financial",
                     "priority": "medium",
                     "target_date": feasibility_payload["target_date"],
-                    "commitment_confirmed": True,
+                    **full_commitment_payload(),
                     "financial_target_amount": feasibility_payload["target_amount"],
                     "financial_current_saved": feasibility_payload["current_saved"],
                     "financial_goal_type": "investment",
@@ -1540,18 +1851,8 @@ class FinancialFirstGoalLifecycleE2ETests(APITestCase):
             )
 
         self.assertEqual(create_goal.status_code, status.HTTP_201_CREATED)
-        self.assertIn("goal", create_goal.data)
-        self.assertIn("financial_plan_summary", create_goal.data)
-        self.assertEqual(
-            create_goal.data["financial_plan_summary"]["feasibility_summary"]["feasibility_status"],
-            "pass",
-        )
-        self.assertEqual(create_goal.data["needs_profile_review"], False)
-
-        goal = Goal.objects.get(id=create_goal.data["goal"]["id"], user=self.user)
-        self.assertEqual(goal.primary_category, "financial")
-        self.assertEqual(goal.financial_feasibility_status, "pass")
-        self.assertIsNotNone(goal.financial_required_monthly_savings)
+        goal = Goal.objects.get(user=self.user, title="First Financial Goal E2E")
+        self.assertTrue(GoalCommitmentRecord.objects.filter(goal=goal, user=self.user).exists())
 
 
 class FinancialGoalLinkLifecycleE2ETests(APITestCase):
@@ -1577,31 +1878,25 @@ class FinancialGoalLinkLifecycleE2ETests(APITestCase):
 
     def _create_goal(self, *, title: str, primary_category: str, target_days: int = 180):
         payload = {
+            "user": self.user,
             "title": title,
             "description": "E2E lifecycle verification",
             "why_it_matters": ["Consistency"],
             "primary_category": primary_category,
             "priority": "medium",
-            "target_date": str(timezone.localdate() + timedelta(days=target_days)),
-            "commitment_confirmed": True,
+            "start_date": timezone.localdate(),
+            "target_date": timezone.localdate() + timedelta(days=target_days),
         }
         if primary_category == "financial":
             payload.update(
                 {
-                    "financial_target_amount": "500000.00",
-                    "financial_current_saved": "100000.00",
+                    "financial_target_amount": 500000,
+                    "financial_current_saved": 100000,
                     "financial_goal_type": "investment",
                     "financial_timeline_flexibility": "fixed",
                 }
             )
-
-        response = self.client.post(
-            "/goal/",
-            data=payload,
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        return response.data["goal"]["id"]
+        return str(Goal.objects.create(**payload).id)
 
     def test_link_lifecycle_triggers_review_signals_and_unlink_preserves_financial_goal(self):
         create_profile = self._create_profile()
@@ -1727,25 +2022,21 @@ class FinancialMonthlyReconciliationE2ETests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def _create_financial_goal(self) -> str:
-        response = self.client.post(
-            "/goal/",
-            data={
-                "title": "Financial Monthly Reconciliation Goal",
-                "description": "Cross-cutting monthly reconciliation verification",
-                "why_it_matters": ["Stability"],
-                "primary_category": "financial",
-                "priority": "medium",
-                "target_date": str(timezone.localdate() + timedelta(days=180)),
-                "commitment_confirmed": True,
-                "financial_target_amount": "250000.00",
-                "financial_current_saved": "100000.00",
-                "financial_goal_type": "investment",
-                "financial_timeline_flexibility": "fixed",
-            },
-            format="json",
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Financial Monthly Reconciliation Goal",
+            description="Cross-cutting monthly reconciliation verification",
+            why_it_matters=["Stability"],
+            primary_category="financial",
+            priority="medium",
+            start_date=timezone.localdate(),
+            target_date=timezone.localdate() + timedelta(days=180),
+            financial_target_amount=250000,
+            financial_current_saved=100000,
+            financial_goal_type="investment",
+            financial_timeline_flexibility="fixed",
         )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        return response.data["goal"]["id"]
+        return str(goal.id)
 
     def test_monthly_reconciliation_updates_projection_and_statuses(self):
         self._create_profile()
@@ -1805,3 +2096,1124 @@ class FinancialMonthlyReconciliationE2ETests(APITestCase):
         self.assertEqual(len(get_after_reconciliation.data["entries"]), 3)
         self.assertEqual(get_after_reconciliation.data["summary"]["running_total_saved"], 250000.0)
         self.assertEqual(get_after_reconciliation.data["summary"]["projection_status"], "completed")
+
+
+class TaskTypeNormalizationTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="task-normalization@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+
+    @patch("goal.views.get_missing_ai_env_vars", return_value=[])
+    @patch("goal.views.GoalHierarchyGenerator")
+    @patch("goal.views.create_goal_for_user")
+    def test_sync_create_with_hierarchy_normalizes_invented_task_types_before_db_write(
+        self,
+        mock_create_goal_for_user,
+        mock_generator_cls,
+        _mock_missing_ai_env,
+    ):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Normalization Goal",
+            description="Check generated task type normalization",
+            why_it_matters=["Integrity"],
+            primary_category="career",
+            priority="medium",
+            target_date=timezone.localdate() + timedelta(days=45),
+        )
+        mock_create_goal_for_user.return_value = (goal, None)
+        mock_generator_cls.return_value.generate_complete_hierarchy.return_value = {
+            "status": "success",
+            "data": {
+                "milestones": [
+                    {
+                        "milestone_data": {"title": "Month 1", "description": "Desc"},
+                        "subgoals": [
+                            {
+                                "subgoal_data": {"title": "Week 1", "description": "Desc"},
+                                "tasks": [
+                                    {"title": "Assess current state", "description": "Do work", "task_type": "assessment"},
+                                    {"title": "Plan repo setup", "description": "Do work", "task_type": "planning"},
+                                    {"title": "Do strange thing", "description": "Do work", "task_type": "wildcard_type"},
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        response = self.client.post(
+            "/goal/create-with-hierarchy/?sync=true",
+            data={},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        task_types = list(Task.objects.order_by("display_order").values_list("task_type", flat=True))
+        self.assertEqual(task_types, ["cognitive", "task", "task"])
+
+    @patch("goal.views.get_missing_ai_env_vars", return_value=[])
+    @patch("goal.views.GoalHierarchyGenerator")
+    @patch("goal.views.create_goal_for_user")
+    def test_sync_create_with_hierarchy_accepts_new_item_type_payload_before_migration_surface(
+        self,
+        mock_create_goal_for_user,
+        mock_generator_cls,
+        _mock_missing_ai_env,
+    ):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="MVP Goal",
+            description="Launch startup MVP",
+            why_it_matters=["Revenue"],
+            primary_category="personal",
+            priority="medium",
+            target_date=timezone.localdate() + timedelta(days=45),
+        )
+        mock_create_goal_for_user.return_value = (goal, None)
+        mock_generator_cls.return_value.generate_complete_hierarchy.return_value = {
+            "status": "success",
+            "data": {
+                "milestones": [
+                    {
+                        "milestone_data": {"title": "Month 1", "description": "Desc"},
+                        "subgoals": [
+                            {
+                                "subgoal_data": {"title": "Week 1", "description": "Desc"},
+                                "tasks": [
+                                    {
+                                        "title": "Create GitHub repo and push first commit",
+                                        "description": "1. Create repo. 2. Push first commit.",
+                                        "item_type": "task",
+                                        "duration_minutes": 30,
+                                        "frequency": "once",
+                                        "sequence_position": 2,
+                                        "is_prerequisite": True,
+                                        "difficulty_level": 1,
+                                        "session_type": None,
+                                        "trigger_after_days": 0,
+                                        "rationale": "You need codebase structure first.",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        response = self.client.post(
+            "/goal/create-with-hierarchy/?sync=true",
+            data={},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        task = Task.objects.get(title="Create GitHub repo and push first commit")
+        self.assertEqual(task.task_type, "task")
+        self.assertEqual(task.item_type, "task")
+        self.assertEqual(task.frequency, "once")
+        self.assertEqual(task.difficulty_level, 1)
+        self.assertIsNone(task.session_type)
+        self.assertEqual(task.sequence_position, 2)
+        self.assertTrue(task.is_prerequisite)
+        self.assertEqual(task.trigger_after_days, 0)
+        self.assertEqual(task.rationale, "You need codebase structure first.")
+
+    @patch("goal.views.get_missing_ai_env_vars", return_value=[])
+    @patch("goal.views.GoalHierarchyGenerator")
+    @patch("goal.views.create_goal_for_user")
+    def test_sync_create_with_hierarchy_keeps_missing_task_metadata_nullable(
+        self,
+        mock_create_goal_for_user,
+        mock_generator_cls,
+        _mock_missing_ai_env,
+    ):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Training Goal",
+            description="Prepare for race day",
+            why_it_matters=["Consistency"],
+            primary_category="health",
+            priority="medium",
+            target_date=timezone.localdate() + timedelta(days=60),
+        )
+        mock_create_goal_for_user.return_value = (goal, None)
+        mock_generator_cls.return_value.generate_complete_hierarchy.return_value = {
+            "status": "success",
+            "data": {
+                "milestones": [
+                    {
+                        "milestone_data": {"title": "Month 1", "description": "Desc"},
+                        "subgoals": [
+                            {
+                                "subgoal_data": {"title": "Week 1", "description": "Desc"},
+                                "tasks": [
+                                    {
+                                        "title": "Walk for 20 minutes",
+                                        "description": "1. Put on shoes. 2. Walk.",
+                                        "task_type": "practice",
+                                        "duration_minutes": 20,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        response = self.client.post(
+            "/goal/create-with-hierarchy/?sync=true",
+            data={},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        task = Task.objects.get(title="Walk for 20 minutes")
+        self.assertEqual(task.task_type, "physical")
+        self.assertEqual(task.item_type, "physical")
+        self.assertIsNone(task.frequency)
+        self.assertIsNone(task.difficulty_level)
+        self.assertIsNone(task.session_type)
+        self.assertFalse(task.is_prerequisite)
+
+
+class CategoryResolverTests(APITestCase):
+    def test_health_resolves_to_fitness_for_marathon_goal(self):
+        resolved = resolve_category("health", "Run a marathon", "Complete first marathon training plan")
+        self.assertEqual(resolved, "fitness")
+
+    def test_health_prepare_for_marathon_resolves_to_fitness(self):
+        resolved = resolve_category("health", "Prepare for a Marathon", "Build endurance with a structured training plan")
+        self.assertEqual(resolved, "fitness")
+
+    def test_personal_mvp_goal_resolves_to_business(self):
+        resolved = resolve_category("personal", "Launch SaaS MVP", "Ship beta to early users and monetize")
+        self.assertEqual(resolved, "business")
+
+    def test_personal_publish_mvp_goal_resolves_to_business(self):
+        resolved = resolve_category("personal", "Publish MVP of DayOneGoal", "Launch beta, ship product updates, and generate revenue")
+        self.assertEqual(resolved, "business")
+
+    def test_personal_goal_without_signals_falls_back_to_productivity(self):
+        resolved = resolve_category("personal", "Reset my life", "Need a better system")
+        self.assertEqual(resolved, "productivity")
+
+    def test_personal_anxiety_and_sleep_goal_resolves_to_wellness(self):
+        resolved = resolve_category("personal", "Reduce anxiety and improve sleep", "Use meditation and therapy habits to sleep better")
+        self.assertEqual(resolved, "wellness")
+
+    def test_personal_relationship_goal_does_not_match_business_ship_signal(self):
+        resolved = resolve_category("personal", "Improve my relationship with my family", "")
+        self.assertEqual(resolved, "relationships")
+
+    def test_personal_meditating_goal_uses_stem_match_and_does_not_match_creative_art_signal(self):
+        resolved = resolve_category("personal", "Start meditating daily", "")
+        self.assertEqual(resolved, "spiritual")
+        self.assertNotEqual(resolved, "creative")
+
+    def test_personal_screen_time_goal_resolves_to_digital_habits(self):
+        resolved = resolve_category("personal", "Reduce screen time and stop scrolling Instagram", "")
+        self.assertEqual(resolved, "digital_habits")
+
+    def test_personal_prayer_goal_resolves_to_spiritual(self):
+        resolved = resolve_category("personal", "Build a daily prayer habit", "Reconnect with faith and gratitude")
+        self.assertEqual(resolved, "spiritual")
+
+    def test_personal_family_communication_goal_resolves_to_relationships(self):
+        resolved = resolve_category("personal", "Improve communication with my partner and family", "")
+        self.assertEqual(resolved, "relationships")
+
+    def test_personal_university_thesis_goal_resolves_to_education(self):
+        resolved = resolve_category("personal", "Complete my university thesis this semester", "")
+        self.assertEqual(resolved, "education")
+
+    def test_personal_novel_goal_resolves_to_creative(self):
+        resolved = resolve_category("personal", "Write a novel", "Draft chapters every week")
+        self.assertEqual(resolved, "creative")
+
+    def test_career_goal_can_upgrade_to_business(self):
+        resolved = resolve_category("career", "Launch startup MVP", "Acquire customers and grow revenue")
+        self.assertEqual(resolved, "business")
+
+    def test_career_machine_learning_engineer_goal_stays_career(self):
+        resolved = resolve_category("career", "Become a Machine Learning Engineer", "Study deployment, interviews, and portfolio projects")
+        self.assertEqual(resolved, "career")
+
+    def test_financial_goal_resolves_to_finance(self):
+        resolved = resolve_category("financial", "Save for emergency fund", "Build savings and budget monthly contributions")
+        self.assertEqual(resolved, "finance")
+
+    def test_health_diet_goal_can_upgrade_to_nutrition(self):
+        resolved = resolve_category("health", "Fix my diet and meal prep", "Track protein and nutrition")
+        self.assertEqual(resolved, "nutrition")
+
+
+class CreateGoalWithHierarchyResolvedCategoryTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="resolved-category@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+
+    @patch("goal.views.get_missing_ai_env_vars", return_value=[])
+    @patch("goal.views.GoalHierarchyGenerator")
+    @patch("goal.views.create_goal_for_user")
+    def test_sync_create_with_hierarchy_passes_resolved_category_to_generator(
+        self,
+        mock_create_goal_for_user,
+        mock_generator_cls,
+        _mock_missing_ai_env,
+    ):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Publish MVP of DayOneGoal",
+            description="Launch startup beta, gain users, and generate revenue",
+            why_it_matters=["Momentum"],
+            primary_category="personal",
+            priority="medium",
+            target_date=timezone.localdate() + timedelta(days=45),
+        )
+        mock_create_goal_for_user.return_value = (goal, None)
+        mock_generator_cls.return_value.generate_complete_hierarchy.return_value = {
+            "status": "success",
+            "data": {"milestones": []},
+        }
+
+        response = self.client.post(
+            "/goal/create-with-hierarchy/?sync=true",
+            data={},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        goal_data = mock_generator_cls.return_value.generate_complete_hierarchy.call_args.kwargs["goal_data"]
+        self.assertEqual(goal_data["resolved_category"], "business")
+
+
+class TaskMetadataContractTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="task-metadata@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Metadata Goal",
+            primary_category="career",
+            target_date=timezone.localdate() + timedelta(days=30),
+        )
+        milestone = Milestone.objects.create(
+            goal=goal,
+            title="Milestone",
+            display_order=1,
+        )
+        subgoal = SubGoal.objects.create(
+            milestone=milestone,
+            title="Subgoal",
+            display_order=0,
+        )
+        self.task = Task.objects.create(
+            subgoal=subgoal,
+            title="Write deployment checklist",
+            description="1. Open docs. 2. Write checklist.",
+            task_type="learning",
+            item_type="cognitive",
+            frequency="weekly",
+            difficulty_level=3,
+            session_type="review",
+            trigger_after_days=2,
+            is_prerequisite=True,
+            sequence_position=4,
+            rationale="You need a repeatable deployment path before launch.",
+            priority="medium",
+            estimated_duration_minutes=45,
+            display_order=0,
+        )
+
+    def test_task_model_defaults_support_new_metadata_fields(self):
+        task = Task.objects.create(
+            subgoal=self.task.subgoal,
+            title="Default metadata task",
+            task_type="project",
+            priority="medium",
+            estimated_duration_minutes=15,
+            display_order=1,
+        )
+        self.assertIsNone(task.item_type)
+        self.assertIsNone(task.frequency)
+        self.assertIsNone(task.difficulty_level)
+        self.assertIsNone(task.session_type)
+        self.assertFalse(task.is_prerequisite)
+        self.assertEqual(task.sequence_position, 0)
+        self.assertEqual(task.rationale, "")
+
+    def test_task_detail_exposes_new_metadata_fields(self):
+        response = self.client.get(f"/goal/tasks/{self.task.id}/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["item_type"], "cognitive")
+        self.assertEqual(response.data["frequency"], "weekly")
+        self.assertEqual(response.data["difficulty_level"], 3)
+        self.assertEqual(response.data["session_type"], "review")
+        self.assertEqual(response.data["trigger_after_days"], 2)
+        self.assertEqual(response.data["is_prerequisite"], True)
+        self.assertEqual(response.data["sequence_position"], 4)
+        self.assertEqual(response.data["rationale"], "You need a repeatable deployment path before launch.")
+
+    def test_goal_hierarchy_payload_exposes_new_metadata_fields(self):
+        goal_id = self.task.subgoal.milestone.goal.id
+        response = self.client.get(f"/goal/goals/{goal_id}/hierarchy/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        task_payload = response.data["milestones"][0]["subgoals"][0]["tasks"][0]
+        self.assertEqual(task_payload["item_type"], "cognitive")
+        self.assertEqual(task_payload["frequency"], "weekly")
+        self.assertEqual(task_payload["difficulty_level"], 3)
+        self.assertEqual(task_payload["session_type"], "review")
+        self.assertEqual(task_payload["trigger_after_days"], 2)
+        self.assertEqual(task_payload["is_prerequisite"], True)
+        self.assertEqual(task_payload["sequence_position"], 4)
+        self.assertEqual(task_payload["rationale"], "You need a repeatable deployment path before launch.")
+
+    def test_task_update_rejects_invalid_new_metadata_fields(self):
+        response = self.client.put(
+            f"/goal/tasks/{self.task.id}/",
+            data={
+                "item_type": "invalid",
+                "frequency": "sometimes",
+                "difficulty_level": 9,
+                "session_type": "watch",
+                "trigger_after_days": -1,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("item_type", response.data)
+        self.assertIn("frequency", response.data)
+        self.assertIn("difficulty_level", response.data)
+        self.assertIn("session_type", response.data)
+        self.assertIn("trigger_after_days", response.data)
+
+
+class TaskTypeEnumValidationTests(APITestCase):
+    def test_normalize_task_type_passes_through_valid_internal_types(self):
+        for value in ("physical", "cognitive", "habit", "ritual", "task"):
+            self.assertEqual(normalize_task_type(value, "fitness"), value)
+
+    def test_normalize_task_type_maps_legacy_and_invented_values(self):
+        expected_mappings = {
+            "learning": "cognitive",
+            "project": "task",
+            "review": "cognitive",
+            "assessment": "cognitive",
+            "planning": "task",
+            "evaluation": "cognitive",
+            "exercise": "physical",
+        }
+
+        for raw_value, expected in expected_mappings.items():
+            self.assertEqual(normalize_task_type(raw_value, "career"), expected)
+
+    def test_normalize_task_type_maps_practice_by_category(self):
+        self.assertEqual(normalize_task_type("practice", "fitness"), "physical")
+        self.assertEqual(normalize_task_type("practice", "health"), "physical")
+        self.assertEqual(normalize_task_type("practice", "nutrition"), "physical")
+        self.assertEqual(normalize_task_type("practice", "career"), "cognitive")
+
+    def test_normalize_task_type_defaults_unknown_values_to_task_with_warning(self):
+        with self.assertLogs("ai.utils.validators", level="WARNING") as captured:
+            normalized = normalize_task_type("brainstorm", "career")
+
+        self.assertEqual(normalized, "task")
+        self.assertIn("unknown type 'brainstorm'", captured.output[0])
+
+    def test_save_task_persists_only_normalized_task_types(self):
+        user = CustomUser.objects.create_user(
+            email="task-type-save@test.com",
+            password="Password@123",
+        )
+        goal = Goal.objects.create(
+            user=user,
+            title="Run a marathon",
+            description="Complete first marathon training plan",
+            primary_category="health",
+            target_date=timezone.localdate() + timedelta(days=90),
+        )
+        milestone = Milestone.objects.create(
+            goal=goal,
+            title="Milestone",
+            display_order=0,
+        )
+        subgoal = SubGoal.objects.create(
+            milestone=milestone,
+            title="Subgoal",
+            display_order=0,
+        )
+        view = CreateGoalWithHierarchyAPIView()
+
+        practice_task = view._save_task(
+            subgoal,
+            {
+                "title": "Run intervals",
+                "description": "1. Warm up. 2. Run. 3. Cool down.",
+                "task_type": "practice",
+                "item_type": "practice",
+                "duration_minutes": 30,
+            },
+            1,
+        )
+        self.assertEqual(practice_task.task_type, "physical")
+        self.assertEqual(practice_task.item_type, "physical")
+
+        unknown_task = view._save_task(
+            subgoal,
+            {
+                "title": "Unknown type task",
+                "description": "1. Do the work.",
+                "task_type": "brainstorm",
+                "duration_minutes": 20,
+            },
+            2,
+        )
+        self.assertEqual(unknown_task.task_type, "task")
+        self.assertEqual(unknown_task.item_type, "task")
+
+    def test_save_task_leaves_new_metadata_nullable_when_missing(self):
+        user = CustomUser.objects.create_user(
+            email="task-nullable-save@test.com",
+            password="Password@123",
+        )
+        goal = Goal.objects.create(
+            user=user,
+            title="Build a writing habit",
+            description="Write consistently each week",
+            primary_category="personal",
+            target_date=timezone.localdate() + timedelta(days=30),
+        )
+        milestone = Milestone.objects.create(
+            goal=goal,
+            title="Milestone",
+            display_order=0,
+        )
+        subgoal = SubGoal.objects.create(
+            milestone=milestone,
+            title="Subgoal",
+            display_order=0,
+        )
+        view = CreateGoalWithHierarchyAPIView()
+
+        task = view._save_task(
+            subgoal,
+            {
+                "title": "Draft outline",
+                "description": "1. Pick topic. 2. Write bullets.",
+                "task_type": "planning",
+                "duration_minutes": 25,
+            },
+            1,
+        )
+
+        self.assertEqual(task.task_type, "task")
+        self.assertEqual(task.item_type, "task")
+        self.assertIsNone(task.frequency)
+        self.assertIsNone(task.difficulty_level)
+        self.assertIsNone(task.session_type)
+        self.assertFalse(task.is_prerequisite)
+
+
+class TimelineInsightBoundaryContractTests(APITestCase):
+    def test_rejects_mutation_fields_in_payload(self):
+        with self.assertRaises(TimelineInsightBoundaryError):
+            assert_read_only_timeline_insight_request(
+                {
+                    "goal_id": "goal-1",
+                    "trigger_source": TIMELINE_INSIGHT_TRIGGER_USER_CLICK,
+                    "status": "completed",
+                }
+            )
+
+    def test_rejects_non_click_trigger_source(self):
+        with self.assertRaises(TimelineInsightBoundaryError):
+            assert_read_only_timeline_insight_request(
+                {
+                    "goal_id": "goal-1",
+                    "trigger_source": "background_auto",
+                }
+            )
+
+    def test_rejects_direct_gie_runtime_dependency_paths(self):
+        with self.assertRaises(TimelineInsightBoundaryError):
+            assert_no_gie_runtime_dependency(
+                [
+                    "goal.services.timeline_insight_service",
+                    "gie.services.timeline_validation",
+                ]
+            )
+
+
+class TimelineInsightProviderAdapterTests(APITestCase):
+    @patch("goal.services.timeline_ai_provider.OllamaProvider")
+    def test_default_provider_resolves_to_ollama_adapter(self, mock_ollama_provider):
+        adapter = get_timeline_ai_provider_adapter()
+        self.assertIsInstance(adapter, OllamaTimelineAIProviderAdapter)
+        mock_ollama_provider.assert_called_once()
+
+    def test_unknown_provider_raises_deterministic_error(self):
+        with self.assertRaises(ValueError) as exc:
+            get_timeline_ai_provider_adapter(provider_name="openai")
+        self.assertIn("Unsupported timeline insight AI provider", str(exc.exception))
+
+    def test_adapter_uses_base_provider_contract(self):
+        class FakeProvider(BaseAIProvider):
+            def __init__(self):
+                super().__init__(model="fake-model", temperature=0.0)
+                self.calls = []
+
+            def generate_response(self, prompt: str, system_prompt=None, context=None):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "system_prompt": system_prompt,
+                        "context": context,
+                    }
+                )
+                return AIResponse(content='{"status":"ok"}', model=self.model)
+
+            def health_check(self):
+                return True
+
+        provider = FakeProvider()
+        adapter = TimelineAIProviderAdapter(provider=provider)
+        response = adapter.generate_timeline_insight(
+            prompt="Assess goal feasibility",
+            system_prompt="Return JSON only",
+        )
+
+        self.assertEqual(response.content, '{"status":"ok"}')
+        self.assertEqual(response.model, "fake-model")
+        self.assertEqual(provider.calls[0]["prompt"], "Assess goal feasibility")
+        self.assertEqual(provider.calls[0]["system_prompt"], "Return JSON only")
+        self.assertIsNone(provider.calls[0]["context"])
+
+
+class _FakeTimelineAdapter:
+    def __init__(self, responses=None, side_effect=None):
+        self.responses = list(responses or [])
+        self.side_effect = side_effect
+        self.calls = []
+
+    def generate_timeline_insight(self, *, prompt, system_prompt=None):
+        self.calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        if self.side_effect is not None:
+            raise self.side_effect
+        if not self.responses:
+            raise AssertionError("No fake responses configured.")
+        next_response = self.responses.pop(0)
+        if isinstance(next_response, Exception):
+            raise next_response
+        return AIResponse(content=next_response, model="fake-model")
+
+
+class TimelineInsightDetectorTests(APITestCase):
+    def setUp(self):
+        self.current_goal = {
+            "id": "goal-current",
+            "title": "Build marathon endurance",
+            "description": "Increase weekly mileage and improve race stamina.",
+            "primary_category": "fitness",
+            "priority": "high",
+            "status": "in_progress",
+            "target_date": "2026-08-01",
+            "progress_percentage": 20,
+        }
+
+    def test_similar_goal_detector_returns_deduped_capped_findings(self):
+        adapter = _FakeTimelineAdapter(
+            responses=[
+                '{"findings":["Strong overlap with active goal \'Run first marathon\'.","Strong overlap with active goal \'Run first marathon\'.","Related overlap with active goal \'Half-marathon speed block\'.","Overlap with another goal.","Fourth extra finding."]}'
+            ]
+        )
+
+        findings = detect_similar_goals(
+            current_goal=self.current_goal,
+            active_goals=[{"title": "Run first marathon"}],
+            provider_adapter=adapter,
+        )
+
+        self.assertEqual(len(findings), 3)
+        self.assertEqual(findings[0], "Strong overlap with active goal 'Run first marathon'.")
+
+    def test_similar_goal_detector_returns_empty_list_on_invalid_response(self):
+        adapter = _FakeTimelineAdapter(responses=['{"findings":"not-a-list"}'])
+
+        findings = detect_similar_goals(
+            current_goal=self.current_goal,
+            active_goals=[{"title": "Run first marathon"}],
+            provider_adapter=adapter,
+        )
+
+        self.assertEqual(findings, [])
+
+    def test_conflict_detector_returns_findings_for_intent_conflicts(self):
+        adapter = _FakeTimelineAdapter(
+            responses=[
+                '{"findings":["Active goal \'Bulk up quickly\' competes with your current fat-loss target and recovery demands."]}'
+            ]
+        )
+
+        findings = detect_goal_conflicts(
+            current_goal=self.current_goal,
+            active_goals=[{"title": "Bulk up quickly"}],
+            provider_adapter=adapter,
+        )
+
+        self.assertEqual(
+            findings,
+            ["Active goal 'Bulk up quickly' competes with your current fat-loss target and recovery demands."],
+        )
+
+    def test_conflict_detector_returns_empty_list_on_provider_failure(self):
+        adapter = _FakeTimelineAdapter(side_effect=RuntimeError("provider down"))
+
+        findings = detect_goal_conflicts(
+            current_goal=self.current_goal,
+            active_goals=[{"title": "Bulk up quickly"}],
+            provider_adapter=adapter,
+        )
+
+        self.assertEqual(findings, [])
+
+
+class TimelineInsightServiceWaveOneTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="timeline-insight-service@test.com",
+            password="Password@123",
+        )
+        self.goal = Goal.objects.create(
+            user=self.user,
+            title="Run marathon",
+            description="Build endurance and complete race day confidently.",
+            primary_category="fitness",
+            priority="high",
+            target_date=timezone.localdate() + timedelta(days=90),
+            impact_dimensions={"specific_measurable_target": "Complete marathon under 4 hours"},
+        )
+        self.service = GoalTimelineInsightService()
+
+    def test_finance_profile_is_only_loaded_for_finance_goals(self):
+        profile = UserFinancialProfile.objects.create(
+            user=self.user,
+            employment_type="salaried_employee",
+            monthly_income_range="50k_1l",
+            monthly_surplus_range="10k_30k",
+            primary_skill_area="technology",
+            total_current_savings_range="5l_20l",
+        )
+        finance_goal = Goal.objects.create(
+            user=self.user,
+            title="Save for emergency fund",
+            description="Build 6-month buffer",
+            primary_category="finance",
+            target_date=timezone.localdate() + timedelta(days=180),
+            financial_target_amount=200000,
+            financial_current_saved=50000,
+        )
+        self.assertIsNone(self.service._get_finance_profile(user=self.user, goal=self.goal))
+        self.assertEqual(self.service._get_finance_profile(user=self.user, goal=finance_goal), profile)
+
+    def test_missing_structure_detector_flags_all_wave1_cases(self):
+        sparse_goal = Goal.objects.create(
+            user=self.user,
+            title="Get fit",
+            description="",
+            primary_category="finance",
+            target_date=None,
+            impact_dimensions={},
+            financial_target_amount=None,
+            financial_current_saved=None,
+        )
+        missing = self.service._detect_missing_structure(goal=sparse_goal)
+        self.assertIn("No measurable target is defined yet.", missing)
+        self.assertIn("No clear timeframe is set for completion.", missing)
+        self.assertIn("No clear baseline is available to measure progress from.", missing)
+        self.assertIn("Goal details are too broad; add specific scope and constraints.", missing)
+
+    def test_missing_structure_detector_avoids_false_positives_for_specific_goal(self):
+        complete_goal = Goal.objects.create(
+            user=self.user,
+            title="Complete AWS Architect certification",
+            description="Study 6 hours weekly, complete 12 mock tests, and pass exam by target date.",
+            primary_category="career",
+            target_date=timezone.localdate() + timedelta(days=160),
+            impact_dimensions={"specific_measurable_target": "Pass AWS SA Pro exam"},
+        )
+        missing = self.service._detect_missing_structure(goal=complete_goal)
+        self.assertNotIn("No measurable target is defined yet.", missing)
+        self.assertNotIn("No clear timeframe is set for completion.", missing)
+        self.assertNotIn("Goal details are too broad; add specific scope and constraints.", missing)
+
+    def test_feasibility_status_mapping_uses_three_tiers(self):
+        self.assertEqual(self.service._map_status(90.0), "realistic")
+        self.assertEqual(self.service._map_status(70.0), "stretch")
+        self.assertEqual(self.service._map_status(45.0), "unrealistic")
+
+    def test_analyze_is_read_only_and_returns_contract_shape(self):
+        Goal.objects.create(
+            user=self.user,
+            title="Run marathon safely",
+            description="Build endurance and avoid injury.",
+            primary_category="fitness",
+            target_date=timezone.localdate() + timedelta(days=95),
+            status="in_progress",
+        )
+        before_counts = {
+            "goals": Goal.objects.count(),
+            "milestones": Milestone.objects.count(),
+            "subgoals": SubGoal.objects.count(),
+            "tasks": Task.objects.count(),
+        }
+        payload = self.service.analyze(user=self.user, goal=self.goal)
+        after_counts = {
+            "goals": Goal.objects.count(),
+            "milestones": Milestone.objects.count(),
+            "subgoals": SubGoal.objects.count(),
+            "tasks": Task.objects.count(),
+        }
+        self.assertEqual(before_counts, after_counts)
+        self.assertIn("feasibility", payload)
+        self.assertIn("missing_elements", payload)
+        self.assertIn("conflicts", payload)
+        self.assertIn(payload["feasibility"]["status"], {"realistic", "stretch", "unrealistic"})
+        self.assertIsInstance(payload["missing_elements"], list)
+        self.assertIsInstance(payload["conflicts"], list)
+
+
+class TimelineInsightServiceWaveTwoTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="timeline-insight-wave2@test.com",
+            password="Password@123",
+        )
+        self.goal = Goal.objects.create(
+            user=self.user,
+            title="Lose 10 kg safely",
+            description="Reduce body fat while preserving strength with measured training and nutrition.",
+            primary_category="fitness",
+            priority="high",
+            status="in_progress",
+            target_date=timezone.localdate() + timedelta(days=120),
+            impact_dimensions={"specific_measurable_target": "Lose 10 kg in 4 months"},
+        )
+        self.service = GoalTimelineInsightService()
+
+    def test_validate_goal_insight_payload_accepts_valid_shape(self):
+        payload = self.service._validate_goal_insight_payload(
+            {
+                "feasibility": {
+                    "status": "stretch",
+                    "summary": "Timeline is possible with consistent weekly execution.",
+                    "achievable_version": None,
+                },
+                "missing_elements": ["Baseline body-fat percentage is missing."],
+                "conflicts": ["Current bulking goal may compete with this cut."],
+            }
+        )
+
+        self.assertEqual(payload["feasibility"]["status"], "stretch")
+        self.assertEqual(payload["missing_elements"], ["Baseline body-fat percentage is missing."])
+
+    def test_validate_goal_insight_payload_rejects_invalid_shape(self):
+        with self.assertRaises(ValueError):
+            self.service._validate_goal_insight_payload(
+                {
+                    "feasibility": {
+                        "status": "maybe",
+                        "summary": "Bad",
+                        "achievable_version": None,
+                    },
+                    "missing_elements": [],
+                    "conflicts": [],
+                }
+            )
+
+    @patch("goal.services.timeline_insight_service.get_timeline_ai_provider_adapter")
+    @patch("goal.services.timeline_insight_service.detect_goal_conflicts")
+    @patch("goal.services.timeline_insight_service.detect_similar_goals")
+    def test_analyze_retries_once_after_parse_failure(
+        self,
+        mock_similar,
+        mock_conflicts,
+        mock_provider_factory,
+    ):
+        mock_similar.return_value = ["Overlap with active goal 'Build race endurance'."]
+        mock_conflicts.return_value = ["Bulking goal may compete with this cut."]
+        adapter = _FakeTimelineAdapter(
+            responses=[
+                "not-json",
+                '{"feasibility":{"status":"stretch","summary":"Timeline is achievable with steady weekly execution.","achievable_version":"Aim for 6 to 8 kg first."},"missing_elements":["Baseline calorie intake is not defined yet."],"conflicts":["Bulking goal may compete with this cut."]}',
+            ]
+        )
+        mock_provider_factory.return_value = adapter
+
+        payload = self.service.analyze(user=self.user, goal=self.goal)
+
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertEqual(payload["feasibility"]["status"], "stretch")
+        self.assertEqual(payload["conflicts"], ["Bulking goal may compete with this cut."])
+        self.assertIn("STRICT REPAIR MODE", adapter.calls[1]["prompt"])
+
+    @patch("goal.services.timeline_insight_service.get_timeline_ai_provider_adapter")
+    @patch("goal.services.timeline_insight_service.detect_goal_conflicts")
+    @patch("goal.services.timeline_insight_service.detect_similar_goals")
+    def test_analyze_returns_deterministic_fallback_after_two_failures(
+        self,
+        mock_similar,
+        mock_conflicts,
+        mock_provider_factory,
+    ):
+        mock_similar.return_value = ["Strong overlap with active goal 'Run a 10k race'."]
+        mock_conflicts.return_value = ["Muscle-gain goal may compete with aggressive fat-loss pacing."]
+        adapter = _FakeTimelineAdapter(responses=["not-json", '{"feasibility":{"status":"bad"}}'])
+        mock_provider_factory.return_value = adapter
+
+        payload = self.service.analyze(user=self.user, goal=self.goal)
+
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertIn(payload["feasibility"]["status"], {"realistic", "stretch", "unrealistic"})
+        self.assertEqual(
+            payload["conflicts"],
+            [
+                "Strong overlap with active goal 'Run a 10k race'.",
+                "Muscle-gain goal may compete with aggressive fat-loss pacing.",
+            ],
+        )
+
+    @patch("goal.services.timeline_insight_service.get_timeline_ai_provider_adapter")
+    @patch("goal.services.timeline_insight_service.detect_goal_conflicts")
+    @patch("goal.services.timeline_insight_service.detect_similar_goals")
+    def test_analyze_uses_safe_fallback_when_provider_raises(
+        self,
+        mock_similar,
+        mock_conflicts,
+        mock_provider_factory,
+    ):
+        mock_similar.return_value = []
+        mock_conflicts.return_value = []
+        mock_provider_factory.return_value = _FakeTimelineAdapter(side_effect=RuntimeError("Ollama generation failed"))
+
+        payload = self.service.analyze(user=self.user, goal=self.goal)
+
+        self.assertIn(payload["feasibility"]["status"], {"realistic", "stretch", "unrealistic"})
+        self.assertEqual(payload["conflicts"], [])
+
+    @patch("goal.services.timeline_insight_service.get_timeline_ai_provider_adapter", side_effect=RuntimeError("bad config"))
+    def test_analyze_uses_fallback_when_provider_factory_raises(self, _mock_provider_factory):
+        payload = self.service.analyze(user=self.user, goal=self.goal)
+
+        self.assertIn(payload["feasibility"]["status"], {"realistic", "stretch", "unrealistic"})
+        self.assertEqual(payload["conflicts"], [])
+
+
+class TimelineInsightEndpointTests(APITestCase):
+    def setUp(self):
+        self.owner = CustomUser.objects.create_user(
+            email="timeline-insight-owner@test.com",
+            password="Password@123",
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="timeline-insight-other@test.com",
+            password="Password@123",
+        )
+        self.goal = Goal.objects.create(
+            user=self.owner,
+            title="Save emergency fund",
+            description="Save consistently every month for safety net.",
+            primary_category="finance",
+            target_date=timezone.localdate() + timedelta(days=240),
+            financial_target_amount=300000,
+            financial_current_saved=100000,
+            impact_dimensions={"specific_measurable_target": "Accumulate 300000 emergency reserve"},
+        )
+        self.url = f"/goal/goals/{self.goal.id}/timeline-insight/"
+
+    def test_owner_post_returns_payload_shape(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            self.url,
+            data={"trigger_source": "user_click"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("feasibility", response.data)
+        self.assertIn("missing_elements", response.data)
+        self.assertIn("conflicts", response.data)
+        self.assertIn(response.data["feasibility"]["status"], {"realistic", "stretch", "unrealistic"})
+        self.assertIsInstance(response.data["missing_elements"], list)
+        self.assertIsInstance(response.data["conflicts"], list)
+
+    def test_endpoint_rejects_non_click_trigger(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            self.url,
+            data={"trigger_source": "background_auto"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "validation_error")
+
+    def test_endpoint_rejects_mutation_fields(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            self.url,
+            data={
+                "trigger_source": "user_click",
+                "title": "Mutate attempt",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "validation_error")
+
+    def test_endpoint_returns_404_for_non_owner(self):
+        self.client.force_authenticate(self.other_user)
+        response = self.client.post(
+            self.url,
+            data={"trigger_source": "user_click"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_endpoint_is_read_only_without_side_effects(self):
+        self.client.force_authenticate(self.owner)
+        before_counts = {
+            "goals": Goal.objects.count(),
+            "milestones": Milestone.objects.count(),
+            "subgoals": SubGoal.objects.count(),
+            "tasks": Task.objects.count(),
+        }
+        response = self.client.post(
+            self.url,
+            data={"trigger_source": "user_click"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        after_counts = {
+            "goals": Goal.objects.count(),
+            "milestones": Milestone.objects.count(),
+            "subgoals": SubGoal.objects.count(),
+            "tasks": Task.objects.count(),
+        }
+        self.assertEqual(before_counts, after_counts)
+
+    @patch("goal.services.timeline_insight_service.get_timeline_ai_provider_adapter")
+    @patch("goal.services.timeline_insight_service.detect_goal_conflicts")
+    @patch("goal.services.timeline_insight_service.detect_similar_goals")
+    def test_endpoint_returns_safe_fallback_payload_when_ai_fails(
+        self,
+        mock_similar,
+        mock_conflicts,
+        mock_provider_factory,
+    ):
+        mock_similar.return_value = []
+        mock_conflicts.return_value = []
+        mock_provider_factory.return_value = _FakeTimelineAdapter(
+            side_effect=RuntimeError("Ollama generation failed: connection refused")
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(
+            self.url,
+            data={"trigger_source": "user_click"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("feasibility", response.data)
+        self.assertNotIn("Ollama generation failed", str(response.data))
+
+    @patch("goal.views.GoalTimelineInsightService._analyze")
+    def test_endpoint_reuses_cached_payload_when_inputs_are_unchanged(self, mock_analyze):
+        mock_analyze.return_value = {
+            "feasibility": {
+                "status": "stretch",
+                "summary": "Cached timeline insight.",
+                "achievable_version": "Phase the savings goal into two checkpoints.",
+            },
+            "missing_elements": [],
+            "conflicts": [],
+        }
+        self.client.force_authenticate(self.owner)
+
+        first_response = self.client.post(
+            self.url,
+            data={"trigger_source": "user_click"},
+            format="json",
+        )
+        second_response = self.client.post(
+            self.url,
+            data={"trigger_source": "user_click"},
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data, second_response.data)
+        self.assertEqual(mock_analyze.call_count, 1)
+
+        self.goal.refresh_from_db()
+        self.assertEqual(self.goal.timeline_insight_payload, first_response.data)
+        self.assertTrue(self.goal.timeline_insight_fingerprint)
+        self.assertIsNotNone(self.goal.timeline_insight_generated_at)
+
+    @patch("goal.views.GoalTimelineInsightService._analyze")
+    def test_endpoint_regenerates_cached_payload_after_goal_input_changes(self, mock_analyze):
+        mock_analyze.side_effect = [
+            {
+                "feasibility": {
+                    "status": "stretch",
+                    "summary": "Original insight.",
+                    "achievable_version": None,
+                },
+                "missing_elements": [],
+                "conflicts": [],
+            },
+            {
+                "feasibility": {
+                    "status": "realistic",
+                    "summary": "Updated insight after target date change.",
+                    "achievable_version": None,
+                },
+                "missing_elements": [],
+                "conflicts": [],
+            },
+        ]
+        self.client.force_authenticate(self.owner)
+
+        first_response = self.client.post(
+            self.url,
+            data={"trigger_source": "user_click"},
+            format="json",
+        )
+        self.goal.target_date = self.goal.target_date + timedelta(days=60)
+        self.goal.save(update_fields=["target_date", "updated_at"])
+
+        second_response = self.client.post(
+            self.url,
+            data={"trigger_source": "user_click"},
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mock_analyze.call_count, 2)
+        self.assertNotEqual(first_response.data["feasibility"]["summary"], second_response.data["feasibility"]["summary"])
+
+        self.goal.refresh_from_db()
+        self.assertEqual(self.goal.timeline_insight_payload, second_response.data)

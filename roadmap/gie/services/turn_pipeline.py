@@ -1,5 +1,6 @@
 import re
 from datetime import timedelta
+from goal.services.category_resolver import classify_goal_category_deterministic
 
 from django.utils import timezone
 
@@ -324,6 +325,4 @@ class GIETurnPipelineService:
 
 
 def map_goal_domain_to_primary_category(goal_domain: str) -> str:
-    if goal_domain in {GIESession.DOMAIN_CAREER, GIESession.DOMAIN_FINANCIAL, GIESession.DOMAIN_HEALTH}:
-        return goal_domain
-    return "personal"
+    return classify_goal_category_deterministic(goal_title=goal_domain or "", goal_description="")

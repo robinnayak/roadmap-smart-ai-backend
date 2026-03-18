@@ -4,6 +4,7 @@ from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
 from goal.models import Goal, Milestone, Task
+from goal.services.category_resolver import GOAL_CATEGORIES
 from routine.models import DailyTaskItem, DailyTaskList, DisciplineStreak, HabitTracker
 from routine.serializers import DailyTaskListSummarySerializer, DisciplineStreakSerializer
 from routine.services import get_or_create_today_task_list, build_weekly_friction_audit
@@ -43,22 +44,21 @@ HABIT_STYLE_MAP = {
 }
 
 CATEGORY_STYLE_MAP = {
-    "financial": {
-        "iconKey": "dollar-sign",
-        "color": "from-green-500 to-emerald-500",
-    },
-    "career": {
-        "iconKey": "briefcase",
-        "color": "from-blue-500 to-cyan-500",
-    },
-    "health": {
-        "iconKey": "heart",
-        "color": "from-red-500 to-pink-500",
-    },
-    "personal": {
-        "iconKey": "users",
-        "color": "from-purple-500 to-violet-500",
-    },
+    "finance": {"iconKey": "dollar-sign", "color": "from-green-500 to-emerald-500"},
+    "career": {"iconKey": "briefcase", "color": "from-blue-500 to-cyan-500"},
+    "business": {"iconKey": "briefcase", "color": "from-sky-500 to-blue-500"},
+    "fitness": {"iconKey": "heart", "color": "from-red-500 to-pink-500"},
+    "nutrition": {"iconKey": "apple", "color": "from-lime-500 to-green-500"},
+    "wellness": {"iconKey": "sparkles", "color": "from-fuchsia-500 to-violet-500"},
+    "learning": {"iconKey": "book-open", "color": "from-indigo-500 to-blue-500"},
+    "education": {"iconKey": "graduation-cap", "color": "from-indigo-500 to-cyan-500"},
+    "creative": {"iconKey": "palette", "color": "from-amber-500 to-orange-500"},
+    "productivity": {"iconKey": "check-circle", "color": "from-slate-500 to-zinc-500"},
+    "travel": {"iconKey": "plane", "color": "from-cyan-500 to-sky-500"},
+    "digital_habits": {"iconKey": "smartphone", "color": "from-violet-500 to-purple-500"},
+    "spiritual": {"iconKey": "sunrise", "color": "from-yellow-500 to-orange-500"},
+    "relationships": {"iconKey": "users", "color": "from-rose-500 to-pink-500"},
+    "parenting": {"iconKey": "baby", "color": "from-pink-500 to-rose-500"},
 }
 
 ALLOWED_PERIODS = {"week", "month", "year", "all"}
@@ -482,7 +482,7 @@ def build_progress_overview_payload(
         )
 
     category_stats = []
-    for category in ("financial", "career", "health", "personal"):
+    for category in GOAL_CATEGORIES:
         category_goals = [g for g in goal_snapshots if g["primary_category"] == category]
         total = len(category_goals)
         completed = sum(1 for g in category_goals if g["status"] == "completed")
@@ -493,10 +493,10 @@ def build_progress_overview_payload(
             else 0
         )
         trend = "up" if avg_progress >= 70 else "steady" if avg_progress >= 40 else "down"
-        style = CATEGORY_STYLE_MAP[category]
+        style = CATEGORY_STYLE_MAP.get(category, CATEGORY_STYLE_MAP["productivity"])
         category_stats.append(
             {
-                "name": category.capitalize(),
+                "name": category.replace("_", " ").title(),
                 "iconKey": style["iconKey"],
                 "totalGoals": total,
                 "completedGoals": completed,

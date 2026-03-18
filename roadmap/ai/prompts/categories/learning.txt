@@ -1,0 +1,38 @@
+═══════════════════════════════════════════════════════
+CATEGORY: LEARNING
+Primary action style: active study sessions + retrieval practice
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  40% cognitive — active study, problem-solving, writing
+  25% habit     — daily review queue, flashcards, warm-up problems
+  20% task      — mock tests, project submissions, specific exercises
+  15% ritual    — study environment setup, pre-session focus ritual
+   0% physical
+
+RULES:
+
+1. ACTIVE RECALL OVER PASSIVE READING
+   CORRECT: "Close the book. Write everything you remember from
+             Chapter 4 from memory. Check what you missed."
+   WRONG: "Re-read your notes from yesterday"
+
+2. COGNITIVE TASKS NEED TOPIC + DURATION + COMPLETION SIGNAL
+   CORRECT: "Work on IELTS Writing Task 2 — 40 min, one full timed essay"
+   CORRECT: "Solve 1 LeetCode medium (arrays) — 25 min before checking solution"
+   WRONG: "Study for your exam"
+   WRONG: "Practice coding"
+
+3. REVIEW QUEUE IS A DAILY HABIT
+   If the user uses spaced repetition (Anki, Duolingo, flashcards):
+   CORRECT: "Review today's Anki deck — do not skip even if only 10 cards"
+   Frequency: daily. This is a habit, not a task.
+
+4. SESSION TYPE ROTATES — DO NOT GENERATE THE SAME TYPE DAILY
+   Rotate across: new-content → practice → review → test
+   Use the session_type field to label each cognitive task.
+
+FORBIDDEN:
+  ✗ "Watch a YouTube video about X" without requiring a specific output
+  ✗ "Read about X to understand it better" — too vague, specify pages/chapter
+  ✗ "Think about what you learned" — replace with a specific recall prompt

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from math import ceil
 
 from django.utils import timezone
 
@@ -12,6 +11,12 @@ from gie.services.dynamic_schema import (
     WAVE4_DOMAIN_RUNNING_ENDURANCE,
     WAVE4_DOMAIN_SKILL_ACQUISITION,
     map_session_domain_to_wave4_domain,
+)
+from goal.services.timeline_deterministic import (
+    calculate_total_weeks,
+    coerce_number,
+    evaluate_finance_timeline_math,
+    parse_iso_date,
 )
 
 TIMELINE_FEASIBILITY_SLOT_KEY = "__timeline_feasibility"
@@ -50,8 +55,8 @@ class GIETimelineFeasibilityService:
         slot_map = {state.slot_key: state for state in slot_states}
         timeline = unified_context.get("timeline", {})
 
-        start_date = cls._parse_iso_date(timeline.get("start_date")) or timezone.localdate()
-        end_date = cls._parse_iso_date(timeline.get("end_date"))
+        start_date = parse_iso_date(timeline.get("start_date")) or timezone.localdate()
+        end_date = parse_iso_date(timeline.get("end_date"))
         if not end_date:
             return {
                 "feasible": False,
@@ -65,7 +70,7 @@ class GIETimelineFeasibilityService:
                 ],
             }
 
-        total_weeks = max(1, int(ceil(max(1, (end_date - start_date).days) / 7.0)))
+        total_weeks = calculate_total_weeks(start_date=start_date, end_date=end_date)
         minimum_weeks = cls.domain_minimum_weeks(session=session, unified_context=unified_context)
 
         if total_weeks < minimum_weeks:
@@ -152,11 +157,11 @@ class GIETimelineFeasibilityService:
         if wave_domain != WAVE4_DOMAIN_FINANCE:
             return None
 
-        savings_target = cls._coerce_number(slot_map.get("savings_target"))
-        current_savings = cls._coerce_number(slot_map.get("current_savings"))
-        monthly_income = cls._coerce_number(slot_map.get("monthly_income"))
-        monthly_fixed_expenses = cls._coerce_number(slot_map.get("monthly_fixed_expenses"))
-        debt_obligations = cls._coerce_number(slot_map.get("existing_debt"))
+        savings_target = coerce_number(getattr(slot_map.get("savings_target"), "value", None))
+        current_savings = coerce_number(getattr(slot_map.get("current_savings"), "value", None))
+        monthly_income = coerce_number(getattr(slot_map.get("monthly_income"), "value", None))
+        monthly_fixed_expenses = coerce_number(getattr(slot_map.get("monthly_fixed_expenses"), "value", None))
+        debt_obligations = coerce_number(getattr(slot_map.get("existing_debt"), "value", None))
 
         if None in (savings_target, current_savings, monthly_income, monthly_fixed_expenses, debt_obligations):
             return {
@@ -171,12 +176,17 @@ class GIETimelineFeasibilityService:
                 ],
             }
 
-        months_to_target = max(1, int(ceil(max(1, (end_date - start_date).days) / 30.0)))
-        required_monthly_saving = max(0.0, (savings_target - current_savings) / months_to_target)
-        available_surplus = monthly_income - monthly_fixed_expenses - debt_obligations
-
-        if required_monthly_saving > available_surplus:
-            months_needed = max(1, int(ceil((savings_target - current_savings) / max(1.0, available_surplus))))
+        finance_math = evaluate_finance_timeline_math(
+            savings_target=float(savings_target),
+            current_savings=float(current_savings),
+            monthly_income=float(monthly_income),
+            monthly_fixed_expenses=float(monthly_fixed_expenses),
+            debt_obligations=float(debt_obligations),
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if not finance_math["feasible"]:
+            months_needed = finance_math["months_needed"] or 1
             return {
                 "feasible": False,
                 "reason": "Required monthly saving is above available monthly surplus.",
@@ -195,21 +205,3 @@ class GIETimelineFeasibilityService:
             }
 
         return None
-
-    @staticmethod
-    def _coerce_number(state: GIESlotState | None) -> float | None:
-        if not state:
-            return None
-        value = state.value
-        if isinstance(value, (int, float)):
-            return float(value)
-        return None
-
-    @staticmethod
-    def _parse_iso_date(value):
-        if not isinstance(value, str):
-            return None
-        try:
-            return timezone.datetime.strptime(value.strip(), "%Y-%m-%d").date()
-        except ValueError:
-            return None

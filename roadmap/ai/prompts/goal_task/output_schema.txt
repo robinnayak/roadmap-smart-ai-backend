@@ -1,0 +1,32 @@
+═══════════════════════════════════════════════════════
+OUTPUT — RETURN THIS JSON ONLY
+No markdown fences. No explanation. No preamble.
+Start with { and end with }
+═══════════════════════════════════════════════════════
+
+{
+  "tasks": [
+    {
+      "title": "string",
+      "item_type": "physical | cognitive | habit | ritual | task",
+      "description": "string — numbered steps explaining how to execute",
+      "rationale": "string — why this task matters for this subgoal",
+      "duration_minutes": "integer",
+      "frequency": "daily | weekdays | 3x_per_week | 2x_per_week | weekly | monthly | event_triggered | once",
+      "sequence_position": "integer — 0-indexed within this subgoal",
+      "is_prerequisite": "boolean",
+      "difficulty_level": "integer 1–5",
+      "session_type": "null | new_content | practice | review | test",
+      "trigger_after_days": "null | integer"
+    }
+  ]
+}
+
+═══════════════════════════════════════════════════════
+VALIDATION RULES
+═══════════════════════════════════════════════════════
+
+- The top-level object must contain only a "tasks" array.
+- Do not include milestone-level wrappers.
+- Use only the allowed item_type values.
+- Ensure titles are unique within this array.

@@ -1,0 +1,72 @@
+﻿═══════════════════════════════════════════════════════
+SHARED BASE RULES — APPLY TO ALL GENERATION CONTEXTS
+═══════════════════════════════════════════════════════
+
+RULE 1 · ACTION-FIRST TITLES
+Every task title must begin with a verb that describes a specific action.
+The verb must be executable — something a person can physically start doing.
+
+CORRECT:
+  "Run 4×800m at target 5K pace"
+  "Transfer ₹3,000 to savings account"
+  "Solve 1 LeetCode medium problem — 25 min, no hints first"
+  "Write 300 words of Chapter 3 — timer only, no editing"
+
+WRONG:
+  "Stay hydrated"              ← advice, not action
+  "Be consistent"             ← aspiration, not action
+  "Growth marketing training" ← noun phrase, not action
+  "Plan for the week"         ← vague, no completion signal
+
+RULE 2 · SPECIFIC COMPLETION SIGNAL
+Every task must contain at least one of:
+  - A number (reps, distance, duration, amount, word count)
+  - A named tool or platform
+  - A named deliverable (file, document, commit, record)
+
+CORRECT:
+  "Do 3 sets of 12 glute bridges" — has a number
+  "Log today's meals in MyFitnessPal" — has a named tool
+  "Push one commit to portfolio repo" — has a named deliverable
+
+WRONG:
+  "Do some strength work" — no completion signal
+  "Track what you eat" — no tool, no quantity
+  "Work on your portfolio" — no deliverable
+
+RULE 3 · DESCRIPTIONS ARE INSTRUCTIONS, NOT EXPLANATIONS
+Description text tells the user HOW to execute the task.
+It never explains WHY the task is beneficial.
+
+CORRECT:
+  "Open VS Code. Create a new file named inference.py.
+   Write the model loading function first. Run it locally.
+   Commit with message: 'Add inference endpoint'."
+
+WRONG:
+  "Writing an inference script is an important step in ML deployment
+   because it separates the model logic from the serving layer and
+   makes your code more maintainable and testable."
+
+RULE 4 · NO FILLER TASKS
+Every task must have a direct causal link to the active milestone.
+Test every task with: "Does completing this task move the user
+measurably closer to [milestone title]?"
+If the answer is not immediately obvious — remove the task.
+
+RULE 5 · RATIONALE IS PERSONAL
+The rationale field must reference something specific to this user:
+their stated blocker, their current level, their target, their timeline.
+
+CORRECT:
+  "You flagged 'no time in evenings' at onboarding — this task
+   is scoped to 25 minutes for morning sessions only."
+
+WRONG:
+  "Protein is important for muscle recovery after exercise."
+  "Consistency is the key to reaching your goals."
+
+RULE 6 · MATCH THE CATEGORY ACTION STYLE
+Read the category instruction block before generating any tasks.
+Each category has a primary action style that defines what the
+majority of tasks look like. Do not generate tasks in the wrong style.

@@ -19,7 +19,7 @@ from gie.models import (
     GIESlotState,
     GIETurn,
 )
-from goal.models import Goal
+from goal.models import Goal, GoalCommitmentRecord
 from gie.services import (
     GIEHabitRankingService,
     GIEDialogueManagerService,
@@ -31,6 +31,45 @@ from gie.services import (
 )
 from gie.services.timeline_validation import TIMELINE_REFRAME_ANALYSIS_KEY, TIMELINE_REFRAME_DECISION_KEY
 from gie.services.planning import GIEFinalizeBridgeResult, GIEPlanningService
+from goal.services.contract_template import GoalContractTemplateService
+
+
+def full_goal_commitment_context(*, user=None, goal_data=None, accepted_commitments=None, include_snapshot=True, **overrides):
+    signed_at = overrides.get("signed_at", timezone.now().isoformat())
+    payload = {
+        "commitment_confirmed": True,
+        "commitment_intent": "I am committing to this goal.",
+        "commitment_effort": "I will put in the required work consistently.",
+        "commitment_responsibility": "I accept responsibility for the outcome.",
+        "signed_name": "GIE Test User",
+        "signed_at": signed_at,
+    }
+    payload.update(overrides)
+    resolved_goal_data = {
+        "title": "I want to improve my health in six months.",
+        "description": "Improve my health steadily.",
+        "primary_category": "fitness",
+        "why_it_matters": ["health", "consistency"],
+        "why_do_i_want_this": "I want to feel stronger and more consistent.",
+        "specific_measurable_target": "Run stronger and stay consistent for six months.",
+        "target_date": str(timezone.localdate() + timedelta(days=180)),
+    }
+    if goal_data:
+        resolved_goal_data.update(goal_data)
+    resolved_user = user or type(
+        "UserStub",
+        (),
+        {"email": "gie-test@example.com", "get_full_name": lambda self: ""},
+    )()
+    if include_snapshot:
+        payload["contract_snapshot"] = GoalContractTemplateService().render_snapshot(
+            goal_data=resolved_goal_data,
+            user=resolved_user,
+            signed_name=payload["signed_name"],
+            signed_at=payload["signed_at"],
+            accepted_gie_commitments=accepted_commitments or [],
+        )
+    return payload
 
 
 def populate_running_slot_profile(session: GIESession, *, timeline_days: int = 180) -> None:
@@ -58,6 +97,13 @@ def populate_running_slot_profile(session: GIESession, *, timeline_days: int = 1
                 "missing_reason": None,
             },
         )
+
+
+def accepted_commitment_decisions() -> list[dict]:
+    return [
+        {"id": "c1", "decision": "accepted", "revision_note": None},
+        {"id": "c2", "decision": "accepted", "revision_note": None},
+    ]
 
 
 class GIEModelConstraintTests(TestCase):
@@ -378,8 +424,8 @@ class GIEPlanningBridgePayloadTests(TestCase):
                     "why_do_i_want_this": "Stability for unexpected events.",
                     "specific_measurable_target": "Save 10000 by deadline.",
                     "why_it_matters": ["Stability for unexpected events."],
+                    **full_goal_commitment_context(),
                 },
-                commitment_note="Stay focused",
             )
 
         self.assertTrue(result.ok)
@@ -390,6 +436,8 @@ class GIEPlanningBridgePayloadTests(TestCase):
         self.assertEqual(captured_payload["why_it_matters"], ["Stability for unexpected events."])
         self.assertEqual(captured_payload["why_do_i_want_this"], "Stability for unexpected events.")
         self.assertEqual(captured_payload["specific_measurable_target"], "Save 10000 by deadline.")
+        self.assertEqual(captured_payload["commitment_intent"], "I am committing to this goal.")
+        self.assertIn("contract_snapshot", captured_payload)
 
     def test_resolve_goal_priority_returns_high_for_deadline_plus_measurable_signals(self):
         slot_states = [
@@ -690,6 +738,16 @@ class GIETimelineValidationServiceTests(TestCase):
         self.assertGreater(constrained.estimated_timeline_days, baseline.estimated_timeline_days)
         self.assertLess(constrained.impact_percent, baseline.impact_percent)
 
+    def test_returns_none_for_invalid_timeline_date(self):
+        session, state_map = self._build_session(GIESession.DOMAIN_HEALTH)
+        state_map["timeline_target_date"].value = "invalid-date"
+        result = GIETimelineValidationService.evaluate(
+            session=session,
+            slot_states_by_key=state_map,
+            health_profile=None,
+        )
+        self.assertIsNone(result)
+
 
 class GIETimelineFeasibilityServiceTests(TestCase):
     def setUp(self):
@@ -800,6 +858,22 @@ class GIETimelineFeasibilityServiceTests(TestCase):
         )
         self.assertFalse(result["feasible"])
         self.assertIn("reason", result)
+
+    def test_missing_timeline_target_returns_required_date_error(self):
+        session = GIESession.objects.create(
+            user=self.user,
+            goal_text="Learn guitar improvisation",
+            goal_domain=GIESession.DOMAIN_LEARNING,
+            status=GIESession.STATUS_READY_TO_FINALIZE,
+            phase=GIESession.PHASE_REVIEW,
+        )
+        result = GIETimelineFeasibilityService.evaluate(
+            session=session,
+            slot_states=[],
+            unified_context={"timeline": {"start_date": "2026-03-12"}},
+        )
+        self.assertFalse(result["feasible"])
+        self.assertIn("target date is required", result["reason"].lower())
 
 
 class GIEHabitRankingServiceTests(TestCase):
@@ -1321,11 +1395,8 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         response = self.client.post(
             finalize_url,
             data={
-                "commitments": [
-                    {"id": "c1", "decision": "accepted", "revision_note": None},
-                    {"id": "c2", "decision": "revised", "revision_note": "Weekdays only"},
-                ],
-                "goal_context": {"commitment_confirmed": True},
+                "commitments": accepted_commitment_decisions(),
+                "goal_context": full_goal_commitment_context(user=self.user, include_snapshot=False),
             },
             format="json",
         )
@@ -1352,36 +1423,123 @@ class GIETurnStateFinalizeAPITests(APITestCase):
 
         missing = self.client.post(
             finalize_url,
-            data={"goal_context": {"commitment_confirmed": True}},
+            data={"goal_context": full_goal_commitment_context()},
             format="json",
         )
-        self.assertEqual(missing.status_code, status.HTTP_200_OK)
+        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(missing.data["code"], "binding_commitments_incomplete")
 
         invalid = self.client.post(
             finalize_url,
             data={
                 "habit_confirmations": [{"habit_name": "Unknown habit", "decision": "accepted"}],
-                "goal_context": {"commitment_confirmed": True},
+                "goal_context": full_goal_commitment_context(),
             },
             format="json",
         )
         self.assertEqual(invalid.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(invalid.data["code"], "invalid_habit_confirmation_payload")
 
-    def test_finalize_returns_required_goal_fields_missing_when_commitment_not_accepted(self):
+    def test_finalize_rejects_missing_generated_commitment_acceptance(self):
         self._drive_session_to_ready()
         finalize_url = reverse("gie:goals-finalize", kwargs={"session_id": self.session_id})
         response = self.client.post(
             finalize_url,
             data={
-                "goal_context": {"commitment_confirmed": False},
+                "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
+                "goal_context": full_goal_commitment_context(user=self.user, include_snapshot=False),
             },
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data["code"], "required_goal_fields_missing")
-        self.assertIn("missing_required_goal_fields", response.data["details"])
-        self.assertIn("commitment_confirmed", response.data["details"]["missing_required_goal_fields"])
+        self.assertEqual(response.data["code"], "binding_commitments_incomplete")
+        self.assertIn("missing_commitment_ids", response.data["details"])
+
+    def test_finalize_rejects_non_accepted_commitment_decisions(self):
+        self._drive_session_to_ready()
+        finalize_url = reverse("gie:goals-finalize", kwargs={"session_id": self.session_id})
+        response = self.client.post(
+            finalize_url,
+            data={
+                "commitments": [
+                    {"id": "c1", "decision": "accepted", "revision_note": None},
+                    {"id": "c2", "decision": "revised", "revision_note": "Weekdays only"},
+                ],
+                "goal_context": full_goal_commitment_context(user=self.user, include_snapshot=False),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "binding_commitments_incomplete")
+        self.assertIn("non_accepted_commitment_ids", response.data["details"])
+
+    def test_finalize_rejects_unknown_commitment_ids(self):
+        self._drive_session_to_ready()
+        finalize_url = reverse("gie:goals-finalize", kwargs={"session_id": self.session_id})
+        response = self.client.post(
+            finalize_url,
+            data={
+                "commitments": [
+                    {"id": "c1", "decision": "accepted", "revision_note": None},
+                    {"id": "c2", "decision": "accepted", "revision_note": None},
+                    {"id": "c999", "decision": "accepted", "revision_note": None},
+                ],
+                "goal_context": full_goal_commitment_context(user=self.user, include_snapshot=False),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "binding_commitments_incomplete")
+        self.assertIn("unknown_commitment_ids", response.data["details"])
+
+    def test_finalize_rejects_mismatched_contract_snapshot(self):
+        self._drive_session_to_ready()
+        finalize_url = reverse("gie:goals-finalize", kwargs={"session_id": self.session_id})
+        response = self.client.post(
+            finalize_url,
+            data={
+                "commitments": accepted_commitment_decisions(),
+                "goal_context": full_goal_commitment_context(
+                    user=self.user,
+                    accepted_commitments=[],
+                ),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "contract_snapshot_mismatch")
+
+    def test_finalize_rejects_goal_context_when_commitment_not_accepted(self):
+        self._drive_session_to_ready()
+        finalize_url = reverse("gie:goals-finalize", kwargs={"session_id": self.session_id})
+        response = self.client.post(
+            finalize_url,
+            data={
+                "goal_context": full_goal_commitment_context(commitment_confirmed=False),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "invalid_finalize_payload")
+        self.assertIn("goal_context", response.data["details"])
+
+    def test_finalize_rejects_incomplete_commitment_payload_in_goal_context(self):
+        self._drive_session_to_ready()
+        finalize_url = reverse("gie:goals-finalize", kwargs={"session_id": self.session_id})
+        response = self.client.post(
+            finalize_url,
+            data={
+                "goal_context": {
+                    **full_goal_commitment_context(),
+                    "commitment_effort": "",
+                    "contract_snapshot": {},
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "invalid_finalize_payload")
+        self.assertIn("goal_context", response.data["details"])
 
     def test_finalize_enforces_ownership_for_non_owner(self):
         self._drive_session_to_ready()
@@ -1421,8 +1579,8 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         response = self.client.post(
             finalize_url,
             data={
-                "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "goal_context": {"commitment_confirmed": True},
+                "commitments": accepted_commitment_decisions(),
+                "goal_context": full_goal_commitment_context(user=self.user, include_snapshot=False),
             },
             format="json",
         )
@@ -1441,8 +1599,8 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         ]
         finalize_url = reverse("gie:goals-finalize", kwargs={"session_id": self.session_id})
         payload = {
-            "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-            "goal_context": {"commitment_confirmed": True},
+            "commitments": accepted_commitment_decisions(),
+            "goal_context": full_goal_commitment_context(user=self.user, include_snapshot=False),
         }
 
         first_response = self.client.post(finalize_url, data=payload, format="json")
@@ -1491,8 +1649,8 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         response = self.client.post(
             finalize_url,
             data={
-                "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "goal_context": {"commitment_confirmed": True},
+                "commitments": accepted_commitment_decisions(),
+                "goal_context": full_goal_commitment_context(user=self.user, include_snapshot=False),
             },
             format="json",
         )
@@ -1520,8 +1678,8 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         finalize_response = self.client.post(
             finalize_url,
             data={
-                "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "goal_context": {"commitment_confirmed": True},
+                "commitments": accepted_commitment_decisions(),
+                "goal_context": full_goal_commitment_context(user=self.user, include_snapshot=False),
             },
             format="json",
         )
@@ -1545,8 +1703,8 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         _ = self.client.post(
             finalize_url,
             data={
-                "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "goal_context": {"commitment_confirmed": True},
+                "commitments": accepted_commitment_decisions(),
+                "goal_context": full_goal_commitment_context(user=self.user, include_snapshot=False),
             },
             format="json",
         )
@@ -1628,13 +1786,16 @@ class GIELifecycleContractIntegrationTests(APITestCase):
         finalize_response = self.client.post(
             reverse("gie:goals-finalize", kwargs={"session_id": session_id}),
             data={
-                "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "goal_context": {"commitment_confirmed": True},
+                "commitments": accepted_commitment_decisions(),
+                "goal_context": full_goal_commitment_context(user=user, include_snapshot=False),
             },
             format="json",
         )
         self.assertEqual(finalize_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(sorted(finalize_response.data.keys()), sorted(["session_id", "session_status", "plan_snapshot", "commitments", "rie_signal"]))
+        self.assertEqual(
+            sorted(finalize_response.data.keys()),
+            sorted(["session_id", "session_status", "plan_snapshot", "commitments", "rie_signal", "goal", "goal_generation", "feasibility"]),
+        )
         self.assertEqual(finalize_response.data["session_status"], "finalized")
 
         plan_response = self.client.get(reverse("gie:goals-plan", kwargs={"session_id": session_id}))
@@ -1718,11 +1879,8 @@ class GIELifecycleContractIntegrationTests(APITestCase):
         finalize_response = self.client.post(
             reverse("gie:goals-finalize", kwargs={"session_id": session_id}),
             data={
-                "commitments": [
-                    {"id": "c1", "decision": "accepted", "revision_note": None},
-                    {"id": "c2", "decision": "revised", "revision_note": "Weekdays only"},
-                ],
-                "goal_context": {"commitment_confirmed": True},
+                "commitments": accepted_commitment_decisions(),
+                "goal_context": full_goal_commitment_context(user=user, include_snapshot=False),
             },
             format="json",
         )
@@ -1736,11 +1894,19 @@ class GIELifecycleContractIntegrationTests(APITestCase):
         self.assertIsNotNone(created_goal)
         assert created_goal is not None
         self.assertEqual(created_goal.title, "I want to improve my health in six months.")
+        record = GoalCommitmentRecord.objects.get(goal=created_goal)
+        self.assertEqual(record.user, user)
+        self.assertEqual(record.signed_name, "GIE Test User")
+        expected_snapshot = full_goal_commitment_context(user=user)["contract_snapshot"]
+        self.assertEqual(record.contract_snapshot["version"], expected_snapshot["version"])
+        self.assertEqual(record.contract_snapshot["category"], expected_snapshot["category"])
+        self.assertEqual(record.contract_snapshot["gie_commitments"][0]["id"], "c1")
+        self.assertEqual(record.contract_snapshot["gie_commitments"][1]["id"], "c2")
 
         self.assertEqual(len(finalize_response.data["commitments"]), 2)
         commitment_by_id = {item["id"]: item for item in finalize_response.data["commitments"]}
         self.assertEqual(commitment_by_id["c1"]["decision"], "accepted")
-        self.assertEqual(commitment_by_id["c2"]["decision"], "revised")
+        self.assertEqual(commitment_by_id["c2"]["decision"], "accepted")
 
 
 class GIETimelineReframeFlowAPITests(APITestCase):
@@ -2009,8 +2175,8 @@ class GIEObservabilityAndRolloutTests(APITestCase):
         finalize_response = self.client.post(
             reverse("gie:goals-finalize", kwargs={"session_id": session_id}),
             data={
-                "commitments": [{"id": "c1", "decision": "accepted", "revision_note": None}],
-                "goal_context": {"commitment_confirmed": True},
+                "commitments": accepted_commitment_decisions(),
+                "goal_context": full_goal_commitment_context(user=self.user, include_snapshot=False),
             },
             format="json",
         )

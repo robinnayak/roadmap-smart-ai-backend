@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 
+
+COMMITMENT_REQUIRED_FIELDS = (
+    "commitment_confirmed",
+    "commitment_intent",
+    "commitment_effort",
+    "commitment_responsibility",
+    "signed_name",
+    "signed_at",
+    "contract_snapshot",
+)
 
 REQUIRED_GOAL_CREATE_FIELDS = (
     "title",
-    "primary_category",
     "description",
     "why_do_i_want_this",
     "specific_measurable_target",
     "why_it_matters",
     "target_date",
-    "commitment_confirmed",
+    *COMMITMENT_REQUIRED_FIELDS,
 )
 
 
@@ -55,10 +65,60 @@ def normalize_goal_create_payload(payload: Mapping) -> dict:
     return normalized
 
 
+def _is_non_empty_text(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_valid_signed_at(value) -> bool:
+    if isinstance(value, datetime):
+        return True
+    if not isinstance(value, str) or not value.strip():
+        return False
+    candidate = value.strip().replace("Z", "+00:00")
+    try:
+        datetime.fromisoformat(candidate)
+    except ValueError:
+        return False
+    return True
+
+
+def list_missing_commitment_fields(payload: Mapping) -> list[str]:
+    missing: list[str] = []
+    for field in COMMITMENT_REQUIRED_FIELDS:
+        if field == "commitment_confirmed":
+            if payload.get(field) is not True:
+                missing.append(field)
+            continue
+        if field == "contract_snapshot":
+            value = payload.get(field)
+            if not isinstance(value, Mapping) or not value:
+                missing.append(field)
+            continue
+        if field == "signed_at":
+            if not _is_valid_signed_at(payload.get(field)):
+                missing.append(field)
+            continue
+        if not _is_non_empty_text(payload.get(field)):
+            missing.append(field)
+    return missing
+
+
+def extract_goal_commitment_record_data(payload: Mapping) -> dict:
+    return {
+        "commitment_intent": str(payload["commitment_intent"]).strip(),
+        "commitment_effort": str(payload["commitment_effort"]).strip(),
+        "commitment_responsibility": str(payload["commitment_responsibility"]).strip(),
+        "signed_name": str(payload["signed_name"]).strip(),
+        "signed_at": payload["signed_at"],
+        "contract_snapshot": payload["contract_snapshot"],
+    }
+
+
 def list_missing_required_goal_fields(payload: Mapping) -> list[str]:
     impact_dimensions = payload.get("impact_dimensions")
     if not isinstance(impact_dimensions, Mapping):
         impact_dimensions = {}
+    missing_commitment_fields = set(list_missing_commitment_fields(payload))
 
     missing: list[str] = []
     for field in REQUIRED_GOAL_CREATE_FIELDS:
@@ -68,8 +128,8 @@ def list_missing_required_goal_fields(payload: Mapping) -> list[str]:
                 missing.append(field)
             continue
 
-        if field == "commitment_confirmed":
-            if payload.get("commitment_confirmed") is not True:
+        if field in COMMITMENT_REQUIRED_FIELDS:
+            if field in missing_commitment_fields:
                 missing.append(field)
             continue
 
@@ -98,12 +158,17 @@ def list_missing_required_goal_fields(payload: Mapping) -> list[str]:
 def required_goal_fields_error_details(missing_fields: list[str]) -> dict[str, str]:
     messages = {
         "title": "Title is required.",
-        "primary_category": "Primary category is required.",
         "description": "Description is required.",
         "why_do_i_want_this": "Why do I want this is required.",
         "specific_measurable_target": "Specific measurable target is required.",
         "why_it_matters": "At least one reason is required for why_it_matters.",
         "target_date": "Target date is required.",
         "commitment_confirmed": "You must accept the goal commitment before creating a goal.",
+        "commitment_intent": "Commitment intent is required.",
+        "commitment_effort": "Commitment effort is required.",
+        "commitment_responsibility": "Commitment responsibility is required.",
+        "signed_name": "Signed name is required.",
+        "signed_at": "Signed timestamp must be a valid ISO datetime.",
+        "contract_snapshot": "Contract snapshot must be a non-empty JSON object.",
     }
     return {field: messages.get(field, "This field is required.") for field in missing_fields}

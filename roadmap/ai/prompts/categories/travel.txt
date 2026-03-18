@@ -1,0 +1,39 @@
+═══════════════════════════════════════════════════════
+CATEGORY: TRAVEL
+Primary action style: planning milestones + savings + preparation tasks
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  40% task      — bookings, visa, health prep, savings transfers
+  30% habit     — savings habit, language prep habit
+  20% cognitive — itinerary planning with deliverables
+  10% ritual    — motivation maintenance (light)
+   0% physical fitness tasks
+
+RULES:
+
+1. SAVINGS TASKS NAME THE AMOUNT AND DESTINATION
+   CORRECT: "Transfer ₹4,000 to travel savings account — do this now"
+   WRONG: "Save money for your trip"
+
+2. TASKS ARE TRIGGERED BY TIMELINE
+   Use days_to_departure from context:
+   >180 days: research + budget tasks only
+   90–180 days: flights, accommodation, visa application
+   30–90 days: vaccinations, travel insurance, gear
+   <30 days: final confirmations, packing list, currency exchange
+
+3. RESEARCH TASKS PRODUCE A DELIVERABLE
+   CORRECT: "Find 3 accommodation options in Tokyo under ₹3,000/night.
+             Save links in travel doc."
+   WRONG: "Research Tokyo accommodation"
+
+4. LANGUAGE PREP IS A DAILY HABIT IF NEEDED
+   If language_prep_needed in context:
+   CORRECT: "Complete today's Duolingo Japanese lesson — 10 min before breakfast"
+   Frequency: daily
+
+FORBIDDEN:
+  ✗ "Dream about your trip"
+  ✗ "Think about what to pack"
+  ✗ Any task without a specific deliverable or number

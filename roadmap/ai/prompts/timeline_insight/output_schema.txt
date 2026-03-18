@@ -1,0 +1,19 @@
+Return JSON only in this exact shape:
+{
+  "feasibility": {
+    "status": "realistic | stretch | unrealistic",
+    "summary": "string",
+    "achievable_version": "string or null"
+  },
+  "missing_elements": ["string"],
+  "conflicts": ["string"]
+}
+
+VALIDATION RULES
+- Top-level keys must be exactly: feasibility, missing_elements, conflicts
+- feasibility.status must be one of: realistic, stretch, unrealistic
+- feasibility.summary must be a string
+- feasibility.achievable_version must be a string or null
+- missing_elements must be an array of strings
+- conflicts must be an array of strings
+- Keep the response supportive and read-only

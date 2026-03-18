@@ -1,6 +1,7 @@
 import logging
 from decimal import Decimal
 from django.core.exceptions import ImproperlyConfigured
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -8,6 +9,7 @@ from .models import (
     UserCurrentSituationGoal,
     Goal,
     CommitmentContract,
+    GoalCommitmentRecord,
     GoalAttributes,
     Milestone,
     SubGoal,
@@ -17,10 +19,14 @@ from .models import (
     FinancialProgressEntry,
 )
 from .services.create_contract import (
+    COMMITMENT_REQUIRED_FIELDS,
+    extract_goal_commitment_record_data,
+    list_missing_commitment_fields,
     list_missing_required_goal_fields,
     normalize_why_it_matters,
     required_goal_fields_error_details,
 )
+from .services.category_resolver import DEFAULT_GOAL_CATEGORY
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +118,14 @@ class TaskSerializer(serializers.ModelSerializer):
             "title",
             "description",
             "task_type",
+            "item_type",
+            "frequency",
+            "difficulty_level",
+            "session_type",
+            "trigger_after_days",
+            "is_prerequisite",
+            "sequence_position",
+            "rationale",
             "priority",
             "status",
             "scheduled_date",
@@ -135,6 +149,36 @@ class TaskSerializer(serializers.ModelSerializer):
         """Warn (but don't block) if scheduling a task in the past."""
         if value and value < timezone.localdate():
             raise serializers.ValidationError("Cannot schedule a task in the past.")
+        return value
+
+    def validate_item_type(self, value):
+        valid_values = {choice for choice, _label in Task.ITEM_TYPE_CHOICES}
+        if value not in valid_values:
+            raise serializers.ValidationError("Invalid item_type.")
+        return value
+
+    def validate_frequency(self, value):
+        valid_values = {choice for choice, _label in Task.FREQUENCY_CHOICES}
+        if value not in valid_values:
+            raise serializers.ValidationError("Invalid frequency.")
+        return value
+
+    def validate_difficulty_level(self, value):
+        if value < 1 or value > 5:
+            raise serializers.ValidationError("difficulty_level must be between 1 and 5.")
+        return value
+
+    def validate_session_type(self, value):
+        if value in (None, ""):
+            return None
+        valid_values = {choice for choice, _label in Task.SESSION_TYPE_CHOICES}
+        if value not in valid_values:
+            raise serializers.ValidationError("Invalid session_type.")
+        return value
+
+    def validate_trigger_after_days(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("trigger_after_days cannot be negative.")
         return value
 
     def update(self, instance, validated_data):
@@ -178,6 +222,14 @@ class TaskListSerializer(serializers.ModelSerializer):
             "status",
             "priority",
             "task_type",
+            "item_type",
+            "frequency",
+            "difficulty_level",
+            "session_type",
+            "trigger_after_days",
+            "is_prerequisite",
+            "sequence_position",
+            "rationale",
             "scheduled_date",
             "scheduled_time",
             "preferred_time_slot",
@@ -404,6 +456,12 @@ class GoalSerializer(serializers.ModelSerializer):
         allow_blank=True,
         help_text="Optional motivational commitment line captured at creation time.",
     )
+    commitment_intent = serializers.CharField(write_only=True, required=False, allow_blank=False)
+    commitment_effort = serializers.CharField(write_only=True, required=False, allow_blank=False)
+    commitment_responsibility = serializers.CharField(write_only=True, required=False, allow_blank=False)
+    signed_name = serializers.CharField(write_only=True, required=False, allow_blank=False)
+    signed_at = serializers.DateTimeField(write_only=True, required=False)
+    contract_snapshot = serializers.JSONField(write_only=True, required=False)
     why_do_i_want_this = serializers.CharField(
         write_only=True,
         required=False,
@@ -421,6 +479,7 @@ class GoalSerializer(serializers.ModelSerializer):
         required=False,
         default=False,
     )
+    primary_category = serializers.CharField(required=False, allow_blank=False)
 
     class Meta:
         model = Goal
@@ -446,6 +505,12 @@ class GoalSerializer(serializers.ModelSerializer):
             "goal_attributes_input",
             "commitment_confirmed",
             "commitment_note",
+            "commitment_intent",
+            "commitment_effort",
+            "commitment_responsibility",
+            "signed_name",
+            "signed_at",
+            "contract_snapshot",
             "why_do_i_want_this",
             "specific_measurable_target",
             "financial_target_amount",
@@ -501,16 +566,21 @@ class GoalSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     required_goal_fields_error_details(missing_fields)
                 )
+            commitment_missing_fields = list_missing_commitment_fields(attrs)
+            if commitment_missing_fields:
+                raise serializers.ValidationError(
+                    required_goal_fields_error_details(commitment_missing_fields)
+                )
 
         primary_category = attrs.get("primary_category") or (
             self.instance.primary_category if self.instance else None
         )
-        if primary_category == "financial":
+        if primary_category == "finance":
             request = self.context.get("request")
             if self.instance is None and request is not None:
                 if not UserFinancialProfile.objects.filter(user=request.user).exists():
                     raise serializers.ValidationError(
-                        {"financial_profile": "Complete your financial profile before creating a financial goal."}
+                        {"financial_profile": "Complete your financial profile before creating a finance goal."}
                     )
 
             target_amount = attrs.get("financial_target_amount", getattr(self.instance, "financial_target_amount", None))
@@ -524,15 +594,15 @@ class GoalSerializer(serializers.ModelSerializer):
 
             missing_fields = {}
             if target_amount is None:
-                missing_fields["financial_target_amount"] = "This field is required for financial goals."
+                missing_fields["financial_target_amount"] = "This field is required for finance goals."
             if current_saved is None:
-                missing_fields["financial_current_saved"] = "This field is required for financial goals."
+                missing_fields["financial_current_saved"] = "This field is required for finance goals."
             if timeline in (None, ""):
-                missing_fields["financial_timeline_flexibility"] = "This field is required for financial goals."
+                missing_fields["financial_timeline_flexibility"] = "This field is required for finance goals."
             if goal_type in (None, ""):
-                missing_fields["financial_goal_type"] = "This field is required for financial goals."
+                missing_fields["financial_goal_type"] = "This field is required for finance goals."
             if not target_date:
-                missing_fields["target_date"] = "Target date is required for financial goals."
+                missing_fields["target_date"] = "Target date is required for finance goals."
             if missing_fields:
                 raise serializers.ValidationError(missing_fields)
 
@@ -570,15 +640,15 @@ class GoalSerializer(serializers.ModelSerializer):
             category = goal.primary_category.lower()
             
             category_field_map = {
-                "financial": "financial_data",
-                "career":    "career_data",
-                "health":    "health_data",
-                "personal":  "personal_data",
+                "finance": "financial_data",
+                "career": "career_data",
+                "fitness": "health_data",
             }
 
             defaults = {f: None for f in category_field_map.values()}
-            if category in category_field_map:
-                defaults[category_field_map[category]] = extracted
+            target_field = category_field_map.get(category, "personal_data")
+            defaults["personal_data"] = None
+            defaults[target_field] = extracted
 
             GoalAttributes.objects.update_or_create(goal=goal, defaults=defaults)
             logger.info("GoalAttributes saved for goal %s", goal.id)
@@ -603,6 +673,10 @@ class GoalSerializer(serializers.ModelSerializer):
         goal_attributes_input = validated_data.pop("goal_attributes_input", None)
         validated_data.pop("commitment_confirmed", None)
         validated_data.pop("commitment_note", None)
+        commitment_record_data = extract_goal_commitment_record_data(validated_data)
+        for field in COMMITMENT_REQUIRED_FIELDS:
+            if field != "commitment_confirmed":
+                validated_data.pop(field, None)
         why_do_i_want_this = validated_data.pop("why_do_i_want_this", "").strip()
         specific_measurable_target = validated_data.pop(
             "specific_measurable_target", ""
@@ -620,12 +694,19 @@ class GoalSerializer(serializers.ModelSerializer):
         # User-created goals are always marked as modified
         if not validated_data.get("is_ai_generated", False):
             validated_data["is_user_modified"] = True
+        validated_data["primary_category"] = validated_data.get("primary_category") or DEFAULT_GOAL_CATEGORY
 
-        goal = Goal.objects.create(**validated_data)
+        with transaction.atomic():
+            goal = Goal.objects.create(**validated_data)
+            GoalCommitmentRecord.objects.create(
+                goal=goal,
+                user=self.context["request"].user,
+                **commitment_record_data,
+            )
 
-        if goal_attributes_input:
-            user = self.context["request"].user
-            self._extract_and_save_attributes(goal, goal_attributes_input, user)
+            if goal_attributes_input:
+                user = self.context["request"].user
+                self._extract_and_save_attributes(goal, goal_attributes_input, user)
 
         return goal
 
@@ -633,6 +714,11 @@ class GoalSerializer(serializers.ModelSerializer):
         # Attribute extraction only happens at create time
         validated_data.pop("goal_attributes_input", None)
         validated_data.pop("financial_proceed_anyway", None)
+        validated_data.pop("commitment_confirmed", None)
+        validated_data.pop("commitment_note", None)
+        for field in COMMITMENT_REQUIRED_FIELDS:
+            if field != "commitment_confirmed":
+                validated_data.pop(field, None)
         why_do_i_want_this = validated_data.pop("why_do_i_want_this", "").strip()
         specific_measurable_target = validated_data.pop(
             "specific_measurable_target", ""
@@ -811,6 +897,23 @@ class CommitmentContractSignSerializer(serializers.Serializer):
     cc_email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
 
 
+class GoalCommitmentRecordReadSerializer(serializers.ModelSerializer):
+    goal_id = serializers.UUIDField(source="goal.id", read_only=True)
+
+    class Meta:
+        model = GoalCommitmentRecord
+        fields = [
+            "goal_id",
+            "accepted_at",
+            "signed_name",
+            "signed_at",
+            "contract_snapshot",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
 class UserFinancialProfileSerializer(serializers.ModelSerializer):
     situation_changed = serializers.BooleanField(
         write_only=True,
@@ -896,10 +999,10 @@ class GoalLinkSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         source_goal = self.context["source_goal"]
         contributing_goal = attrs["contributing_goal"]
-        if source_goal.primary_category != "financial":
-            raise serializers.ValidationError("Source goal must be financial.")
-        if contributing_goal.primary_category not in {"career", "personal"}:
-            raise serializers.ValidationError("Contributing goal must be career or personal.")
+        if source_goal.primary_category != "finance":
+            raise serializers.ValidationError("Source goal must be finance.")
+        if contributing_goal.primary_category == "finance":
+            raise serializers.ValidationError("Contributing goal cannot also be finance.")
         if contributing_goal.user_id != source_goal.user_id:
             raise serializers.ValidationError("Contributing goal must belong to the same user.")
         return attrs

@@ -1,0 +1,16 @@
+{
+  "reality_anchors": [
+    "I understand this goal will require effort even on days when motivation is low.",
+    "I understand consistency matters more than intensity spikes.",
+    "I understand setbacks do not cancel the commitment I signed."
+  ],
+  "quit_anchor_defaults": [
+    "When I want to quit, I will remember that I chose this goal for a reason.",
+    "When I want to quit, I will return to the next concrete action instead of negotiating with myself."
+  ],
+  "closing_affirmations": [
+    "I AM NOT HOPING. I AM BUILDING.",
+    "I AM NOT WISHING. I AM EXECUTING.",
+    "I AM NOT DREAMING. I AM DOING."
+  ]
+}

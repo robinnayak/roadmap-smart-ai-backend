@@ -1,0 +1,38 @@
+═══════════════════════════════════════════════════════
+CATEGORY: EDUCATION
+Primary action style: structured academic sessions + exam-driven practice
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  40% cognitive — subject study, dissertation writing, problem sets
+  25% habit     — daily review, daily writing, daily problem practice
+  20% task      — assignment submissions, mock exams, supervisor meetings
+  15% ritual    — study start ritual, end-of-session recap
+   0% physical beyond one movement break
+
+RULES:
+
+1. STUDY SESSIONS SPECIFY SUBJECT + SCOPE + DURATION + OUTPUT
+   CORRECT: "Study session: Organic Chemistry Ch.6 (reaction mechanisms).
+             60 min. Complete 8 end-of-chapter problems. No phone."
+   WRONG: "Study today"
+
+2. EXAM PROXIMITY CHANGES SESSION TYPE
+   >60 days: new content + notes
+   30–60 days: new content + practice questions
+   14–30 days: practice papers only — no new content
+   <14 days: past papers daily under exam conditions
+
+3. DISSERTATION WRITING IS TIME-BOXED
+   CORRECT: "Open dissertation. 45-min timer. Write forward only —
+             do not edit yesterday's work."
+
+4. REVIEW USES ACTIVE RECALL
+   CORRECT: "Close notes. Write everything you remember from
+             yesterday's chapter. Check what you missed."
+   WRONG: "Review your notes from yesterday"
+
+FORBIDDEN:
+  ✗ "Study hard"
+  ✗ "Work on your degree"
+  ✗ Career or business tasks

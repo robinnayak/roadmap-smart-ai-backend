@@ -1,0 +1,104 @@
+﻿═══════════════════════════════════════════════════════
+TASK TYPE DEFINITIONS — ASSIGN ONE TYPE PER TASK
+═══════════════════════════════════════════════════════
+
+There are exactly five valid task types.
+You must use one of these five values in the item_type field.
+Do not invent new types. Do not use: assessment, planning,
+evaluation, exercise, project, learning, practice, review.
+
+──────────────────────────────────────────
+TYPE: physical
+──────────────────────────────────────────
+A bodily action — movement, consumption, or physical interaction.
+Completion is a physical state change.
+
+Title pattern: [movement verb] + [specific target]
+  "Run 30 minutes at conversational pace"
+  "Do 3 sets of 12 bodyweight squats"
+  "Drink 500ml water before leaving the kitchen"
+  "Cook and eat a protein-rich breakfast"
+
+Use for: Fitness, Nutrition, Wellness (movement), Parenting (presence)
+Never use for: studying, planning, coding, writing, reviewing
+
+──────────────────────────────────────────
+TYPE: cognitive
+──────────────────────────────────────────
+A focused mental task — studying, writing, coding, analysing, solving.
+Completion is a specific output produced.
+
+Title pattern: [mental action verb] + [specific deliverable]
+  "Solve 1 LeetCode medium (arrays) — 25 min, no hints"
+  "Write the outline for this week's blog post"
+  "Complete Chapter 4 of IELTS prep book — answer end questions"
+  "Build LinearAlgebra_Refresher.ipynb notebook"
+
+Use for: Learning, Education, Career, Creative, Business, Productivity
+Never use for: physical movement, financial transactions, device actions
+
+──────────────────────────────────────────
+TYPE: habit
+──────────────────────────────────────────
+A repeated behaviour (daily, weekly, n× per week).
+Value comes from consistency over time, not the single instance.
+
+Title pattern: [present-tense action] + [specific tool or target]
+  "Log today's meals in MyFitnessPal after breakfast"
+  "Send one LinkedIn message to a new contact"
+  "Write three sentences of your novel before checking phone"
+  "Review today's Anki deck — do not skip even if only 10 cards"
+
+Frequency field is mandatory for habits.
+Use for: any category — habits are the backbone of every routine
+
+──────────────────────────────────────────
+TYPE: ritual
+──────────────────────────────────────────
+A short anchoring behaviour (1–5 min) that signals a transition.
+Has psychological function: day start, block start, pre-event, sleep.
+
+Title pattern: [sensory or transitional verb] + [specific physical action]
+  "Splash cold water on face before touching phone"
+  "Close laptop lid, say 'done', stand up — end of work day"
+  "Place phone face-down on kitchen counter before dinner"
+  "Set out tomorrow's run gear before sleep"
+
+Use for: Morning/evening transitions in every category.
+Especially important for: Wellness, Spiritual, Digital Habits, Fitness
+
+──────────────────────────────────────────
+TYPE: task
+──────────────────────────────────────────
+A non-recurring one-off action at a specific milestone point.
+Done once. Produces a concrete deliverable or completed action.
+
+Title pattern: [completion verb] + [specific deliverable]
+  "Book physio appointment this week — open Practo now"
+  "Transfer ₹5,000 to savings account today"
+  "Submit one job application to Razorpay — use cover letter template"
+  "Install Anki and import the IELTS vocabulary deck"
+
+Use for: Setup tasks, financial transactions, bookings, submissions
+Never use for: recurring behaviours (use habit instead)
+
+═══════════════════════════════════════════════════════
+TYPE ASSIGNMENT DECISION TREE
+═══════════════════════════════════════════════════════
+
+Does it involve physical body movement or consumption?
+  YES → physical
+
+Does it repeat daily or weekly?
+  YES → habit
+
+Does it happen once and produce a specific deliverable?
+  YES → task
+
+Is it a 1–5 min transition anchor?
+  YES → ritual
+
+Is it a focused mental session producing output?
+  YES → cognitive
+
+If still unsure: default to the category's primary action style.

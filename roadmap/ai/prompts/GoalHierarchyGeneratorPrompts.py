@@ -1,7 +1,14 @@
+import logging
+from pathlib import Path
+
 from ai.prompts.base_prompts import BasePrompt
 
-class GoalHierarchyGeneratorPrompts(BasePrompt):
 
+PROMPTS_DIR = Path(__file__).parent
+logger = logging.getLogger(__name__)
+
+
+class GoalHierarchyGeneratorPrompts(BasePrompt):
     def get_subgoal_generating_prompt(self, milestone_data, goal_data):
         reasons = goal_data.get("why_it_matters", [])
         if isinstance(reasons, list):
@@ -23,7 +30,7 @@ Description: {milestone_data.get('description', '')}
 Create 4 weekly subgoals for this monthly milestone:
 
 Week 1: Foundation & Setup
-Week 2: Core Learning  
+Week 2: Core Learning
 Week 3: Application & Practice
 Week 4: Review & Refinement
 
@@ -70,76 +77,24 @@ IMPORTANT: Return JSON in this EXACT format:
         return prompt
 
     def get_task_generating_prompt(self, subgoal_data, milestone_data, goal_data):
-        reasons = goal_data.get("why_it_matters", [])
-        if isinstance(reasons, list):
-            reasons_text = "; ".join([str(item).strip() for item in reasons if str(item).strip()])
-        else:
-            reasons_text = str(reasons or "").strip()
-        prompt = f"""
-Weekly Subgoal: {subgoal_data.get('title', 'Unknown')}
-Description: {subgoal_data.get('description', '')}
-Learning Objectives: {subgoal_data.get('learning_objectives', [])}
-Milestone: {milestone_data.get('title', 'Unknown')}
-Goal Motivation (why_do_i_want_this): {goal_data.get('why_do_i_want_this', '')}
-Goal Measurable Target: {goal_data.get('specific_measurable_target', '')}
-Goal Reasons (why_it_matters): {reasons_text}
-Goal Category/Priority: {goal_data.get('primary_category', '')}/{goal_data.get('priority', '')}
+        resolved_category = goal_data.get("primary_category", "productivity")
+        base_rules = _load("shared/base_rules.txt")
+        type_schema = _load("shared/task_type_schema.txt")
+        system = _load("goal_task/system.txt")
+        category = _load_category(resolved_category)
+        output_schema = _load("goal_task/output_schema.txt")
+        context = _render_context(subgoal_data, milestone_data, goal_data)
 
-Create 7 daily tasks (Monday-Sunday) for this weekly subgoal:
-
-Daily Structure:
-- Monday: Setup, Planning & Foundation
-- Tuesday: Deep Work & Learning
-- Wednesday: Practice & Application
-- Thursday: Implementation & Building
-- Friday: Review, Test & Prepare for Next Week
-
-Each daily task should:
-1. Be specific and actionable
-2. Take 15-180 minutes (avoid unrealistic duration)
-3. Have clear instructions
-4. Specify task type (learning/practice/project/review/assessment)
-5. Include estimated time
-6. Include preferred time slot: morning/afternoon/evening
-7. Be realistically completable in a single day
-8. Maintain progressive difficulty through the week
-9. Include at least one task explicitly reinforcing motivation and long-term relevance
-
-Quality requirements:
-- Avoid vague tasks like "work on it" or "learn more".
-- Use action verbs in title (Build/Create/Practice/Review/Analyze/etc).
-- Ensure sequence across day_order is logically progressive.
-- Include at least one review or assessment task by day 6 or 7.
-
-Return ONLY valid JSON (no markdown, no explanation).
-
-IMPORTANT: Return JSON in this EXACT format:
-{{
-  "tasks": [
-    {{
-      "title": "[Verb] [Specific Action]",
-      "description": "Detailed description of what to do",
-      "instructions": "Step-by-step instructions",
-      "task_type": "learning/practice/project/review/assessment",
-      "resources": ["Resource 1", "Resource 2"],
-      "estimated_duration_minutes": 120,
-      "preferred_time_slot": "morning/afternoon/evening",
-      "day_order": 1,
-      "display_order": 1,
-      "priority": "high/medium/low",
-      "ai_reasoning": "Why this task is important"
-    }}
-  ],
-  "quality_check": {{
-    "is_specific_and_actionable": true,
-    "is_sequenced": true,
-    "is_timeline_realistic": true,
-    "is_skill_aligned": true,
-    "notes": "Short note"
-  }}
-}}
-"""
-        return prompt
+        return "\n\n".join(
+            [
+                base_rules,
+                type_schema,
+                system,
+                category,
+                context,
+                output_schema,
+            ]
+        ).strip()
 
     def get_milestone_generating_prompt(self, goal_context, months):
         prompt = f"""
@@ -188,3 +143,63 @@ IMPORTANT: Return JSON in this EXACT format:
 }}
 """
         return prompt
+
+
+def _load(relative_path: str) -> str:
+    path = PROMPTS_DIR / relative_path
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Required prompt file not found: {path}. "
+            "Create it from the architecture document."
+        )
+    return path.read_text(encoding="utf-8").strip()
+
+
+def _load_category(category: str) -> str:
+    path = PROMPTS_DIR / "categories" / f"{category}.txt"
+    if not path.exists():
+        logger.warning(
+            "No category file for '%s', falling back to 'productivity'",
+            category,
+        )
+        path = PROMPTS_DIR / "categories" / "productivity.txt"
+    return path.read_text(encoding="utf-8").strip()
+
+
+def _render_context(subgoal_data: dict, milestone_data: dict, goal_data: dict) -> str:
+    return f"""
+USER AND GOAL CONTEXT
+
+GOAL
+Title: {goal_data.get('title', '')}
+Category: {goal_data.get('primary_category', '')}
+Description: {goal_data.get('description', '')}
+Why It Matters: {_format_list(goal_data.get('why_it_matters', []))}
+Goal Motivation: {goal_data.get('why_do_i_want_this', '')}
+Measurable Target: {goal_data.get('specific_measurable_target', '')}
+Target Date: {goal_data.get('target_date', '')}
+
+CURRENT MILESTONE
+ID: {milestone_data.get('id', '')}
+Title: {milestone_data.get('title', '')}
+Description: {milestone_data.get('description', '')}
+Success Criteria: {_format_list(milestone_data.get('success_criteria', []))}
+
+CURRENT SUBGOAL (generate tasks for this)
+Title: {subgoal_data.get('title', '')}
+Description: {subgoal_data.get('description', '')}
+Week Number: {subgoal_data.get('week_number', '')}
+Learning Objectives: {_format_list(subgoal_data.get('learning_objectives', []))}
+
+USER CAPACITY
+Available Daily Time: {goal_data.get('available_daily_minutes', 60)} min
+Strengths: {_format_list(goal_data.get('user_strengths', []))}
+Blockers: {_format_list(goal_data.get('user_blockers', []))}
+Motivation Style: {goal_data.get('motivation_style', 'intrinsic')}
+""".strip()
+
+
+def _format_list(items) -> str:
+    if isinstance(items, list):
+        return ", ".join(str(item) for item in items) if items else "not provided"
+    return str(items) if items else "not provided"

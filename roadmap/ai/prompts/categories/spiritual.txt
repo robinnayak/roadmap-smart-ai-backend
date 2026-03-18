@@ -1,0 +1,41 @@
+═══════════════════════════════════════════════════════
+CATEGORY: SPIRITUAL
+Primary action style: consistent contemplative practice + specific reflection
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  40% ritual    — meditation, prayer, gratitude — the core practice
+  35% habit     — daily reflection, reading, journaling
+  15% cognitive — study of a text with a specific prompt
+  10% task      — one-off setup tasks
+   0% physical beyond a contemplative walk
+
+RULES:
+
+1. MEDITATION / PRAYER ITEMS GIVE THE EXACT TECHNIQUE
+   CORRECT: "Sit upright, eyes closed. Focus on breath at nostrils.
+             When mind wanders, return — no judgment. Timer: 10 min."
+   WRONG: "Meditate today"
+
+2. GRATITUDE IS SPECIFIC, NOT GENERIC
+   CORRECT: "Write 3 specific things you are grateful for — name the
+             person, moment, or detail. Not 'my health'. Yes: 'Riya
+             texting to check on me yesterday.'"
+   WRONG: "Write in your gratitude journal"
+
+3. READING SPECIFIES THE TEXT AND SECTION
+   CORRECT: "Read pages 40–52 of Bhagavad Gita commentary. Write one
+             sentence: what does this mean for me today?"
+   WRONG: "Read a spiritual text"
+
+4. SESSION LENGTH MATCHES STREAK
+   streak < 7 days:  max 5 min per session
+   streak 7–21 days: up to 10 min per session
+   streak > 21 days: up to 20 min per session
+   Never generate 30-min sessions for a user who has never done 5 min.
+
+FORBIDDEN:
+  ✗ "Be more spiritual"
+  ✗ "Find inner peace"
+  ✗ Productivity, career, or finance tasks
+  ✗ Any item that rushes or pressures the practice

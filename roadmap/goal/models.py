@@ -30,9 +30,12 @@
 #
 
 import uuid
+from copy import deepcopy
 from django.db import models
+from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
+from goal.services.category_resolver import GOAL_CATEGORY_CHOICES, DEFAULT_GOAL_CATEGORY
 
 
 class UserCurrentSituationGoal(models.Model):
@@ -77,12 +80,7 @@ class UserCurrentSituationGoal(models.Model):
 # Shared constants
 # ---------------------------------------------------------------------------
 
-CATEGORY_CHOICES = [
-    ("financial", "Financial"),
-    ("career", "Career"),
-    ("health", "Health"),
-    ("personal", "Personal"),
-]
+CATEGORY_CHOICES = GOAL_CATEGORY_CHOICES
 
 PRIORITY_CHOICES = [
     ("low", "Low"),
@@ -268,7 +266,7 @@ confidence'}
         blank=True, help_text="Context/reasoning behind AI-generated goal"
     )
 
-    # Financial intelligence fields (used when primary_category == financial)
+    # Financial intelligence fields (used when primary_category == finance)
     financial_target_amount = models.DecimalField(
         max_digits=14,
         decimal_places=2,
@@ -318,6 +316,22 @@ confidence'}
         help_text="Why the AI generated or scored this goal the way it did.",
     )
 
+    timeline_insight_payload = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Cached read-only timeline insight payload for this goal.",
+    )
+    timeline_insight_fingerprint = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text="Hash of the inputs used to generate the cached timeline insight.",
+    )
+    timeline_insight_generated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the cached timeline insight was last generated.",
+    )
+
     # User Modification Tracking
     is_user_modified = models.BooleanField(
         default=False, help_text="True if user edited AI-generated goal"
@@ -342,7 +356,7 @@ confidence'}
     def save(self, *args, **kwargs):
         # Guarantee primary_category is never empty
         if not self.primary_category and self.impact_dimensions:
-            self.primary_category = next(iter(self.impact_dimensions), "personal")
+            self.primary_category = next(iter(self.impact_dimensions), DEFAULT_GOAL_CATEGORY)
         super().save(*args, **kwargs)
 
     @property
@@ -416,6 +430,73 @@ class CommitmentContract(models.Model):
     def __str__(self):
         status = "signed" if self.is_signed else "draft"
         return f"[{self.user.email}] Commitment ({status})"
+
+
+class GoalCommitmentRecord(models.Model):
+    IMMUTABLE_FIELDS = (
+        "goal_id",
+        "user_id",
+        "commitment_intent",
+        "commitment_effort",
+        "commitment_responsibility",
+        "signed_name",
+        "signed_at",
+        "contract_snapshot",
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    goal = models.OneToOneField(
+        Goal,
+        on_delete=models.CASCADE,
+        related_name="commitment_record",
+    )
+    user = models.ForeignKey(
+        "authentication.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="goal_commitment_records",
+    )
+    accepted_at = models.DateTimeField(auto_now_add=True)
+    commitment_intent = models.TextField()
+    commitment_effort = models.TextField()
+    commitment_responsibility = models.TextField()
+    signed_name = models.CharField(max_length=255)
+    signed_at = models.DateTimeField()
+    contract_snapshot = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "goal_commitment_records"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "accepted_at"]),
+        ]
+
+    def __str__(self):
+        return f"[{self.user.email}] Goal Commitment ({self.goal_id})"
+
+    def save(self, *args, **kwargs):
+        # Use _state.adding to avoid querying for a UUID that exists only in memory.
+        if not self._state.adding:
+            original = type(self).objects.get(pk=self.pk)
+            changed_fields = []
+            for field in self.IMMUTABLE_FIELDS:
+                original_value = getattr(original, field)
+                new_value = getattr(self, field)
+                if isinstance(original_value, (dict, list)):
+                    original_value = deepcopy(original_value)
+                if isinstance(new_value, (dict, list)):
+                    new_value = deepcopy(new_value)
+                if original_value != new_value:
+                    changed_fields.append(field.removesuffix("_id"))
+            if changed_fields:
+                raise ValidationError(
+                    {
+                        field: "Signed commitment records are immutable after creation."
+                        for field in changed_fields
+                    }
+                )
+        super().save(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1010,6 +1091,29 @@ class Task(models.Model):
         ("review", "Review"),  # Revision / reflection
         ("assessment", "Assessment"),  # Quiz / test / self-check
     ]
+    ITEM_TYPE_CHOICES = [
+        ("physical", "Physical"),
+        ("cognitive", "Cognitive"),
+        ("habit", "Habit"),
+        ("ritual", "Ritual"),
+        ("task", "Task"),
+    ]
+    FREQUENCY_CHOICES = [
+        ("daily", "Daily"),
+        ("weekdays", "Weekdays"),
+        ("3x_per_week", "3x per week"),
+        ("2x_per_week", "2x per week"),
+        ("weekly", "Weekly"),
+        ("monthly", "Monthly"),
+        ("event_triggered", "Event Triggered"),
+        ("once", "Once"),
+    ]
+    SESSION_TYPE_CHOICES = [
+        ("new_content", "New Content"),
+        ("practice", "Practice"),
+        ("review", "Review"),
+        ("test", "Test"),
+    ]
     TIME_SLOT_CHOICES = [
         ("morning", "Morning"),
         ("afternoon", "Afternoon"),
@@ -1037,6 +1141,23 @@ class Task(models.Model):
     task_type = models.CharField(
         max_length=20, choices=TASK_TYPE_CHOICES, default="learning"
     )
+    item_type = models.CharField(
+        max_length=20, choices=ITEM_TYPE_CHOICES, null=True, blank=True
+    )
+    frequency = models.CharField(
+        max_length=30, choices=FREQUENCY_CHOICES, null=True, blank=True
+    )
+    difficulty_level = models.PositiveSmallIntegerField(null=True, blank=True)
+    session_type = models.CharField(
+        max_length=20,
+        choices=SESSION_TYPE_CHOICES,
+        null=True,
+        blank=True,
+    )
+    trigger_after_days = models.PositiveIntegerField(null=True, blank=True)
+    is_prerequisite = models.BooleanField(default=False)
+    sequence_position = models.PositiveIntegerField(default=0)
+    rationale = models.TextField(blank=True, default="")
 
     # Resources
     # resources = models.JSONField(

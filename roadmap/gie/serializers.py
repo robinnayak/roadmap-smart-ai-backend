@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from gie.models import GIEAdaptationProposal, GIEPlanSnapshot, GIESession, GIESlotDefinition, GIESlotState, GIETurn
+from goal.services.create_contract import COMMITMENT_REQUIRED_FIELDS, list_missing_commitment_fields, required_goal_fields_error_details
 
 
 class GIEGoalStartRequestSerializer(serializers.Serializer):
@@ -80,7 +81,7 @@ class GIETurnSerializer(serializers.ModelSerializer):
 
 class GIEFinalizeCommitmentDecisionSerializer(serializers.Serializer):
     id = serializers.CharField(required=True, allow_blank=False, trim_whitespace=True)
-    decision = serializers.ChoiceField(choices=["pending", "accepted", "revised", "rejected"])
+    decision = serializers.ChoiceField(choices=["accepted", "pending", "revised", "rejected"])
     revision_note = serializers.CharField(required=False, allow_null=True, allow_blank=True, trim_whitespace=True)
 
 
@@ -99,6 +100,18 @@ class GIEFinalizeRequestSerializer(serializers.Serializer):
             return {}
         if not isinstance(value, dict):
             raise serializers.ValidationError("goal_context must be a JSON object.")
+        missing_commitment_fields = [
+            field
+            for field in list_missing_commitment_fields(value)
+            if field != "contract_snapshot"
+        ]
+        for field in COMMITMENT_REQUIRED_FIELDS:
+            if field == "contract_snapshot":
+                continue
+            if field not in value and field not in missing_commitment_fields:
+                missing_commitment_fields.append(field)
+        if missing_commitment_fields:
+            raise serializers.ValidationError(required_goal_fields_error_details(missing_commitment_fields))
         return value
 
 

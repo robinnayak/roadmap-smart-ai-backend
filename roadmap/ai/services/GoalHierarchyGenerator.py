@@ -438,11 +438,9 @@ class GoalHierarchyGenerator(BaseAIService):
                 prompt=self.prompts.get_task_generating_prompt(subgoal_data, milestone_data, goal_data),
                 system_prompt=(
                     "You are a daily task planner. "
-                    "Create exactly 7 specific, actionable tasks (one per day of the week). "
-                    "Each task must include: title, description (what exactly to do), "
-                    "task_type (learning/practice/project/review/assessment), "
-                    "estimated_duration_minutes, and preferred_time_slot "
-                    "(morning/afternoon/evening). "
+                    "Create specific, actionable tasks that follow the provided category instructions. "
+                    "Each task must include title, description, item_type, duration_minutes, "
+                    "frequency, difficulty_level, sequence_position, and rationale. "
                     "Respond with valid JSON containing a 'tasks' array. No prose."
                 ),
             )

@@ -31,6 +31,7 @@ from django.shortcuts import get_object_or_404
 from .models import (
     UserCurrentSituationGoal,
     Goal,
+    GoalCommitmentRecord,
     Milestone,
     SubGoal,
     Task,
@@ -48,6 +49,7 @@ from .serializers import (
     TaskSerializer,
     CommitmentContractSerializer,
     CommitmentContractSignSerializer,
+    GoalCommitmentRecordReadSerializer,
     UserFinancialProfileSerializer,
     FinancialFeasibilitySerializer,
     GoalLinkSerializer,
@@ -84,6 +86,7 @@ from goal.services.commitment_contract import (
     send_contract_email_via_resend,
     build_contract_email_html,
 )
+from goal.services.contract_template import GoalContractTemplateService
 from goal.services.goal_domain import (
     build_goal_hierarchy_payload,
     build_goal_seed_data,
@@ -92,6 +95,7 @@ from goal.services.goal_domain import (
     get_goal_with_hierarchy_for_user,
     get_user_goals_payload,
 )
+from goal.services.category_resolver import GOAL_CATEGORIES
 from goal.services.financial_intelligence import (
     calculate_feasibility,
     evaluate_profile_review_for_goal,
@@ -100,6 +104,12 @@ from goal.services.financial_intelligence import (
     build_profile_plan_hint,
     build_financial_plan_summary,
 )
+from goal.services.timeline_insight_contract import (
+    TimelineInsightBoundaryError,
+    assert_read_only_timeline_insight_request,
+)
+from goal.services.timeline_insight_service import GoalTimelineInsightService
+from ai.utils.validators import normalize_task_type
 
 
 logger = logging.getLogger(__name__)
@@ -517,7 +527,7 @@ class FinancialProgressAPIView(GoalProductionApiView):
         return month_anchor.replace(year=month_anchor.year + year_delta, month=month_index + 1, day=1)
 
     def _get_goal(self, user, goal_id):
-        return get_object_or_404(Goal, id=goal_id, user=user, primary_category="financial")
+        return get_object_or_404(Goal, id=goal_id, user=user, primary_category="finance")
 
     def _recompute_running_totals(self, goal: Goal):
         entries = FinancialProgressEntry.objects.filter(goal=goal).order_by("month", "created_at")
@@ -1136,14 +1146,35 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
         if instructions and instructions not in description:
             description = f"{description}\n\n{instructions}".strip()
 
+        goal = subgoal.milestone.goal
+        resolved_category = goal.primary_category
+        raw_task_type = data.get("task_type") or data.get("item_type") or ""
+        normalized_task_type = normalize_task_type(raw_task_type, resolved_category)
+
+        item_type = normalize_task_type(
+            data.get("item_type") or data.get("task_type", ""),
+            resolved_category,
+        )
+
         return Task.objects.create(
             subgoal=subgoal,
             title=data.get("title", f"Task {index}"),
             description=description,
-            task_type=data.get("task_type", "learning"),
+            task_type=normalized_task_type,
+            item_type=item_type,
+            frequency=data.get("frequency") or None,
+            difficulty_level=data.get("difficulty_level") or None,
+            session_type=data.get("session_type") or None,
+            trigger_after_days=data.get("trigger_after_days"),
+            is_prerequisite=data.get("is_prerequisite", False),
+            sequence_position=data.get("sequence_position", index - 1),
+            rationale=self._to_text(data.get("rationale", "")),
             priority=data.get("priority", "medium"),
             display_order=index - 1,
-            estimated_duration_minutes=data.get("estimated_duration_minutes", 60),
+            estimated_duration_minutes=data.get(
+                "duration_minutes",
+                data.get("estimated_duration_minutes", 60),
+            ),
             scheduled_date=data.get("scheduled_date") or None,
             preferred_time_slot=self._normalize_time_slot(data, index),
             is_ai_generated=True,
@@ -1240,7 +1271,7 @@ class GoalListAPIView(APIView):
         goals = sorted(goals, key=lambda g: (PRIORITY_ORDER.get(g.priority, 9), g.target_date or timezone.localdate()))
 
         # --- Life Area summary (drives the 4 category cards in your UI) ------
-        categories = ["financial", "career", "health", "personal"]
+        categories = list(GOAL_CATEGORIES)
         life_areas = {}
         for cat in categories:
             cat_goals = [g for g in goals if g.primary_category == cat]
@@ -1313,13 +1344,14 @@ class GoalListAPIView(APIView):
         """Return only the relevant category's attribute data, not all four fields."""
         try:
             attr = goal.attributes  # select_related — no extra query
-            field_map = {
-                "financial": attr.financial_data,
-                "career":    attr.career_data,
-                "health":    attr.health_data,
-                "personal":  attr.personal_data,
-            }
-            data = field_map.get(goal.primary_category)
+            if goal.primary_category == "finance":
+                data = attr.financial_data
+            elif goal.primary_category == "career":
+                data = attr.career_data
+            elif goal.primary_category in {"fitness", "wellness", "nutrition"}:
+                data = attr.health_data
+            else:
+                data = attr.personal_data
             return {goal.primary_category: data} if data else None
         except GoalAttributes.DoesNotExist:
             return None
@@ -1437,6 +1469,83 @@ class GoalDetailAPIView(APIView):
 
         goal.delete()  # CASCADE deletes Milestones -> SubGoals -> Tasks automatically
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class GoalCommitmentContractDetailAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, goal_id):
+        goal = Goal.objects.filter(id=goal_id, user=request.user).first()
+        if not goal:
+            return Response({"error": "Goal not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        record = GoalCommitmentRecord.objects.filter(goal=goal, user=request.user).first()
+        if not record:
+            # Backward-compatible read path for goals created before commitment
+            # record persistence existed. This is read-only and deterministic.
+            signed_name = (
+                request.user.get_full_name().strip()
+                if hasattr(request.user, "get_full_name")
+                else ""
+            ) or request.user.email
+            signed_at = goal.created_at or timezone.now()
+            snapshot = GoalContractTemplateService().render_snapshot(
+                goal_data=goal,
+                user=request.user,
+                signed_name=signed_name,
+                signed_at=signed_at,
+                accepted_gie_commitments=[],
+            )
+            return Response(
+                {
+                    "goal_id": str(goal.id),
+                    "accepted_at": signed_at,
+                    "signed_name": signed_name,
+                    "signed_at": signed_at,
+                    "contract_snapshot": snapshot,
+                    "created_at": signed_at,
+                    "updated_at": goal.updated_at or signed_at,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        serializer = GoalCommitmentRecordReadSerializer(record)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class GoalTimelineInsightAPIView(GoalProductionApiView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, goal_id):
+        goal = Goal.objects.filter(id=goal_id, user=request.user).first()
+        if not goal:
+            return Response({"error": "Goal not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        payload = dict(request.data or {})
+        payload.setdefault("goal_id", str(goal_id))
+        if str(payload.get("goal_id")) != str(goal_id):
+            return Response(
+                {
+                    "error": "validation_error",
+                    "details": {"goal_id": ["Payload goal_id must match URL goal_id."]},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            assert_read_only_timeline_insight_request(payload)
+        except TimelineInsightBoundaryError as exc:
+            return Response(
+                {
+                    "error": "validation_error",
+                    "details": {"timeline_insight": [str(exc)]},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        service = GoalTimelineInsightService()
+        insight_payload = service.get_or_create_cached_insight(user=request.user, goal=goal)
+        return Response(insight_payload, status=status.HTTP_200_OK)
 
 
 class TaskDetailApiView(GoalProductionApiView):

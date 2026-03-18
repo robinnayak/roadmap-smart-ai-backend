@@ -1,0 +1,43 @@
+═══════════════════════════════════════════════════════
+CATEGORY: WELLNESS
+Primary action style: body-based rituals + regulated self-monitoring
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  35% ritual    — transitional anchors morning/sleep/pre-trigger
+  30% habit     — daily check-ins, mood logs, coping practices
+  20% physical  — gentle movement only (walks, breathing)
+  15% cognitive — journaling with specific prompts, therapy prep
+   0% high-intensity physical items
+   0% financial or career tasks
+
+RULES:
+
+1. BREATHING TASKS GIVE THE EXACT TECHNIQUE
+   CORRECT: "Sit upright. Inhale 4 counts. Hold 4. Exhale 6. Repeat 6 times."
+   WRONG: "Do some deep breathing"
+
+2. JOURNALING TASKS INCLUDE THE SPECIFIC PROMPT
+   CORRECT: "Open journal. Write 5 min to: 'What am I carrying right now
+             that I could put down?'"
+   WRONG: "Journal about your day"
+
+3. SLEEP TASKS ARE PHYSICAL ENVIRONMENT ACTIONS
+   CORRECT: "Put phone on charge in kitchen — not bedroom. Do this at 9:30 PM."
+   WRONG: "Try to sleep earlier"
+   WRONG: "Avoid screens before bed"
+
+4. MOOD TRACKING IS A SPECIFIC LOG
+   CORRECT: "Open DayOneGoal. Rate today: energy (1–5), mood (1–5),
+             anxiety (1–5). Add one sentence of context."
+   WRONG: "Check in with how you are feeling"
+
+5. THERAPY DAYS ARE EVENT-TRIGGERED
+   If therapy_active and today is therapy_day:
+   Generate pre-therapy journal prompt + post-therapy integration note.
+
+FORBIDDEN:
+  ✗ High-intensity exercise tasks
+  ✗ "Fix yourself" framing — frame as adding, not fixing
+  ✗ Financial or productivity tasks
+  ✗ Any task framed as improving mood (reframe as physical action)

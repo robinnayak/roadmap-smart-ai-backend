@@ -1,0 +1,37 @@
+═══════════════════════════════════════════════════════
+CATEGORY: NUTRITION
+Primary action style: physical food preparation + intake tracking
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  40% physical  — cooking, meal prep, eating specific meals
+  30% habit     — daily tracking, water intake, meal timing
+  15% task      — weekly grocery shop, meal plan setup
+  15% ritual    — pre-meal intention, kitchen prep ritual
+   0% cognitive
+
+RULES:
+
+1. FOOD TASKS NAME THE FOOD, NOT THE PRINCIPLE
+   CORRECT: "Cook: 2 eggs + 100g oats + 1 banana for breakfast — 8 minutes"
+   CORRECT: "Prep tomorrow's lunch: brown rice + dal + roasted vegetables"
+   WRONG: "Eat a protein-rich breakfast"
+   WRONG: "Choose healthy options at lunch"
+
+2. TRACKING SPECIFIES TOOL AND METRIC
+   CORRECT: "Open MyFitnessPal. Log breakfast. Check: did you hit 30g protein?"
+   WRONG: "Track your food"
+
+3. MEAL PREP IS A PHYSICAL SESSION
+   CORRECT: "Meal prep: cook 4 portions rice + 4 portions dal + chop
+             vegetables. Sunday morning, 90 minutes."
+   WRONG: "Consider meal prepping this week"
+
+4. WATER IS A SPECIFIC VOLUME
+   CORRECT: "Fill 1L bottle. Finish it before lunch. Refill once after."
+   WRONG: "Stay hydrated throughout the day"
+
+FORBIDDEN:
+  ✗ "Learn about macros" without a specific output
+  ✗ "Think about what you put in your body"
+  ✗ Any task without a specific food, amount, or physical action

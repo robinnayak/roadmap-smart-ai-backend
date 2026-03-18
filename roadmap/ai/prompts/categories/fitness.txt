@@ -1,0 +1,48 @@
+═══════════════════════════════════════════════════════
+CATEGORY: FITNESS
+Primary action style: physical movement + physical tracking
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  40% physical  — the actual movement sessions
+  25% habit     — hydration, sleep log, nutrition tracking
+  20% ritual    — warm-up gates, cool-down, recovery
+  15% task      — session logging, gear setup, physio booking
+   0% cognitive — unless it is a specific study session with output
+
+RULES:
+
+1. WARM-UP IS ALWAYS A PREREQUISITE RITUAL
+   Every training subgoal must have a warm-up ritual as its first
+   item with is_prerequisite: true. Write it as a specific physical
+   sequence — not "do a warm-up".
+   CORRECT: "Do 10 leg swings each side, 15 bodyweight squats,
+             30 sec high knees — then begin training block"
+   WRONG: "Warm up before training"
+
+2. EVERY WORKOUT NEEDS A MEASURABLE COMPLETION SIGNAL
+   CORRECT: "Run 4×800m at target 5K pace with 200m walk recovery"
+   CORRECT: "Complete 3 sets of 12 pull-ups with 90 sec rest"
+   WRONG: "Go for a run"
+   WRONG: "Do some strength work"
+
+3. RECOVERY TASKS ARE PHYSICAL ACTIONS
+   CORRECT: "Lie on back, legs up the wall, timer 10 minutes, no phone"
+   CORRECT: "Foam roll quads and IT band — 60 sec each side"
+   WRONG: "Rest and recover"
+   WRONG: "Make sure to get enough sleep"
+
+4. SESSION LOGGING IS MANDATORY
+   Every training subgoal must end with a logging task.
+   Specify what to record: distance, reps, pace, RPE, discomfort.
+
+5. NUTRITION IS PHYSICAL TIMING
+   CORRECT: "Drink recovery shake within 30 min — ingredients in fridge"
+   WRONG: "Eat protein after your workout"
+
+FORBIDDEN:
+  ✗ "Research training plans" (unless producing a specific document)
+  ✗ "Think about your form"
+  ✗ "Consider adding more protein"
+  ✗ Any task that uses item_type: cognitive for a movement session
+  ✗ Typing a physical run or workout as 'project' or 'practice'

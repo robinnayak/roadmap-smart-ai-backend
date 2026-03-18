@@ -3,7 +3,10 @@ from django.db.models import Sum
 
 from goal.models import Goal, SubGoal, Task, UserFinancialProfile
 from goal.serializers import GoalListSerializer, GoalSerializer
-from goal.services.create_contract import normalize_goal_create_payload
+from goal.services.create_contract import (
+    normalize_goal_create_payload,
+)
+from goal.services.category_resolver import classify_goal_category, DEFAULT_GOAL_CATEGORY
 from goal.services.financial_intelligence import calculate_feasibility
 
 
@@ -38,7 +41,7 @@ def evaluate_financial_goal_feasibility(*, user, validated_data, instance=None):
     primary_category = validated_data.get("primary_category") or (
         instance.primary_category if instance else None
     )
-    if primary_category != "financial":
+    if primary_category != "finance":
         return {}, None
 
     profile = UserFinancialProfile.objects.filter(user=user).first()
@@ -47,7 +50,7 @@ def evaluate_financial_goal_feasibility(*, user, validated_data, instance=None):
             "error": "validation_error",
             "details": {
                 "financial_profile": [
-                    "Complete your financial profile before creating a financial goal."
+                    "Complete your financial profile before creating a finance goal."
                 ]
             },
         }
@@ -97,6 +100,11 @@ def evaluate_financial_goal_feasibility(*, user, validated_data, instance=None):
 
 def create_goal_for_user(*, request_data, user, request):
     data = sanitize_goal_payload(request_data)
+    data["primary_category"] = classify_goal_category(
+        goal_title=str(data.get("title") or ""),
+        goal_description=str(data.get("description") or ""),
+        current_category=data.get("primary_category") or DEFAULT_GOAL_CATEGORY,
+    )
     serializer = GoalSerializer(data=data, context={"request": request})
     if not serializer.is_valid():
         return None, serializer.errors
@@ -111,6 +119,7 @@ def create_goal_for_user(*, request_data, user, request):
 
     if feasibility_metadata:
         serializer.validated_data.update(feasibility_metadata)
+
     goal = serializer.save(user=user)
 
     return goal, None
@@ -134,6 +143,7 @@ def build_goal_seed_data(goal):
         "why_do_i_want_this": impact_dimensions.get("why_do_i_want_this", ""),
         "specific_measurable_target": impact_dimensions.get("specific_measurable_target", ""),
         "primary_category": goal.primary_category,
+        "resolved_category": goal.primary_category,
         "impact_dimensions": goal.impact_dimensions,
         "start_date": goal.start_date,
         "target_date": goal.target_date,
@@ -197,6 +207,14 @@ def build_goal_hierarchy_payload(*, goal, today):
                         "title": task.title,
                         "description": task.description,
                         "task_type": task.task_type,
+                        "item_type": task.item_type,
+                        "frequency": task.frequency,
+                        "difficulty_level": task.difficulty_level,
+                        "session_type": task.session_type,
+                        "trigger_after_days": task.trigger_after_days,
+                        "is_prerequisite": task.is_prerequisite,
+                        "sequence_position": task.sequence_position,
+                        "rationale": task.rationale,
                         "priority": task.priority,
                         "status": task.status,
                         "display_order": task.display_order,

@@ -1,0 +1,42 @@
+═══════════════════════════════════════════════════════
+CATEGORY: BUSINESS
+Primary action style: ship + sell + talk to customers
+═══════════════════════════════════════════════════════
+
+ITEM MIX:
+  40% task      — ship, send, publish, deploy specific things
+  25% cognitive — build sessions, content creation, strategy reviews
+  20% habit     — daily outreach, daily metric check, daily content
+  15% ritual    — work-start ritual, weekly review ritual
+   0% physical
+
+RULES:
+
+1. SHIP TASKS NAME THE SPECIFIC THING BEING SHIPPED
+   CORRECT: "Push today's commit: complete the user login flow"
+   CORRECT: "Publish this week's newsletter — draft already written"
+   WRONG: "Work on your product"
+   WRONG: "Create content"
+
+2. CUSTOMER TASKS NAME THE ACTION AND THE NUMBER
+   CORRECT: "Send 3 cold outreach messages — use the template in /docs"
+   CORRECT: "Book 1 customer discovery call — send Calendly link today"
+   WRONG: "Talk to customers"
+
+3. VALIDATION STAGE: NO BUILD TASKS
+   If business_stage is 'idea' or 'validation':
+   Generate ZERO build tasks. All tasks must be customer conversations
+   or hypothesis tests until validation milestone is confirmed.
+   CORRECT: "Talk to 1 potential customer — ask about their problem,
+             not your solution"
+
+4. METRIC REVIEW PRODUCES A SPECIFIC NUMBER
+   CORRECT: "Open dashboard. Record: signups this week, revenue this week.
+             Note one metric moving in wrong direction."
+   WRONG: "Check your metrics"
+
+FORBIDDEN:
+  ✗ "Research your market" without a specific deliverable
+  ✗ "Think about your business model"
+  ✗ "Plan your strategy" as a standalone task
+  ✗ Build tasks during validation phase
