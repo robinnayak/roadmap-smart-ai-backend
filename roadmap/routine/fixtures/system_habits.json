@@ -13,6 +13,8 @@
     "ai_suggested": false,
     "is_active": true,
     "why_important": "What am I grateful for right now? Who do I appreciate? What opportunity exists today?",
+    "description": "1. Pause and take one slow breath.\n2. Name three things you are grateful for right now.\n3. Say why each one matters to you.\n4. Choose one gratitude to carry with you into the day.",
+    "reason_body": "1. Pause and take one slow breath.\n2. Name three things you are grateful for right now.\n3. Say why each one matters to you.\n4. Choose one gratitude to carry with you into the day.",
     "rewards": []
   },
   {
@@ -29,6 +31,8 @@
     "ai_suggested": false,
     "is_active": true,
     "why_important": "See yourself one year from now. Two years from now. Feel the emotions: pride, strength, freedom, respect.",
+    "description": "1. Close your eyes and slow your breathing.\n2. Picture your future self living the result you want.\n3. Add details: where you are, what you see, and how you feel.\n4. Connect that future to one action you must execute today.",
+    "reason_body": "1. Close your eyes and slow your breathing.\n2. Picture your future self living the result you want.\n3. Add details: where you are, what you see, and how you feel.\n4. Connect that future to one action you must execute today.",
     "rewards": []
   },
   {
@@ -45,6 +49,8 @@
     "ai_suggested": false,
     "is_active": true,
     "why_important": "Choose ONE intention for today. Say it out loud 3 times. This becomes your anchor when you feel like quitting.",
+    "description": "1. Choose one clear intention for today.\n2. Say it out loud three times.\n3. Write it in a short phrase you can remember quickly.\n4. Come back to that phrase whenever you feel distracted or resistant.",
+    "reason_body": "1. Choose one clear intention for today.\n2. Say it out loud three times.\n3. Write it in a short phrase you can remember quickly.\n4. Come back to that phrase whenever you feel distracted or resistant.",
     "rewards": []
   },
   {
@@ -61,6 +67,8 @@
     "ai_suggested": false,
     "is_active": true,
     "why_important": "Review your routine and know exactly what you are executing today.",
+    "description": "1. Scan your routine from top to bottom.\n2. Identify the most important task you must protect today.\n3. Confirm when each key task will happen.\n4. Remove any confusion before you begin execution.",
+    "reason_body": "1. Scan your routine from top to bottom.\n2. Identify the most important task you must protect today.\n3. Confirm when each key task will happen.\n4. Remove any confusion before you begin execution.",
     "rewards": []
   },
   {
@@ -77,6 +85,8 @@
     "ai_suggested": false,
     "is_active": true,
     "why_important": "Focus on your breath. When thoughts come, acknowledge them and return to your breath. Final 2 minutes: see yourself executing today perfectly.",
+    "description": "1. Sit upright and relax your shoulders.\n2. Breathe slowly through your nose and follow the inhale and exhale.\n3. When thoughts appear, notice them without judgment and return to the breath.\n4. Use the final moments to reset your mind for focused execution today.",
+    "reason_body": "1. Sit upright and relax your shoulders.\n2. Breathe slowly through your nose and follow the inhale and exhale.\n3. When thoughts appear, notice them without judgment and return to the breath.\n4. Use the final moments to reset your mind for focused execution today.",
     "rewards": []
   },
   {
@@ -93,6 +103,8 @@
     "ai_suggested": false,
     "is_active": true,
     "why_important": "Review your day. What were your wins? What did you learn? End on a positive note.",
+    "description": "1. Write down your main wins from today.\n2. Note where you felt resistance or drifted off plan.\n3. Capture one lesson you want to keep.\n4. End with one adjustment that will improve tomorrow.",
+    "reason_body": "1. Write down your main wins from today.\n2. Note where you felt resistance or drifted off plan.\n3. Capture one lesson you want to keep.\n4. End with one adjustment that will improve tomorrow.",
     "rewards": []
   },
   {
@@ -109,6 +121,8 @@
     "ai_suggested": false,
     "is_active": true,
     "why_important": "All devices away. Dark, cool, quiet room. 4-7-8 breathing: inhale 4, hold 7, exhale 8. Review 3 wins. Lights out at 10:30 PM.",
+    "description": "1. Put devices away and lower stimulation.\n2. Prepare a dark, cool, quiet sleep environment.\n3. Take a few slow calming breaths to downshift your body.\n4. Close the day, review your wins, and get to lights out on time.",
+    "reason_body": "1. Put devices away and lower stimulation.\n2. Prepare a dark, cool, quiet sleep environment.\n3. Take a few slow calming breaths to downshift your body.\n4. Close the day, review your wins, and get to lights out on time.",
     "rewards": []
   }
 ]

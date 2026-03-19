@@ -672,6 +672,36 @@ class DailyTaskGenerationTests(APITestCase):
         self.assertEqual(habit_item.time_slot, "evening")
         self.assertEqual(str(habit_item.suggested_time), "05:30:00")
 
+    def test_generation_backfills_system_habit_guidance_and_uses_it_for_routine_description(self):
+        target_date = timezone.localdate() + timedelta(days=1)
+        expected_description = (
+            "1. Close your eyes and slow your breathing.\n"
+            "2. Picture your future self living the result you want.\n"
+            "3. Add details: where you are, what you see, and how you feel.\n"
+            "4. Connect that future to one action you must execute today."
+        )
+
+        HabitTracker.objects.filter(
+            user=self.user,
+            name="Visualization",
+            is_system=True,
+        ).update(description="", reason_body="")
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+
+        visualization_habit = HabitTracker.objects.get(
+            user=self.user,
+            name="Visualization",
+            is_system=True,
+        )
+        self.assertEqual(visualization_habit.description, expected_description)
+        self.assertEqual(visualization_habit.reason_body, expected_description)
+
+        routine_item = task_list.tasks.filter(item_type="habit", title="Visualization").first()
+        self.assertIsNotNone(routine_item)
+        self.assertEqual(routine_item.description, expected_description)
+
     def test_generation_places_journal_before_sleep_preparation(self):
         target_date = timezone.localdate()
         goal, subgoal = self._create_goal_with_subgoal("Journal Rule Goal", priority="medium")
@@ -2396,6 +2426,82 @@ class SystemHabitsServiceTests(APITestCase):
         self.assertEqual(second_count, 0)
         self.assertEqual(HabitTracker.objects.filter(user=user, is_system=True).count(), 7)
 
+    def test_seed_service_creates_non_empty_guidance_for_new_system_habits(self):
+        user = CustomUser.objects.create_user(
+            email="seed-guidance@test.com",
+            password="Password@123",
+        )
+        HabitTracker.objects.filter(user=user, is_system=True).delete()
+
+        seed_system_habits_for_user(user)
+
+        system_habits = HabitTracker.objects.filter(user=user, is_system=True)
+        self.assertEqual(system_habits.count(), 7)
+        self.assertFalse(system_habits.filter(description="").exists())
+        self.assertFalse(system_habits.filter(reason_body="").exists())
+
+    def test_seed_service_backfills_blank_guidance_without_overwriting_customized_fields(self):
+        user = CustomUser.objects.create_user(
+            email="seed-backfill@test.com",
+            password="Password@123",
+        )
+        habit = HabitTracker.objects.get(
+            user=user,
+            name="Visualization",
+            is_system=True,
+        )
+        habit.description = ""
+        habit.reason_body = ""
+        habit.why_important = ""
+        habit.estimated_minutes = 17
+        habit.time_slot = "evening"
+        habit.suggested_time = datetime.strptime("20:45:00", "%H:%M:%S").time()
+        habit.is_active = False
+        habit.save(
+            update_fields=[
+                "description",
+                "reason_body",
+                "why_important",
+                "estimated_minutes",
+                "time_slot",
+                "suggested_time",
+                "is_active",
+                "updated_at",
+            ]
+        )
+
+        created_count = seed_system_habits_for_user(user)
+        habit.refresh_from_db()
+
+        self.assertEqual(created_count, 0)
+        self.assertTrue(habit.description)
+        self.assertTrue(habit.reason_body)
+        self.assertTrue(habit.why_important)
+        self.assertEqual(habit.estimated_minutes, 17)
+        self.assertEqual(habit.time_slot, "evening")
+        self.assertEqual(str(habit.suggested_time), "20:45:00")
+        self.assertFalse(habit.is_active)
+
+    def test_seed_service_does_not_override_non_blank_existing_guidance(self):
+        user = CustomUser.objects.create_user(
+            email="seed-preserve@test.com",
+            password="Password@123",
+        )
+        habit = HabitTracker.objects.get(
+            user=user,
+            name="Gratitude Practice",
+            is_system=True,
+        )
+        habit.description = "Custom guidance stays."
+        habit.reason_body = "Custom body stays."
+        habit.save(update_fields=["description", "reason_body", "updated_at"])
+
+        seed_system_habits_for_user(user)
+        habit.refresh_from_db()
+
+        self.assertEqual(habit.description, "Custom guidance stays.")
+        self.assertEqual(habit.reason_body, "Custom body stays.")
+
     def test_management_command_backfills_missing_system_habits_only(self):
         user = CustomUser.objects.create_user(
             email="seed-command@test.com",
@@ -2490,6 +2596,37 @@ class SystemHabitDetailApiTests(APITestCase):
         self.assertEqual(response.data["disallowed_fields"], ["name"])
         self.system_habit.refresh_from_db()
         self.assertEqual(self.system_habit.name, "Protected System Habit")
+
+    def test_habit_list_backfills_blank_system_guidance(self):
+        habit = HabitTracker.objects.get(
+            user=self.user,
+            name="Visualization",
+            is_system=True,
+        )
+        habit.description = ""
+        habit.reason_body = ""
+        habit.save(update_fields=["description", "reason_body", "updated_at"])
+
+        response = self.client.get("/routines/habits/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = next(item for item in response.data["habits"] if item["name"] == "Visualization")
+        self.assertTrue(payload["description"])
+        self.assertTrue(payload["reason_body"])
+
+    def test_habit_detail_backfills_blank_reason_body_for_system_habit(self):
+        habit = HabitTracker.objects.get(
+            user=self.user,
+            name="Gratitude Practice",
+            is_system=True,
+        )
+        habit.reason_body = ""
+        habit.save(update_fields=["reason_body", "updated_at"])
+
+        response = self.client.get(f"/routines/habits/{habit.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["habit"]["reason_body"])
 
     def test_non_system_habit_keeps_existing_put_patch_and_delete_behavior(self):
         patch_response = self.client.patch(

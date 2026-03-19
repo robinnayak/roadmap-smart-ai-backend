@@ -41,6 +41,7 @@ from routine.serializers import (
 from routine.daily_brief_service import get_or_generate_today_brief
 from routine.habit_recommendation_service import generate_habit_recommendations_for_user
 from routine.services import get_or_create_today_task_list, update_discipline_streak
+from routine.system_habits_service import seed_system_habits_for_user
 from routine.progress_services import (
     build_progress_overview_payload,
     build_streak_payload,
@@ -706,6 +707,7 @@ class HabitTrackerAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        seed_system_habits_for_user(request.user)
         habits = HabitTracker.objects.filter(user=request.user).select_related("linked_goal")
         return Response(
             {"habits": HabitTrackerSerializer(habits, many=True).data},
@@ -730,6 +732,7 @@ class HabitDetailAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, habit_id):
+        seed_system_habits_for_user(request.user)
         habit = get_object_or_404(HabitTracker, id=habit_id, user=request.user)
         return Response(
             {"habit": HabitTrackerSerializer(habit).data},

@@ -1360,6 +1360,10 @@ def get_or_create_today_task_list(
     force_regenerate rebuilds an existing day when explicitly requested.
     This is used to refresh routine composition after scheduling-rule updates.
     """
+    from routine.system_habits_service import backfill_system_habit_guidance_for_user
+
+    backfill_system_habit_guidance_for_user(user)
+
     existing = DailyTaskList.objects.filter(user=user, date=target_date).first()
     if existing:
         if force_regenerate:
