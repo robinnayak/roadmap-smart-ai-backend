@@ -35,8 +35,12 @@ LEGACY_TO_CANONICAL_CATEGORY = {
     "finance": "finance",
     "career": "career",
     "health": "fitness",
-    "personal": None,
+    "personal": "productivity",
 }
+
+ATTRIBUTE_HEALTH_CATEGORIES = {"fitness", "wellness", "nutrition"}
+FINANCE_CATEGORY_ALIASES = {"finance", "financial"}
+PERSONAL_FALLBACK_CATEGORIES = {"personal", "productivity"}
 
 TOKEN_PATTERN = re.compile(r"\b[\w']+\b")
 STEM_SIGNALS = {"meditat", "illustrat"}
@@ -120,6 +124,51 @@ def normalize_goal_category(value: str | None) -> str | None:
     return LEGACY_TO_CANONICAL_CATEGORY.get(normalized)
 
 
+def normalize_goal_category_or_default(
+    value: str | None,
+    *,
+    default: str = DEFAULT_GOAL_CATEGORY,
+) -> str:
+    return normalize_goal_category(value) or default
+
+
+def normalize_goal_category_for_query(value: str | None) -> str | None:
+    return normalize_goal_category(value)
+
+
+def normalize_goal_category_for_storage(
+    value: str | None,
+    *,
+    goal_title: str = "",
+    goal_description: str = "",
+) -> str:
+    normalized = normalize_goal_category(value)
+    if normalized:
+        return normalized
+    if isinstance(value, str) and value.strip():
+        return classify_goal_category_deterministic(
+            goal_title=goal_title,
+            goal_description=goal_description,
+            current_category=value,
+        )
+    return DEFAULT_GOAL_CATEGORY
+
+
+def is_finance_goal_category(value: str | None) -> bool:
+    return normalize_goal_category(value) == "finance"
+
+
+def get_goal_attribute_bucket(value: str | None) -> str:
+    normalized = normalize_goal_category(value) or DEFAULT_GOAL_CATEGORY
+    if normalized == "finance":
+        return "financial_data"
+    if normalized == "career":
+        return "career_data"
+    if normalized in ATTRIBUTE_HEALTH_CATEGORIES:
+        return "health_data"
+    return "personal_data"
+
+
 def classify_goal_category(*, goal_title: str, goal_description: str = "", current_category: str | None = None) -> str:
     llm_category = _classify_with_llm(goal_title=goal_title, goal_description=goal_description)
     if is_valid_goal_category(llm_category):
@@ -145,10 +194,10 @@ def classify_goal_category_deterministic(*, goal_title: str, goal_description: s
 
 
 def resolve_category(frontend_category: str, goal_title: str, goal_description: str) -> str:
-    return classify_goal_category_deterministic(
+    return normalize_goal_category_for_storage(
+        frontend_category,
         goal_title=goal_title,
         goal_description=goal_description,
-        current_category=frontend_category,
     )
 
 

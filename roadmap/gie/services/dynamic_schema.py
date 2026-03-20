@@ -2,9 +2,30 @@ from copy import deepcopy
 
 
 WAVE4_DOMAIN_RUNNING_ENDURANCE = "running_endurance"
+WAVE4_DOMAIN_NUTRITION = "nutrition"
 WAVE4_DOMAIN_FINANCE = "finance"
 WAVE4_DOMAIN_SKILL_ACQUISITION = "skill_acquisition"
 WAVE4_DOMAIN_CAREER = "career"
+
+
+NUTRITION_KEYWORDS = (
+    "meal",
+    "meals",
+    "meal prep",
+    "nutrition",
+    "protein",
+    "diet",
+    "calorie",
+    "macros",
+    "lunch",
+    "breakfast",
+    "dinner",
+)
+
+
+def _is_nutrition_goal_text(goal_text: str) -> bool:
+    lowered_goal_text = (goal_text or "").lower()
+    return any(token in lowered_goal_text for token in NUTRITION_KEYWORDS)
 
 
 def map_session_domain_to_wave4_domain(goal_domain: str | None, goal_text: str = "") -> str:
@@ -14,15 +35,46 @@ def map_session_domain_to_wave4_domain(goal_domain: str | None, goal_text: str =
     if normalized_domain == "financial":
         return WAVE4_DOMAIN_FINANCE
     if normalized_domain == "health":
+        if _is_nutrition_goal_text(goal_text):
+            return WAVE4_DOMAIN_NUTRITION
         return WAVE4_DOMAIN_RUNNING_ENDURANCE
     if normalized_domain == "learning":
         return WAVE4_DOMAIN_SKILL_ACQUISITION
 
     lowered_goal_text = (goal_text or "").lower()
-    if any(token in lowered_goal_text for token in ("save", "saving", "emergency fund", "debt", "income", "expense")):
+    if any(
+        token in lowered_goal_text
+        for token in (
+            "save",
+            "saving",
+            "emergency fund",
+            "debt",
+            "income",
+            "expense",
+            "house",
+            "home",
+            "mortgage",
+            "down payment",
+            "rent",
+            "property",
+        )
+    ):
         return WAVE4_DOMAIN_FINANCE
-    if any(token in lowered_goal_text for token in ("run", "running", "marathon", "5k", "10k", "fitness", "endurance")):
+    if any(
+        token in lowered_goal_text
+        for token in (
+            "run",
+            "running",
+            "marathon",
+            "5k",
+            "10k",
+            "fitness",
+            "endurance",
+        )
+    ):
         return WAVE4_DOMAIN_RUNNING_ENDURANCE
+    if _is_nutrition_goal_text(goal_text):
+        return WAVE4_DOMAIN_NUTRITION
     if any(token in lowered_goal_text for token in ("learn", "study", "practice", "skill", "language", "guitar", "coding")):
         return WAVE4_DOMAIN_SKILL_ACQUISITION
     return WAVE4_DOMAIN_CAREER
@@ -116,6 +168,93 @@ class GIEDynamicSchemaService:
                     "data_type": "string",
                     "enum_values": None,
                     "validation": {},
+                },
+            ],
+        },
+        WAVE4_DOMAIN_NUTRITION: {
+            "required_slots": [
+                {
+                    "key": "current_nutrition_baseline",
+                    "label": "Current Nutrition Baseline",
+                    "description": "Current eating pattern and meal quality baseline.",
+                    "required": True,
+                    "data_type": "string",
+                    "enum_values": None,
+                    "validation": {"min_length": 2},
+                },
+                {
+                    "key": "meal_prep_days_per_week",
+                    "label": "Meal Prep Days Per Week",
+                    "description": "How many days per week can you prepare meals?",
+                    "required": True,
+                    "data_type": "integer",
+                    "enum_values": None,
+                    "validation": {"minimum": 1, "maximum": 7},
+                },
+                {
+                    "key": "meals_to_prepare_per_day",
+                    "label": "Meals To Prepare Per Day",
+                    "description": "How many meals per day do you want to prep?",
+                    "required": True,
+                    "data_type": "integer",
+                    "enum_values": None,
+                    "validation": {"minimum": 1, "maximum": 6},
+                },
+                {
+                    "key": "protein_goal_grams_per_day",
+                    "label": "Protein Goal (g/day)",
+                    "description": "Target daily protein intake in grams.",
+                    "required": True,
+                    "data_type": "integer",
+                    "enum_values": None,
+                    "validation": {"minimum": 20, "maximum": 300},
+                },
+                {
+                    "key": "dietary_constraints",
+                    "label": "Dietary Constraints",
+                    "description": "Allergies, dietary preferences, or food restrictions.",
+                    "required": True,
+                    "data_type": "string",
+                    "enum_values": None,
+                    "validation": {"min_length": 2},
+                },
+                {
+                    "key": "prep_time_per_day_minutes",
+                    "label": "Prep Time Per Day (minutes)",
+                    "description": "How many minutes per day can you allocate to prep?",
+                    "required": True,
+                    "data_type": "integer",
+                    "enum_values": None,
+                    "validation": {"minimum": 10, "maximum": 240},
+                },
+                {
+                    "key": "motivation_driver",
+                    "label": "Motivation Driver",
+                    "description": "Primary motivation behind this nutrition goal.",
+                    "required": True,
+                    "data_type": "string",
+                    "enum_values": None,
+                    "validation": {"min_length": 2},
+                },
+            ],
+            "optional_slots": [
+                {
+                    "key": "timeline_target_date",
+                    "label": "Target Date",
+                    "description": "Optional target date for feasibility validation.",
+                    "required": False,
+                    "data_type": "date",
+                    "enum_values": None,
+                    "validation": {},
+                },
+                {
+                    "key": "monthly_food_budget",
+                    "label": "Monthly Food Budget",
+                    "description": "Optional monthly budget for food and meal prep.",
+                    "required": False,
+                    "data_type": "number",
+                    "enum_values": None,
+                    "validation": {"minimum": 0},
                 },
             ],
         },

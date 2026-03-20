@@ -56,6 +56,7 @@ class CreateRoutineTaskRequestSerializer(serializers.Serializer):
         allow_null=True,
         default=None,
     )
+    suggested_time = serializers.TimeField(required=False, allow_null=True, default=None)
     why_important = serializers.CharField(required=False, allow_blank=True, default="")
 
 
@@ -70,6 +71,7 @@ class UpdateRoutineTaskRequestSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
+    suggested_time = serializers.TimeField(required=False, allow_null=True)
     why_important = serializers.CharField(required=False, allow_blank=True)
 
 
@@ -105,6 +107,7 @@ class HealthProfileSerializer(serializers.ModelSerializer):
             'commitment_words',
             'commitment_person',
             'commitment_emoji',
+            'is_active',
             'created_at',
             'updated_at',
         ]

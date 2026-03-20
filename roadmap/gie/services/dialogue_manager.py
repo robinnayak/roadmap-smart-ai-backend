@@ -21,6 +21,12 @@ class GIEDialogueManagerService:
         "running_experience": "What running experience do you already have?",
         "injury_constraints": "Do you have any injury or physical constraints?",
         "equipment_and_location": "What equipment and training location do you have available?",
+        "current_nutrition_baseline": "What is your current nutrition baseline?",
+        "meal_prep_days_per_week": "How many days per week can you prep meals?",
+        "meals_to_prepare_per_day": "How many meals do you want to prep each day?",
+        "protein_goal_grams_per_day": "What daily protein target (grams) do you want to hit?",
+        "dietary_constraints": "Do you have any dietary constraints or food restrictions?",
+        "prep_time_per_day_minutes": "How many minutes per day can you spend on meal prep?",
         "motivation_driver": "What is your main motivation for this goal?",
         "savings_target": "What exact amount do you want to save?",
         "monthly_income": "What is your monthly income?",
@@ -35,6 +41,35 @@ class GIEDialogueManagerService:
         "goal_milestone_event": "What milestone event will prove meaningful progress?",
         "learning_method": "What learning method do you want to follow?",
     }
+
+    @classmethod
+    def build_question(
+        cls,
+        *,
+        slot_key: str,
+        slot_label: str | None = None,
+        slot_description: str | None = None,
+        goal_text: str | None = None,
+    ) -> str:
+        """
+        Build a slot question that stays deterministic but can include light
+        context from schema metadata and goal text.
+        """
+        base_question = cls.SLOT_QUESTION_MAP.get(slot_key)
+        if not base_question:
+            if slot_description:
+                cleaned = str(slot_description).strip().rstrip(".")
+                base_question = f"{cleaned}?"
+            else:
+                label = (slot_label or slot_key.replace("_", " ")).strip().lower()
+                base_question = f"What is your {label}?"
+
+        goal_hint = (goal_text or "").strip()
+        if goal_hint:
+            if len(goal_hint) > 80:
+                goal_hint = f"{goal_hint[:77].rstrip()}..."
+            return f"For your goal \"{goal_hint}\", {base_question[0].lower()}{base_question[1:]}"
+        return base_question
 
     @classmethod
     def build_initial_state(cls, schema: dict, intake_analysis: dict) -> dict:
@@ -60,7 +95,11 @@ class GIEDialogueManagerService:
         cls._apply_deterministic_prefills(state_by_key, intake_analysis)
 
         completeness = cls._compute_completeness(required_slots, state_by_key)
-        next_prompt = cls._select_next_prompt(required_slots, state_by_key)
+        next_prompt = cls._select_next_prompt(
+            required_slots,
+            state_by_key,
+            goal_text=(intake_analysis or {}).get("goal_text"),
+        )
 
         return {
             "slot_state": slot_state,
@@ -78,6 +117,13 @@ class GIEDialogueManagerService:
             cls._fill_slot(
                 state_by_key,
                 "weekly_training_days",
+                cadence["value"],
+                "goal_text",
+                0.9,
+            )
+            cls._fill_slot(
+                state_by_key,
+                "meal_prep_days_per_week",
                 cadence["value"],
                 "goal_text",
                 0.9,
@@ -140,13 +186,24 @@ class GIEDialogueManagerService:
         }
 
     @classmethod
-    def _select_next_prompt(cls, required_slots: list, state_by_key: dict) -> dict | None:
+    def _select_next_prompt(
+        cls,
+        required_slots: list,
+        state_by_key: dict,
+        *,
+        goal_text: str | None = None,
+    ) -> dict | None:
         for slot in required_slots:
             key = slot["key"]
             slot_state = state_by_key.get(key, {})
             if slot_state.get("status") in ("filled", "locked"):
                 continue
-            question = cls.SLOT_QUESTION_MAP.get(key) or f"What is your {slot['label'].lower()}?"
+            question = cls.build_question(
+                slot_key=key,
+                slot_label=slot.get("label"),
+                slot_description=slot.get("description"),
+                goal_text=goal_text,
+            )
             return {
                 "question": question,
                 "target_slot_key": key,

@@ -767,3 +767,47 @@ class DeviceSessionLimitTests(APITestCase):
         self.assertIn("access", newest_response.data["tokens"])
 
 
+class LogoutAndAuthContractTests(APITestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(
+            email="logout-contract@test.com",
+            password="StrongPass123!",
+        )
+        login_response = self.client.post(
+            reverse("user-login"),
+            data={"email": self.user.email, "password": "StrongPass123!"},
+            format="json",
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+        self.access = login_response.data["tokens"]["access"]
+        self.refresh = login_response.data["tokens"]["refresh"]
+
+    def test_logout_blacklists_refresh_token_and_refresh_cannot_be_reused(self):
+        logout_response = self.client.post(
+            reverse("user-logout"),
+            data={"refresh_token": self.refresh},
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {self.access}",
+        )
+        self.assertEqual(logout_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(logout_response.data["success"])
+
+        refresh_response = self.client.post(
+            reverse("token-refresh"),
+            data={"refresh": self.refresh},
+            format="json",
+        )
+        self.assertEqual(refresh_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(refresh_response.data["error"], "session_expired")
+
+    def test_notification_contract_includes_preference_only_metadata(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(reverse("user-notification"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["meta"]["preference_only"], True)
+        self.assertEqual(response.data["capabilities"]["notification_delivery"], "preference_only")
+        self.assertEqual(response.data["data"]["preference_contract"], "preference_only")
+
+

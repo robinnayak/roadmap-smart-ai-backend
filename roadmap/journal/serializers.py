@@ -6,6 +6,11 @@ from journal.utils import JOURNAL_FIELDS, is_locked
 
 class JournalEntrySerializer(serializers.ModelSerializer):
     is_locked = serializers.SerializerMethodField()
+    parsed_via = serializers.ChoiceField(
+        choices=JournalEntry.PARSED_VIA_CHOICES,
+        required=False,
+        help_text="Provenance only. 'ollama_frontend' means structured fields came from a client-side parser; the backend may still parse full_day_input separately when fields are blank.",
+    )
 
     class Meta:
         model = JournalEntry
@@ -36,6 +41,7 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id",
+            "parsed_at",
             "locked_at",
             "is_locked",
             "created_at",

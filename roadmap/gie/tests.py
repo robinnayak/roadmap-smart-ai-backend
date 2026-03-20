@@ -8,7 +8,7 @@ import json
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework.response import Response
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from gie.models import (
     GIEAdaptationProposal,
@@ -31,6 +31,9 @@ from gie.services import (
 )
 from gie.services.timeline_validation import TIMELINE_REFRAME_ANALYSIS_KEY, TIMELINE_REFRAME_DECISION_KEY
 from gie.services.planning import GIEFinalizeBridgeResult, GIEPlanningService
+from gie.services.turn_pipeline import GIETurnPipelineService
+from gie.services.unified_context import GIEUnifiedContextService
+from gie.views import GIEGoalTurnAPIView
 from goal.services.contract_template import GoalContractTemplateService
 
 
@@ -216,6 +219,24 @@ class GIEIntakeUnderstandingServiceTests(TestCase):
         self.assertEqual(analysis['goal_domain']['value'], 'financial')
         self.assertIn('save', analysis['goal_domain']['matched_signals'])
 
+    def test_classifies_financial_domain_from_buy_house_goal(self):
+        analysis = GIEIntakeUnderstandingService.analyze_goal_text(
+            'I want to buy a house in 2 years.'
+        )
+        self.assertEqual(analysis['goal_domain']['value'], 'financial')
+        self.assertTrue(
+            any(signal in analysis['goal_domain']['matched_signals'] for signal in ('house', 'home'))
+        )
+
+    def test_classifies_health_domain_from_meal_prep_goal(self):
+        analysis = GIEIntakeUnderstandingService.analyze_goal_text(
+            'Meal prep high-protein lunches 5 days a week.'
+        )
+        self.assertEqual(analysis['goal_domain']['value'], 'health')
+        self.assertTrue(
+            any(signal in analysis['goal_domain']['matched_signals'] for signal in ('meal', 'meal prep', 'protein'))
+        )
+
     def test_extracts_cadence_and_horizon_signals(self):
         analysis = GIEIntakeUnderstandingService.analyze_goal_text(
             'I can train 4 days per week and complete this in 6 months.'
@@ -345,6 +366,28 @@ class GIEDynamicSchemaServiceTests(TestCase):
         second = GIEDynamicSchemaService.generate_schema("Save $10,000.", analysis)
         self.assertEqual(first, second)
 
+    def test_maps_meal_prep_text_to_health_schema_when_domain_is_other(self):
+        schema = GIEDynamicSchemaService.generate_schema(
+            goal_text="Meal prep high-protein lunches 5 days a week.",
+            intake_analysis={"goal_domain": {"value": "other"}},
+        )
+        required_keys = {slot["key"] for slot in schema["required_slots"]}
+        self.assertIn("current_nutrition_baseline", required_keys)
+        self.assertIn("meal_prep_days_per_week", required_keys)
+        self.assertIn("protein_goal_grams_per_day", required_keys)
+        self.assertNotIn("current_role", required_keys)
+
+    def test_maps_meal_prep_text_to_nutrition_schema_when_domain_is_health(self):
+        schema = GIEDynamicSchemaService.generate_schema(
+            goal_text="Meal prep high-protein lunches 5 days a week.",
+            intake_analysis={"goal_domain": {"value": "health"}},
+        )
+        required_keys = {slot["key"] for slot in schema["required_slots"]}
+        self.assertIn("current_nutrition_baseline", required_keys)
+        self.assertIn("meal_prep_days_per_week", required_keys)
+        self.assertIn("prep_time_per_day_minutes", required_keys)
+        self.assertNotIn("weekly_training_days", required_keys)
+
 
 class GIEDialogueManagerServiceTests(TestCase):
     def test_build_initial_state_prefills_weekly_cadence_when_slot_exists(self):
@@ -380,6 +423,66 @@ class GIEDialogueManagerServiceTests(TestCase):
 
         self.assertIsNotNone(dialogue_state["next_prompt"])
         self.assertEqual(dialogue_state["next_prompt"]["target_slot_key"], first_required_key)
+
+    def test_nutrition_schema_prefills_meal_prep_days_from_weekly_cadence(self):
+        schema = GIEDynamicSchemaService.generate_schema(
+            goal_text="Meal prep high-protein lunches 5 days a week.",
+            intake_analysis={"goal_domain": {"value": "health"}},
+        )
+        dialogue_state = GIEDialogueManagerService.build_initial_state(
+            schema=schema,
+            intake_analysis={
+                "goal_text": "Meal prep high-protein lunches 5 days a week.",
+                "nlu": {
+                    "weekly_cadence": {"raw": "5 days a week", "value": 5, "unit": "times_per_week"},
+                },
+            },
+        )
+        slot_by_key = {slot["slot_key"]: slot for slot in dialogue_state["slot_state"]}
+        self.assertEqual(slot_by_key["meal_prep_days_per_week"]["status"], "filled")
+        self.assertEqual(slot_by_key["meal_prep_days_per_week"]["value"], 5)
+
+
+class GIETurnPipelineValueExtractionTests(TestCase):
+    def test_boolean_extraction_accepts_equipment_ui_phrasing(self):
+        true_value, _ = GIETurnPipelineService._extract_value(
+            answer="Home equipment only",
+            data_type=GIESlotDefinition.TYPE_BOOLEAN,
+            enum_values=None,
+            validation={},
+        )
+        false_value, _ = GIETurnPipelineService._extract_value(
+            answer="No equipment yet",
+            data_type=GIESlotDefinition.TYPE_BOOLEAN,
+            enum_values=None,
+            validation={},
+        )
+        self.assertEqual(true_value, True)
+        self.assertEqual(false_value, False)
+
+
+class GIEUnifiedContextGoalCopyTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(email="gie-copy@test.com", password="Password@123")
+
+    def test_sparse_learning_goal_generates_non_echo_title_and_why(self):
+        session = GIESession.objects.create(
+            user=self.user,
+            goal_text="I want to practice martial arts.",
+            goal_domain=GIESession.DOMAIN_LEARNING,
+            status=GIESession.STATUS_ACTIVE,
+            phase=GIESession.PHASE_QUESTION_LOOP,
+        )
+        context = GIEUnifiedContextService.build(session=session, slot_states=[])
+        goal_details = context["goal_details"]
+
+        self.assertNotEqual(goal_details["title"], "I want to practice martial arts.")
+        self.assertFalse(goal_details["title"].lower().startswith("i want to"))
+        self.assertIn("martial arts", goal_details["title"].lower())
+
+        self.assertNotEqual(goal_details["why"], "I want to practice martial arts.")
+        self.assertIn("because", goal_details["why"].lower())
 
 
 class GIEPlanningBridgePayloadTests(TestCase):
@@ -1086,6 +1189,22 @@ class GIEGoalStartAPITests(APITestCase):
         self.assertEqual(response.data["status"], 400)
         self.assertIn("goal_text", response.data["details"])
 
+    def test_start_meal_prep_goal_uses_nutrition_prompt_slots(self):
+        self.client.force_authenticate(user=self.user)
+        payload = {
+            "goal_text": "Meal prep high-protein lunches 5 days a week.",
+        }
+        response = self.client.post(self.url, data=payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        schema_required_keys = {slot["key"] for slot in response.data["schema"]["required_slots"]}
+        self.assertIn("current_nutrition_baseline", schema_required_keys)
+        self.assertIn("meal_prep_days_per_week", schema_required_keys)
+        self.assertNotIn("current_fitness_baseline", schema_required_keys)
+
+        next_prompt = response.data["next_prompt"]
+        self.assertEqual(next_prompt["target_slot_key"], "current_nutrition_baseline")
+
 
 class GIETurnStateFinalizeAPITests(APITestCase):
     def setUp(self):
@@ -1200,7 +1319,7 @@ class GIETurnStateFinalizeAPITests(APITestCase):
             autofill_slot["value"],
             {
                 "title": "Run First Half Marathon",
-                "primary_category": "health",
+                "primary_category": "fitness",
                 "priority": "medium",
                 "description": "Personalized description from unified context.",
                 "why_do_i_want_this": "Personalized why from unified context.",
@@ -1296,7 +1415,7 @@ class GIETurnStateFinalizeAPITests(APITestCase):
             slot_by_key["__goal_details_autofill"]["value"],
             {
                 "title": "Run First Half Marathon",
-                "primary_category": "health",
+                "primary_category": "fitness",
                 "priority": "high",
                 "description": "Mapped description from unified context.",
                 "why_do_i_want_this": "Mapped why from unified context.",
@@ -2258,3 +2377,196 @@ class GIEObservabilityAndRolloutTests(APITestCase):
         self.assertEqual(analytics.degradation_event_count, 1)
         self.assertEqual(analytics.fallback_activation_count, 1)
         self.assertEqual(analytics.last_fallback_reason_code, "gie_service_degraded")
+
+
+class GIEGoalCategoryNormalizationTests(APITestCase):
+    def test_autofill_payload_sparse_goals_produces_diverse_non_echo_title_and_why(self):
+        user = get_user_model().objects.create_user(
+            email="gie-autofill-copy@test.com",
+            password="Password@123",
+        )
+        sparse_cases = [
+            (
+                "I want to practice martial arts.",
+                GIESession.DOMAIN_LEARNING,
+                "martial arts",
+            ),
+            (
+                "I want to run my first half marathon.",
+                GIESession.DOMAIN_HEALTH,
+                "running endurance",
+            ),
+            (
+                "I want to save money for emergencies.",
+                GIESession.DOMAIN_FINANCIAL,
+                "savings target",
+            ),
+        ]
+
+        seen_titles: set[str] = set()
+        seen_whys: set[str] = set()
+        for index, (raw_goal, domain, expected_title_phrase) in enumerate(sparse_cases, start=1):
+            session = GIESession.objects.create(
+                user=user,
+                goal_text=raw_goal,
+                goal_domain=domain,
+                status=GIESession.STATUS_ACTIVE,
+                phase=GIESession.PHASE_QUESTION_LOOP,
+            )
+            unified_context = GIEUnifiedContextService.build(session=session, slot_states=[])
+            payload = GIEPlanningService.build_goal_autofill_payload(
+                session=session,
+                unified_context=unified_context,
+                slot_states=[],
+                resolved_priority="medium",
+            )
+
+            title = payload["title"]
+            why = payload["why_do_i_want_this"]
+            self.assertNotEqual(title, raw_goal, msg=f"case {index} title echoed raw goal")
+            self.assertFalse(title.lower().startswith("i want to"), msg=f"case {index} title kept user phrasing")
+            self.assertIn(expected_title_phrase, title.lower(), msg=f"case {index} title lost goal specificity")
+            self.assertNotEqual(why, raw_goal, msg=f"case {index} why echoed raw goal")
+            self.assertIn("because", why.lower(), msg=f"case {index} why missing rationale structure")
+            seen_titles.add(title)
+            seen_whys.add(why)
+
+        self.assertEqual(len(seen_titles), len(sparse_cases))
+        self.assertEqual(len(seen_whys), len(sparse_cases))
+
+    def test_autofill_payload_returns_canonical_primary_category(self):
+        user = get_user_model().objects.create_user(
+            email="gie-category@test.com",
+            password="Password@123",
+        )
+        session = GIESession.objects.create(
+            user=user,
+            goal_text="I want to improve my health in six months.",
+            goal_domain=GIESession.DOMAIN_HEALTH,
+            status=GIESession.STATUS_ACTIVE,
+            phase=GIESession.PHASE_QUESTION_LOOP,
+        )
+
+        payload = GIEPlanningService.build_goal_autofill_payload(
+            session=session,
+            unified_context={
+                "goal_details": {
+                    "title": "Run my first 10k race",
+                    "description": "Build a sustainable running routine.",
+                    "why": "I want more energy.",
+                    "measurable_target": "Complete a 10k race.",
+                },
+                "timeline": {"end_date": str(timezone.localdate() + timedelta(days=180))},
+            },
+            slot_states=[],
+            resolved_priority="medium",
+        )
+
+        self.assertEqual(payload["primary_category"], "fitness")
+        self.assertEqual(payload["category_pillar"], "Health")
+
+    def test_finalize_bridge_payload_uses_canonical_primary_category(self):
+        payload = {
+            "title": "Save for a down payment",
+            "description": "Build savings every month.",
+            "primary_category": "financial",
+            "priority": "high",
+            "target_date": str(timezone.localdate() + timedelta(days=180)),
+            "why_it_matters": ["Security"],
+            "why_do_i_want_this": "I want my own home.",
+            "specific_measurable_target": "Save 500000.",
+            "commitment_confirmed": True,
+            "commitment_intent": "I will save first.",
+            "commitment_effort": "I will review my budget weekly.",
+            "commitment_responsibility": "I will not skip transfers.",
+            "signed_name": "Wave Two Tester",
+            "signed_at": timezone.now().isoformat(),
+            "contract_snapshot": {"version": "test"},
+        }
+        session = GIESession.objects.create(
+            user=get_user_model().objects.create_user(
+                email="gie-finalize-category@test.com",
+                password="Password@123",
+            ),
+            goal_text="Save for a down payment",
+            goal_domain=GIESession.DOMAIN_FINANCIAL,
+            status=GIESession.STATUS_READY_TO_FINALIZE,
+            phase=GIESession.PHASE_REVIEW,
+        )
+
+        with patch("gie.services.planning.CreateGoalWithHierarchyAPIView.as_view") as mocked_view:
+            mocked_response = type("Resp", (), {"data": {"ok": True}, "status_code": 201, "render": lambda self: None})()
+            mocked_callable = Mock(return_value=mocked_response)
+            mocked_view.return_value = mocked_callable
+
+            GIEPlanningService.run_finalize_bridge(session=session, goal_payload=payload)
+
+        request = mocked_callable.call_args.args[0]
+        request_payload = json.loads(request.body.decode("utf-8"))
+        self.assertEqual(request_payload["primary_category"], "finance")
+        self.assertNotIn("category_pillar", request_payload)
+
+    def test_finalize_bridge_resolves_canonical_from_pillar_when_primary_missing(self):
+        payload = {
+            "title": "Save for a down payment",
+            "description": "Build savings every month.",
+            "category_pillar": "Money",
+            "priority": "high",
+            "target_date": str(timezone.localdate() + timedelta(days=180)),
+            "why_it_matters": ["Security"],
+            "why_do_i_want_this": "I want my own home.",
+            "specific_measurable_target": "Save 500000.",
+            "commitment_confirmed": True,
+            "commitment_intent": "I will save first.",
+            "commitment_effort": "I will review my budget weekly.",
+            "commitment_responsibility": "I will not skip transfers.",
+            "signed_name": "Wave Two Tester",
+            "signed_at": timezone.now().isoformat(),
+            "contract_snapshot": {"version": "test"},
+        }
+        session = GIESession.objects.create(
+            user=get_user_model().objects.create_user(
+                email="gie-finalize-pillar@test.com",
+                password="Password@123",
+            ),
+            goal_text="Save for a down payment",
+            goal_domain=GIESession.DOMAIN_FINANCIAL,
+            status=GIESession.STATUS_READY_TO_FINALIZE,
+            phase=GIESession.PHASE_REVIEW,
+        )
+
+        with patch("gie.services.planning.CreateGoalWithHierarchyAPIView.as_view") as mocked_view:
+            mocked_response = type("Resp", (), {"data": {"ok": True}, "status_code": 201, "render": lambda self: None})()
+            mocked_callable = Mock(return_value=mocked_response)
+            mocked_view.return_value = mocked_callable
+
+            GIEPlanningService.run_finalize_bridge(session=session, goal_payload=payload)
+
+        request = mocked_callable.call_args.args[0]
+        request_payload = json.loads(request.body.decode("utf-8"))
+        self.assertEqual(request_payload["primary_category"], "finance")
+
+
+class GIEHealthProfileSelectionTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(
+            email="gie-health-profile@test.com",
+            password="Password@123",
+        )
+
+    def test_gie_consumers_use_active_health_profile(self):
+        from routine.models import HealthProfile
+
+        first_profile = HealthProfile.objects.create(user=self.user, stress_level="burnout")
+        active_profile = HealthProfile.objects.create(user=self.user, stress_level="low")
+        first_profile.refresh_from_db()
+        active_profile.refresh_from_db()
+
+        planning_profile = GIEPlanningService.get_latest_health_profile(user=self.user)
+        turn_profile = GIEGoalTurnAPIView._get_latest_health_profile(user=self.user)
+
+        self.assertFalse(first_profile.is_active)
+        self.assertTrue(active_profile.is_active)
+        self.assertEqual(planning_profile.id, active_profile.id)
+        self.assertEqual(turn_profile.id, active_profile.id)

@@ -7,7 +7,7 @@ from django.dispatch import receiver
 # FIX: Import UserPersonalDetails from wherever it lives in your project
 from authentication.models import UserPersonalDetails
 from ai.models import AIProcessingJob
-from goal.models import UserCurrentSituationGoal, Goal
+from goal.models import UserCurrentSituationGoal
 import threading
 from ai.services.current_situation_generator import CurrentSituationGenerator
 
@@ -140,7 +140,3 @@ def _process_and_create_situation_goal(
     )
     print("Goal creation complete")
 
-
-@receiver(post_save, sender=Goal)
-def create_goal_attributes(sender, instance, created, **kwargs):
-    print("Starting goal attributes creation...")

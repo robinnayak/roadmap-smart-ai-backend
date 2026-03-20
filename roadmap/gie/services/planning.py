@@ -16,7 +16,11 @@ from goal.services.create_contract import (
     normalize_why_it_matters,
     required_goal_fields_error_details,
 )
-from goal.services.category_resolver import classify_goal_category_deterministic
+from goal.services.category_resolver import (
+    classify_goal_category_deterministic,
+    normalize_goal_category_for_storage,
+)
+from goal.services.category_pillars import canonical_to_pillar, resolve_canonical_category
 from goal.services.contract_template import GoalContractTemplateService
 from goal.views import CreateGoalWithHierarchyAPIView
 
@@ -75,6 +79,10 @@ class GIEPlanningService:
         "savings_target",
         "weekly_training_days",
         "daily_session_minutes",
+        "meal_prep_days_per_week",
+        "meals_to_prepare_per_day",
+        "protein_goal_grams_per_day",
+        "prep_time_per_day_minutes",
         "daily_practice_minutes",
         "monthly_income",
         "monthly_fixed_expenses",
@@ -89,16 +97,18 @@ class GIEPlanningService:
         "weekly_training_days",
         "daily_practice_minutes",
         "daily_session_minutes",
+        "meal_prep_days_per_week",
+        "prep_time_per_day_minutes",
     )
     CONTRACT_TEMPLATE_SERVICE = GoalContractTemplateService()
 
     @staticmethod
     def get_latest_health_profile(*, user):
         try:
-            from routine.models import HealthProfile
+            from routine.health_profile_selector import get_effective_profile
         except Exception:
             return None
-        return HealthProfile.objects.filter(user=user).order_by("-updated_at").first()
+        return get_effective_profile(user=user)
 
     @classmethod
     def _extract_ranked_habits_from_slot_states(cls, *, slot_states: list[GIESlotState]) -> list[dict]:
@@ -187,10 +197,15 @@ class GIEPlanningService:
         timeline_context = unified_context.get("timeline", {})
         base_payload = {
             "title": str(goal_details.get("title") or session.goal_text.strip())[:255],
-            "primary_category": classify_goal_category_deterministic(
+            "primary_category": normalize_goal_category_for_storage(
+                classify_goal_category_deterministic(
+                    goal_title=str(goal_details.get("title") or session.goal_text.strip()),
+                    goal_description=str(goal_details.get("description") or ""),
+                ),
                 goal_title=str(goal_details.get("title") or session.goal_text.strip()),
                 goal_description=str(goal_details.get("description") or ""),
             ),
+            "category_pillar": None,
             "priority": resolved_priority,
             "description": str(goal_details.get("description") or ""),
             "why_do_i_want_this": str(goal_details.get("why") or ""),
@@ -222,11 +237,44 @@ class GIEPlanningService:
         if reasons_override:
             base_payload["why_it_matters"] = reasons_override
 
+        if "primary_category" in context or "category_pillar" in context:
+            explicit_primary = context.get("primary_category")
+            explicit_pillar = context.get("category_pillar")
+            if explicit_primary in (None, "") and explicit_pillar in (None, ""):
+                base_payload["primary_category"] = resolve_canonical_category(
+                    base_payload.get("primary_category"),
+                    None,
+                    base_payload.get("title", ""),
+                    base_payload.get("description", ""),
+                )
+            else:
+                base_payload["primary_category"] = resolve_canonical_category(
+                    explicit_primary,
+                    explicit_pillar,
+                    base_payload.get("title", ""),
+                    base_payload.get("description", ""),
+                )
+        else:
+            base_payload["primary_category"] = resolve_canonical_category(
+                base_payload.get("primary_category"),
+                None,
+                base_payload.get("title", ""),
+                base_payload.get("description", ""),
+            )
+        base_payload["category_pillar"] = canonical_to_pillar(base_payload["primary_category"])
+
         if refine_language:
             base_payload = GIEGoalLanguageRefinementService.refine_autofill_payload(
                 payload=base_payload,
                 raw_goal=str(unified_context.get("raw_goal") or session.goal_text),
             )
+            base_payload["primary_category"] = resolve_canonical_category(
+                base_payload.get("primary_category"),
+                base_payload.get("category_pillar"),
+                base_payload.get("title", ""),
+                base_payload.get("description", ""),
+            )
+            base_payload["category_pillar"] = canonical_to_pillar(base_payload["primary_category"])
 
         return base_payload
 
@@ -463,6 +511,25 @@ class GIEPlanningService:
                 )
             return primary, weekly_review
 
+        if goal_domain == "nutrition":
+            prep_days = GIEPlanningService._as_number_phrase(slot_profile.get("meal_prep_days_per_week"), fallback="planned")
+            meals_per_day = GIEPlanningService._as_number_phrase(slot_profile.get("meals_to_prepare_per_day"), fallback="planned")
+            protein_target = GIEPlanningService._as_number_phrase(slot_profile.get("protein_goal_grams_per_day"), fallback="my")
+            prep_minutes = GIEPlanningService._as_number_phrase(slot_profile.get("prep_time_per_day_minutes"), fallback="planned")
+            constraints = GIEPlanningService._as_string(
+                slot_profile.get("dietary_constraints"),
+                fallback="my dietary constraints",
+            ).rstrip(".")
+            primary = (
+                f"I commit to meal-prepping {meals_per_day} meals per day on {prep_days} days each week, spending "
+                f"{prep_minutes} minutes per prep day, so I can consistently hit {protein_target}g protein by {target_date}."
+            )
+            weekly_review = (
+                f"I commit to a weekly nutrition review every Sunday to adjust my meal plan around {constraints} and keep "
+                f"steady progress toward {goal_reference} by {target_date}."
+            )
+            return primary, weekly_review
+
         if goal_domain == "skill_acquisition":
             daily_practice_minutes = GIEPlanningService._as_number_phrase(slot_profile.get("daily_practice_minutes"), fallback="planned")
             learning_method = GIEPlanningService._as_string(slot_profile.get("learning_method"), fallback="the learning method I committed to")
@@ -517,6 +584,7 @@ class GIEPlanningService:
         candidates = (
             slot_profile.get("motivation_driver"),
             slot_profile.get("savings_purpose"),
+            slot_profile.get("dietary_constraints"),
             slot_profile.get("manager_feedback_on_gaps"),
             slot_profile.get("learning_method"),
             goal_details.get("why"),
@@ -593,7 +661,7 @@ class GIEPlanningService:
         state_by_key = {state.slot_key: state for state in slot_states}
         weekly_capacity = 4.0
         direct_daily_minutes = None
-        for daily_key in ("daily_practice_minutes", "daily_session_minutes"):
+        for daily_key in ("daily_practice_minutes", "daily_session_minutes", "prep_time_per_day_minutes"):
             daily_state = state_by_key.get(daily_key)
             if daily_state and isinstance(daily_state.value, (int, float)):
                 direct_daily_minutes = int(round(float(daily_state.value)))
@@ -620,7 +688,12 @@ class GIEPlanningService:
 
         raw_goal_text = str(unified_context.get("raw_goal") or "").strip().lower()
         slot_profile = unified_context.get("slot_profile", {})
-        motivation_text = str(slot_profile.get("motivation_driver") or slot_profile.get("savings_purpose") or "").strip().lower()
+        motivation_text = str(
+            slot_profile.get("motivation_driver")
+            or slot_profile.get("savings_purpose")
+            or slot_profile.get("dietary_constraints")
+            or ""
+        ).strip().lower()
         combined_text = f"{raw_goal_text} {motivation_text}".strip()
 
         explicit_target_days = cls._days_to_explicit_target(slot_states=slot_states)
@@ -708,6 +781,12 @@ class GIEPlanningService:
         request_payload = {
             "title": goal_payload["title"],
             "description": goal_payload["description"],
+            "primary_category": resolve_canonical_category(
+                goal_payload.get("primary_category"),
+                goal_payload.get("category_pillar"),
+                goal_payload.get("title", ""),
+                goal_payload.get("description", ""),
+            ),
             "priority": goal_payload["priority"],
             "target_date": goal_payload["target_date"],
             "why_it_matters": goal_payload["why_it_matters"],

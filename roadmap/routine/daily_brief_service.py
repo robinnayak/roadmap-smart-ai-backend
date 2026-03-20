@@ -3,7 +3,8 @@ from __future__ import annotations
 from django.apps import apps
 from django.utils import timezone
 
-from routine.models import DailyBrief, DailyTaskList, GoalProgressEntry, DisciplineStreak, HealthProfile
+from routine.models import DailyBrief, DailyTaskList, GoalProgressEntry, DisciplineStreak
+from routine.health_profile_selector import get_effective_profile
 
 
 def _format_goal_metric(goal_metrics_snapshot: dict) -> str:
@@ -127,21 +128,32 @@ def _extract_latest_goal_metrics(user) -> dict:
 def _extract_upcoming_events_for_today(user, today) -> list[dict]:
     try:
         event_model = apps.get_model("events", "Event")
+        from events.services import expand_event_occurrences
     except LookupError:
         return []
+    except Exception:
+        return []
 
-    events = event_model.objects.filter(
-        user=user,
-        start_at__date=today,
-    ).order_by("start_at")[:10]
+    events = event_model.objects.filter(user=user).order_by("start_at")
+    occurrences = []
+    for event in events:
+        occurrences.extend(
+            expand_event_occurrences(
+                event=event,
+                start_date=today,
+                end_date=today,
+                output_timezone=event.timezone,
+            )
+        )
+    occurrences.sort(key=lambda item: (item["start_at"], item["end_at"], item["event_id"]))
     return [
         {
-            "title": event.title,
-            "start_at": event.start_at.isoformat(),
-            "end_at": event.end_at.isoformat(),
-            "event_type": event.event_type,
+            "title": item["title"],
+            "start_at": item["start_at"].isoformat(),
+            "end_at": item["end_at"].isoformat(),
+            "event_type": item["event_type"],
         }
-        for event in events
+        for item in occurrences[:10]
     ]
 
 
@@ -176,11 +188,7 @@ def get_or_generate_today_brief(user) -> DailyBrief:
         or "not_set"
     )
 
-    profile = (
-        HealthProfile.objects.filter(user=user)
-        .order_by("-updated_at", "-created_at")
-        .first()
-    )
+    profile = get_effective_profile(user=user)
     profile_context = profile.as_ai_context() if profile else {}
 
     brief_text = _build_brief_text(

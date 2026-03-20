@@ -34,6 +34,14 @@ class BaseAIService:
                     "status": "pending",
                     "error_message": "",
                     "progress_percentage": 0,
+                    "started_at": None,
+                    "completed_at": None,
+                    "processing_time_seconds": None,
+                    "raw_ai_response": "",
+                    "output_data": {},
+                    "ai_model_used": "",
+                    "ai_tokens_used": 0,
+                    "ai_cost_usd": 0,
                 },
             )
         

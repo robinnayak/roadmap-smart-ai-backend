@@ -1,7 +1,6 @@
 import os
 
-from common.env import get_required_env
-
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "gpt-oss:120b-cloud"
 REQUIRED_AI_ENV_VARS = ("OLLAMA_HOST",)
 
@@ -19,7 +18,7 @@ def get_journeybook_model() -> str:
 
 
 def get_ollama_host() -> str:
-    return get_required_env("OLLAMA_HOST")
+    return (os.getenv("OLLAMA_HOST") or "").strip() or DEFAULT_OLLAMA_HOST
 
 
 def get_ollama_request_timeout_seconds() -> float:
@@ -70,6 +69,8 @@ def get_ai_debug_enabled() -> bool:
 def get_missing_ai_env_vars() -> list[str]:
     missing: list[str] = []
     for name in REQUIRED_AI_ENV_VARS:
+        if name == "OLLAMA_HOST":
+            continue
         if not (os.getenv(name) or "").strip():
             missing.append(name)
     return missing

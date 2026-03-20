@@ -11,6 +11,7 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from django.db import transaction
+from django.core.exceptions import ValidationError
 from django.db.utils import IntegrityError
 from django.utils import timezone
 
@@ -343,7 +344,7 @@ def _get_event_occurrences_for_day(user, target_date: date) -> list[dict]:
                 start_value
                 if isinstance(start_value, datetime)
                 else datetime.fromisoformat(str(start_value))
-            ) - timedelta(minutes=buffer_before)
+            )
             end_dt = (
                 end_value
                 if isinstance(end_value, datetime)
@@ -414,6 +415,196 @@ def _fetch_day_event_constraints(user, target_date: date, event_occurrences: lis
     return constraints
 
 
+def _get_slot_name_for_manual_task(*, task_list: DailyTaskList, time_slot: str | None, suggested_time: time | None) -> str | None:
+    if time_slot in SLOT_ORDER:
+        return time_slot
+    if suggested_time:
+        target_dt = datetime.combine(task_list.date, suggested_time)
+        return _infer_time_slot_from_datetime(target_dt, fallback="afternoon")
+    return None
+
+
+def validate_manual_task_schedule_fit(
+    *,
+    task_list: DailyTaskList,
+    estimated_minutes: int,
+    time_slot: str | None,
+    suggested_time: time | None = None,
+    exclude_task_id=None,
+) -> dict:
+    slot_name = _get_slot_name_for_manual_task(
+        task_list=task_list,
+        time_slot=time_slot,
+        suggested_time=suggested_time,
+    )
+    if not slot_name:
+        return {"ok": True, "slot_name": None}
+
+    schedule_constraints = task_list.schedule_constraints or {}
+    availability_by_slot = _build_available_minutes_by_slot(
+        target_date=task_list.date,
+        schedule_constraints=schedule_constraints,
+    )
+    reserved_minutes = 0
+    task_qs = task_list.tasks.filter(
+        removed_by_user=False,
+        time_slot=slot_name,
+    ).exclude(item_type="event")
+    if exclude_task_id:
+        task_qs = task_qs.exclude(id=exclude_task_id)
+    reserved_minutes = sum(int(item.estimated_minutes or 0) for item in task_qs)
+    available_minutes = int(availability_by_slot.get(slot_name, 0))
+    remaining_minutes = max(0, available_minutes - reserved_minutes)
+    requested_minutes = max(1, int(estimated_minutes or 0))
+    if remaining_minutes < requested_minutes:
+        return {
+            "ok": False,
+            "code": "routine_task_conflicts_schedule",
+            "error": "Requested routine task does not fit within this slot's remaining schedule capacity.",
+            "details": {
+                "slot_name": slot_name,
+                "requested_minutes": requested_minutes,
+                "remaining_minutes": remaining_minutes,
+                "blocked_minutes": max(0, _slot_duration_minutes(slot_name) - available_minutes),
+                "already_reserved_minutes": reserved_minutes,
+            },
+        }
+    return {
+        "ok": True,
+        "slot_name": slot_name,
+        "remaining_minutes": remaining_minutes,
+    }
+
+
+def _build_manual_task_snapshot(existing: DailyTaskList) -> list[dict]:
+    snapshots = []
+    manual_items = (
+        existing.tasks.filter(item_type="manual_task", removed_by_user=False)
+        .order_by("display_order", "created_at")
+    )
+    for item in manual_items:
+        snapshots.append(
+            {
+                "title": item.title,
+                "description": item.description,
+                "icon": item.icon,
+                "priority": item.priority,
+                "estimated_minutes": item.estimated_minutes,
+                "time_slot": item.time_slot,
+                "suggested_time": item.suggested_time,
+                "why_important": item.why_important,
+                "display_order": item.display_order,
+            }
+        )
+    return snapshots
+
+
+def _build_removed_item_snapshot(existing: DailyTaskList) -> list[dict]:
+    snapshots = []
+    removed_items = existing.tasks.filter(removed_by_user=True).order_by("display_order", "created_at")
+    for item in removed_items:
+        identity = {"item_type": item.item_type}
+        if item.goal_task_id:
+            identity["goal_task_id"] = str(item.goal_task_id)
+        if item.habit_id:
+            identity["habit_id"] = str(item.habit_id)
+        if item.event_id:
+            identity["event_id"] = str(item.event_id)
+            identity["occurrence_id"] = item.occurrence_id or ""
+        if item.item_type == "journal":
+            identity["title"] = item.title
+        snapshots.append(identity)
+    return snapshots
+
+
+def _manual_task_sort_key(snapshot: dict) -> tuple[int, str]:
+    return (int(snapshot.get("display_order", 0) or 0), str(snapshot.get("title", "")))
+
+
+def _apply_regeneration_overlay(
+    *,
+    task_list: DailyTaskList,
+    manual_snapshots: list[dict],
+    removed_snapshots: list[dict],
+) -> dict:
+    applied_manual_tasks = 0
+    restored_removed_items = 0
+
+    existing_items = list(task_list.tasks.all().order_by("display_order", "created_at"))
+    max_order = max((item.display_order for item in existing_items), default=-1)
+    manual_items_to_create = []
+    for snapshot in sorted(manual_snapshots, key=_manual_task_sort_key):
+        max_order += 1
+        manual_items_to_create.append(
+            DailyTaskItem(
+                task_list=task_list,
+                item_type="manual_task",
+                title=snapshot["title"],
+                description=snapshot.get("description", ""),
+                icon=snapshot.get("icon", "✅"),
+                priority=snapshot.get("priority", "medium"),
+                estimated_minutes=int(snapshot.get("estimated_minutes", 30) or 30),
+                time_slot=snapshot.get("time_slot"),
+                suggested_time=snapshot.get("suggested_time"),
+                why_important=snapshot.get("why_important", ""),
+                display_order=max_order,
+            )
+        )
+    if manual_items_to_create:
+        DailyTaskItem.objects.bulk_create(manual_items_to_create)
+        applied_manual_tasks = len(manual_items_to_create)
+
+    current_items = list(task_list.tasks.all())
+    matchable_removed = {}
+    for item in current_items:
+        keys = []
+        if item.goal_task_id:
+            keys.append(("goal_task", str(item.goal_task_id)))
+        if item.habit_id:
+            keys.append(("habit", str(item.habit_id)))
+        if item.event_id:
+            keys.append(("event", f"{item.event_id}:{item.occurrence_id or ''}"))
+        if item.item_type == "journal":
+            keys.append(("journal", item.title))
+        for key in keys:
+            matchable_removed[key] = item
+
+    items_to_update = []
+    now = timezone.now()
+    for snapshot in removed_snapshots:
+        matched_item = None
+        if snapshot.get("goal_task_id"):
+            matched_item = matchable_removed.get(("goal_task", snapshot["goal_task_id"]))
+        elif snapshot.get("habit_id"):
+            matched_item = matchable_removed.get(("habit", snapshot["habit_id"]))
+        elif snapshot.get("event_id"):
+            event_key = f"{snapshot['event_id']}:{snapshot.get('occurrence_id', '')}"
+            matched_item = matchable_removed.get(("event", event_key))
+        elif snapshot.get("item_type") == "journal":
+            matched_item = matchable_removed.get(("journal", snapshot.get("title", "")))
+        if matched_item and not matched_item.removed_by_user:
+            matched_item.removed_by_user = True
+            matched_item.removed_at = now
+            items_to_update.append(matched_item)
+            restored_removed_items += 1
+
+    if items_to_update:
+        DailyTaskItem.objects.bulk_update(items_to_update, ["removed_by_user", "removed_at", "updated_at"])
+
+    task_list.schedule_constraints = {
+        **(task_list.schedule_constraints or {}),
+        "regeneration_overlay": {
+            "manual_tasks_preserved": applied_manual_tasks,
+            "removed_items_restored": restored_removed_items,
+        },
+    }
+    task_list.save(update_fields=["schedule_constraints", "updated_at"])
+    return {
+        "manual_tasks_preserved": applied_manual_tasks,
+        "removed_items_restored": restored_removed_items,
+    }
+
+
 def _build_available_minutes_by_slot(target_date: date, schedule_constraints: dict) -> dict[str, int]:
     timezone_name = schedule_constraints.get("timezone") or "UTC"
     tz = ZoneInfo(timezone_name)
@@ -430,7 +621,25 @@ def _build_available_minutes_by_slot(target_date: date, schedule_constraints: di
         slot_end = _datetime_from_date_and_time(target_date, slot_end_time, tz)
         blocked_minutes = 0
         for window in hard_windows:
-            blocked_minutes += _compute_overlap_minutes(slot_start, slot_end, window["start_at"], window["end_at"])
+            start_at = window.get("start_at")
+            end_at = window.get("end_at")
+            if isinstance(start_at, str):
+                try:
+                    start_at = datetime.fromisoformat(start_at)
+                except ValueError:
+                    continue
+            if isinstance(end_at, str):
+                try:
+                    end_at = datetime.fromisoformat(end_at)
+                except ValueError:
+                    continue
+            if not isinstance(start_at, datetime) or not isinstance(end_at, datetime):
+                continue
+            if start_at.tzinfo is None:
+                start_at = start_at.replace(tzinfo=tz)
+            if end_at.tzinfo is None:
+                end_at = end_at.replace(tzinfo=tz)
+            blocked_minutes += _compute_overlap_minutes(slot_start, slot_end, start_at, end_at)
         availability[slot_name] = max(0, _slot_duration_minutes(slot_name) - blocked_minutes)
     return availability
 
@@ -1365,8 +1574,12 @@ def get_or_create_today_task_list(
     backfill_system_habit_guidance_for_user(user)
 
     existing = DailyTaskList.objects.filter(user=user, date=target_date).first()
+    manual_snapshots: list[dict] = []
+    removed_snapshots: list[dict] = []
     if existing:
         if force_regenerate:
+            manual_snapshots = _build_manual_task_snapshot(existing)
+            removed_snapshots = _build_removed_item_snapshot(existing)
             existing.delete()
         else:
             return existing, False
@@ -1576,6 +1789,7 @@ def get_or_create_today_task_list(
                         task_list=task_list,
                         item_type="event",
                         event=occurrence.get("event"),
+                        occurrence_id=occurrence.get("occurrence_id", ""),
                         title=occurrence.get("title", "Scheduled Event"),
                         description=event_description,
                         icon="calendar",
@@ -1718,6 +1932,12 @@ def get_or_create_today_task_list(
 
             items_to_create = _apply_canonical_routine_order(items_to_create)
             DailyTaskItem.objects.bulk_create(items_to_create)
+            if manual_snapshots or removed_snapshots:
+                _apply_regeneration_overlay(
+                    task_list=task_list,
+                    manual_snapshots=manual_snapshots,
+                    removed_snapshots=removed_snapshots,
+                )
             task_list.update_progress()
     except IntegrityError:
         # Concurrent requests can race between read and create.

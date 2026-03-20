@@ -17,11 +17,13 @@ class GIEIntakeUnderstandingService:
         'health': (
             'health', 'fitness', 'workout', 'exercise', 'run', 'running',
             'marathon', 'sleep', 'diet', 'weight', 'gym', 'injury',
+            'meal', 'meals', 'meal prep', 'nutrition', 'protein',
         ),
         'financial': (
             'financial', 'finance', 'money', 'save', 'savings', 'invest',
             'investment', 'debt', 'income', 'revenue', 'emergency fund',
-            'budget',
+            'budget', 'house', 'home', 'mortgage', 'down payment',
+            'property', 'rent', 'real estate',
         ),
         'learning': (
             'learn', 'learning', 'study', 'course', 'certification', 'skill',

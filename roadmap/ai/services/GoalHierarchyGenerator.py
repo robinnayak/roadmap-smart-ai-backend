@@ -204,6 +204,7 @@ class GoalHierarchyGenerator(BaseAIService):
             all_milestones_data = []
             total_subgoals = 0
             total_tasks = 0
+            partial_failures = []
 
             for m_idx, milestone_dict in enumerate(milestones_list, 1):
                 logger.info(
@@ -214,6 +215,12 @@ class GoalHierarchyGenerator(BaseAIService):
                 # Generate subgoals for this milestone
                 subgoals_result = self._generate_subgoals(milestone_dict, goal_data)
                 if subgoals_result.get("status") != "success":
+                    generation_error = {
+                        "stage": "subgoal_generation",
+                        "message": subgoals_result.get("message", "Subgoal generation failed."),
+                        "milestone_title": milestone_dict.get("title", ""),
+                        "milestone_index": m_idx,
+                    }
                     logger.warning(
                         "Milestone %d — subgoal generation failed, keeping milestone with no subgoals",
                         m_idx,
@@ -221,7 +228,9 @@ class GoalHierarchyGenerator(BaseAIService):
                     all_milestones_data.append({
                         "milestone_data": milestone_dict,
                         "subgoals": [],
+                        "generation_error": generation_error,
                     })
+                    partial_failures.append(generation_error)
                     continue
 
                 subgoals_list = subgoals_result["data"]["subgoals"][:MAX_SUBGOALS_PER_MILESTONE]
@@ -260,15 +269,27 @@ class GoalHierarchyGenerator(BaseAIService):
                     if tasks_result.get("status") == "success":
                         tasks_list = tasks_result["data"]["tasks"][:MAX_TASKS_PER_SUBGOAL]
                     else:
+                        generation_error = {
+                            "stage": "task_generation",
+                            "message": tasks_result.get("message", "Task generation failed."),
+                            "milestone_title": milestone_dict.get("title", ""),
+                            "milestone_index": m_idx,
+                            "subgoal_title": subgoal_dict.get("title", ""),
+                            "subgoal_index": sg_idx,
+                        }
                         logger.warning(
                             "  Subgoal %d — task generation failed, keeping subgoal with no tasks",
                             sg_idx,
                         )
+                        partial_failures.append(generation_error)
 
-                    milestone_entry["subgoals"].append({
+                    subgoal_entry = {
                         "subgoal_data": subgoal_dict,
                         "tasks": tasks_list,
-                    })
+                    }
+                    if tasks_result.get("status") != "success":
+                        subgoal_entry["generation_error"] = generation_error
+                    milestone_entry["subgoals"].append(subgoal_entry)
                     total_subgoals += 1
                     total_tasks += len(tasks_list)
 
@@ -310,6 +331,8 @@ class GoalHierarchyGenerator(BaseAIService):
                 "milestones": all_milestones_data,
                 "stats": stats,
                 "quality_assessment": quality_assessment,
+                "partial_failure_count": len(partial_failures),
+                "partial_failures": partial_failures,
             }
 
             # FIX: Use mark_completed() — sets status, output_data, timestamps atomically
@@ -332,6 +355,11 @@ class GoalHierarchyGenerator(BaseAIService):
                     f"{stats['subgoals_total']} subgoals, "
                     f"{stats['tasks_total']} tasks. "
                     f"Quality score: {quality_assessment.get('overall_score', 0)}."
+                    + (
+                        f" Partial failures: {len(partial_failures)}."
+                        if partial_failures
+                        else ""
+                    )
                 ),
             }
 

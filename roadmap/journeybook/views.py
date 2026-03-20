@@ -9,6 +9,7 @@ from django.core.files.base import ContentFile
 from django.core.exceptions import ImproperlyConfigured, ObjectDoesNotExist
 from django.http import FileResponse, HttpResponse, JsonResponse
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -50,7 +51,6 @@ class JourneyBookViewSet(ModelViewSet):
     ERROR_TYPE_EMPTY_CONTENT = "EMPTY_CONTENT"
     ERROR_TYPE_PDF_ENGINE_ERROR = "PDF_ENGINE_ERROR"
     ERROR_TYPE_STORAGE_ERROR = "STORAGE_ERROR"
-
     permission_classes = [IsAuthenticated]
     serializer_class = JourneyBookSerializer
 
@@ -124,6 +124,18 @@ class JourneyBookViewSet(ModelViewSet):
             self._generate_sync(book=book, data=collected_data, metrics=metrics)
         except (ImproperlyConfigured, RuntimeError, ValueError, OSError, ObjectDoesNotExist) as exc:
             logger.exception("JourneyBook sync generation failed for book %s: %s", book.id, exc)
+            book.refresh_from_db(fields=["status", "error_message"])
+            return Response(
+                {
+                    "success": False,
+                    "code": "journeybook_generation_failed",
+                    "message": "Journey Book generation failed.",
+                    "book_id": str(book.id),
+                    "status": book.status,
+                    "error": book.error_message or str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         output = JourneyBookSerializer(book, context={"request": request})
         return Response(output.data, status=status.HTTP_201_CREATED)
@@ -315,10 +327,12 @@ class JourneyBookViewSet(ModelViewSet):
 
             chapters_text: list[str] = []
             ai_model_used = get_journeybook_model()
+            chapter_provenance: list[dict[str, Any]] = []
 
             for idx, chapter in enumerate(structure["chapters"], start=1):
                 start = time.time()
-                text = ai_gen.generate_chapter(chapter, metrics, book.book_type)
+                result = ai_gen.generate_chapter_result(chapter, metrics, book.book_type)
+                text = result.content
                 duration = time.time() - start
                 BookChapter.objects.create(
                     journey_book=book,
@@ -331,26 +345,35 @@ class JourneyBookViewSet(ModelViewSet):
                     generation_time_seconds=duration,
                 )
                 chapters_text.append(text)
+                chapter_provenance.append(
+                    {
+                        "chapter_number": idx,
+                        "chapter_id": chapter.get("id", f"ch{idx}"),
+                        "chapter_title": chapter["title"],
+                        "is_projection": bool(chapter.get("is_projection", False)),
+                        **result.to_metadata(),
+                    }
+                )
 
-            motivational_text: list[str] = []
+            motivational_entries: list[dict[str, Any]] = []
             for page_type in structure["motivational_pages"]:
-                page_text = ai_gen.generate_motivational_page(page_type, metrics)
-                motivational_text.append(page_text)
+                result = ai_gen.generate_motivational_page_result(page_type, metrics)
+                motivational_entries.append(
+                    {
+                        "page_type": page_type,
+                        **result.to_metadata(),
+                    }
+                )
+            motivational_text = [entry["content"] for entry in motivational_entries]
 
             images: dict[str, object] = {}
-            try:
-                images["completion"] = img_gen.generate_completion_chart()
-                images["sentiment"] = img_gen.generate_sentiment_chart()
-                images["streak"] = img_gen.generate_streak_chart()
-                images["heatmap"] = img_gen.generate_heatmap()
-                frequencies = data.get("word_frequencies") or {}
-                if frequencies:
-                    images["wordcloud"] = img_gen.generate_wordcloud(frequencies)
-                images["milestone"] = img_gen.generate_milestone_timeline(
-                    metrics.get("derived_milestones") or []
-                )
-            except (RuntimeError, ValueError, OSError) as exc:
-                logger.warning("JourneyBook chart generation failed for book %s: %s", book.id, exc)
+            asset_warnings = self._generate_images_with_contract(
+                book=book,
+                img_gen=img_gen,
+                data=data,
+                metrics=metrics,
+                images=images,
+            )
 
             pdf_builder = PDFBuilder(data, metrics, book.book_type)
             pdf_bytes = pdf_builder.build(chapters_text, motivational_text, images)
@@ -375,8 +398,9 @@ class JourneyBookViewSet(ModelViewSet):
                     file_path=f"in_memory://{book.id}/{key}.png",
                 )
 
+            # Generation owns DerivedMilestone persistence so metric calculation stays pure.
             for milestone in metrics.get("derived_milestones") or []:
-                DerivedMilestone.objects.get_or_create(
+                DerivedMilestone.objects.update_or_create(
                     user=book.user,
                     trigger_type=milestone["trigger_type"],
                     defaults={
@@ -386,14 +410,25 @@ class JourneyBookViewSet(ModelViewSet):
                     },
                 )
 
-            page_count = (len(chapters_text) * 5) + (len(motivational_text) * 2) + 5
-            chapter_count = len(chapters_text)
-            word_count = sum(len((text or "").split()) for text in chapters_text)
+            content_stats = self._compute_content_stats(
+                book=book,
+                chapter_rows=list(book.chapters.order_by("chapter_number")),
+                motivational_pages=motivational_entries,
+            )
+            generation_source = self._build_generation_source(
+                chapter_entries=chapter_provenance,
+                motivational_entries=motivational_entries,
+            )
             metadata = {
-                "page_count": page_count,
-                "chapter_count": chapter_count,
-                "word_count": word_count,
+                "page_count": content_stats["page_count"],
+                "chapter_count": content_stats["chapter_count"],
+                "word_count": content_stats["word_count"],
                 "images_generated": len(images),
+                "content_stats": content_stats,
+                "generation_source": generation_source,
+                "chapter_generation_details": chapter_provenance,
+                "motivational_pages": motivational_entries,
+                "asset_generation_warnings": asset_warnings,
             }
             book.mark_ready(metadata=metadata)
         except (ImproperlyConfigured, RuntimeError, ValueError, OSError, ObjectDoesNotExist) as exc:
@@ -412,13 +447,20 @@ class JourneyBookViewSet(ModelViewSet):
             metrics = {"journey_overview": {"start_date": book.data_start_date, "end_date": book.data_end_date}}
 
         chapter_texts = [chapter.content for chapter in chapters]
-        motivational_pages = self._demo_motivational_pages()
+        motivational_pages = self._stored_motivational_pages(book)
+        if not motivational_pages:
+            raise RuntimeError("No stored motivational page content is available for export.")
         pdf_builder = PDFBuilder(collected_data, metrics, book.book_type)
         pdf_bytes = pdf_builder.build(chapter_texts, motivational_pages, {})
         filename = f"journey_book_{book.user_id}_{book.id}_export.pdf"
         book.pdf_file.save(filename, ContentFile(pdf_bytes.getvalue()), save=False)
+        content_stats = self._compute_content_stats(book=book)
         metadata = dict(book.metadata or {})
         metadata["last_export_is_demo"] = False
+        metadata["content_stats"] = content_stats
+        metadata["chapter_count"] = content_stats["chapter_count"]
+        metadata["word_count"] = content_stats["word_count"]
+        metadata["page_count"] = content_stats["page_count"]
         book.metadata = metadata
         book.save(update_fields=["pdf_file", "metadata", "updated_at"])
 
@@ -453,6 +495,7 @@ class JourneyBookViewSet(ModelViewSet):
             "is_demo_pdf": is_demo_pdf,
             "error_type": error_type,
             "fallback_available": fallback_available,
+            "asset_generation": self._asset_generation_summary(book),
         }
 
     @staticmethod
@@ -464,6 +507,7 @@ class JourneyBookViewSet(ModelViewSet):
             "is_demo_pdf": False,
             "error_type": error_type,
             "fallback_available": fallback_available,
+            "asset_generation": None,
         }
 
     def _should_export_demo(self, book: JourneyBook) -> bool:
@@ -474,10 +518,10 @@ class JourneyBookViewSet(ModelViewSet):
         return False
 
     def _is_empty_content(self, book: JourneyBook) -> bool:
-        metadata = book.metadata or {}
-        chapter_count = int(metadata.get("chapter_count") or 0)
-        page_count = int(metadata.get("page_count") or 0)
-        word_count = int(metadata.get("word_count") or 0)
+        content_stats = self._compute_content_stats(book=book)
+        chapter_count = int(content_stats.get("chapter_count") or 0)
+        page_count = int(content_stats.get("page_count") or 0)
+        word_count = int(content_stats.get("word_count") or 0)
         return chapter_count <= 0 or page_count <= 0 or word_count <= 0
 
     def _error_type_for_book(self, book: JourneyBook) -> str | None:
@@ -525,6 +569,141 @@ class JourneyBookViewSet(ModelViewSet):
             "Add more journal entries and completed routines to unlock your full personalized edition.",
             "Consistency creates momentum. Keep showing up, and your real story will grow richer.",
         ]
+
+    @staticmethod
+    def _summary_source(ai_count: int, fallback_count: int) -> str:
+        if ai_count and fallback_count:
+            return "mixed"
+        if ai_count:
+            return "ai"
+        if fallback_count:
+            return "fallback"
+        return "unknown"
+
+    def _build_generation_source(
+        self,
+        *,
+        chapter_entries: list[dict[str, Any]],
+        motivational_entries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        chapter_ai = sum(1 for entry in chapter_entries if entry.get("content_source") == "ai")
+        chapter_fallback = sum(1 for entry in chapter_entries if entry.get("content_source") == "fallback")
+        motivation_ai = sum(1 for entry in motivational_entries if entry.get("content_source") == "ai")
+        motivation_fallback = sum(
+            1 for entry in motivational_entries if entry.get("content_source") == "fallback"
+        )
+        return {
+            "overall": self._summary_source(chapter_ai + motivation_ai, chapter_fallback + motivation_fallback),
+            "chapters": self._summary_source(chapter_ai, chapter_fallback),
+            "motivational_pages": self._summary_source(motivation_ai, motivation_fallback),
+            "counts": {
+                "chapters_ai": chapter_ai,
+                "chapters_fallback": chapter_fallback,
+                "motivational_ai": motivation_ai,
+                "motivational_fallback": motivation_fallback,
+            },
+        }
+
+    def _stored_motivational_pages(self, book: JourneyBook) -> list[str]:
+        pages = (book.metadata or {}).get("motivational_pages") or []
+        return [page.get("content", "") for page in pages if (page.get("content") or "").strip()]
+
+    @staticmethod
+    def _asset_generation_summary(book: JourneyBook) -> dict[str, Any]:
+        metadata = book.metadata or {}
+        warnings = metadata.get("asset_generation_warnings") or []
+        return {
+            "status": "degraded" if warnings else "complete",
+            "warnings": warnings,
+            "generated_count": int(metadata.get("images_generated") or 0),
+        }
+
+    def _compute_content_stats(
+        self,
+        *,
+        book: JourneyBook,
+        chapter_rows: list[BookChapter] | None = None,
+        motivational_pages: list[dict[str, Any]] | None = None,
+    ) -> dict[str, int]:
+        chapter_rows = chapter_rows if chapter_rows is not None else list(book.chapters.order_by("chapter_number"))
+        motivational_pages = (
+            motivational_pages if motivational_pages is not None else ((book.metadata or {}).get("motivational_pages") or [])
+        )
+        chapter_word_count = sum(
+            int(chapter.word_count or len((chapter.content or "").split()))
+            for chapter in chapter_rows
+            if (chapter.content or "").strip()
+        )
+        motivational_word_count = sum(
+            len((page.get("content") or "").split())
+            for page in motivational_pages
+            if (page.get("content") or "").strip()
+        )
+        chapter_count = sum(1 for chapter in chapter_rows if (chapter.content or "").strip())
+        motivational_page_count = sum(
+            1 for page in motivational_pages if (page.get("content") or "").strip()
+        )
+        page_count = (chapter_count * 5) + (motivational_page_count * 2) + (5 if chapter_count or motivational_page_count else 0)
+        content_stats = {
+            "chapter_count": chapter_count,
+            "motivational_page_count": motivational_page_count,
+            "word_count": chapter_word_count + motivational_word_count,
+            "page_count": page_count,
+        }
+        metadata = dict(book.metadata or {})
+        if metadata.get("content_stats") != content_stats:
+            metadata["content_stats"] = content_stats
+            metadata["chapter_count"] = content_stats["chapter_count"]
+            metadata["word_count"] = content_stats["word_count"]
+            metadata["page_count"] = content_stats["page_count"]
+            JourneyBook.objects.filter(pk=book.pk).update(metadata=metadata, updated_at=timezone.now())
+            book.metadata = metadata
+        return content_stats
+
+    def _generate_images_with_contract(
+        self,
+        *,
+        book: JourneyBook,
+        img_gen: ImageGenerator,
+        data: dict[str, Any],
+        metrics: dict[str, Any],
+        images: dict[str, object],
+    ) -> list[dict[str, str]]:
+        warnings: list[dict[str, str]] = []
+        generators = {
+            "completion": img_gen.generate_completion_chart,
+            "sentiment": img_gen.generate_sentiment_chart,
+            "streak": img_gen.generate_streak_chart,
+            "heatmap": img_gen.generate_heatmap,
+            "milestone": lambda: img_gen.generate_milestone_timeline(metrics.get("derived_milestones") or []),
+        }
+        for key, generator in generators.items():
+            try:
+                images[key] = generator()
+            except (RuntimeError, ValueError, OSError) as exc:
+                warnings.append(
+                    {
+                        "asset_key": key,
+                        "severity": "required",
+                        "error": exc.__class__.__name__,
+                    }
+                )
+                logger.warning("JourneyBook required chart generation failed for book %s (%s): %s", book.id, key, exc)
+
+        frequencies = data.get("word_frequencies") or {}
+        if frequencies:
+            try:
+                images["wordcloud"] = img_gen.generate_wordcloud(frequencies)
+            except (RuntimeError, ValueError, OSError) as exc:
+                warnings.append(
+                    {
+                        "asset_key": "wordcloud",
+                        "severity": "optional",
+                        "error": exc.__class__.__name__,
+                    }
+                )
+                logger.warning("JourneyBook optional wordcloud generation failed for book %s: %s", book.id, exc)
+        return warnings
 
     def _build_preview_payload(self, book: JourneyBook) -> dict[str, Any]:
         payload = {

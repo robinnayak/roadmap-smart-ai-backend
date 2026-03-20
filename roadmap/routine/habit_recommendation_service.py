@@ -5,7 +5,8 @@ from ai.config import get_ollama_model
 from ai.providers.ollama_provider import OllamaProvider
 from ai.utils.parsers import ResponseParser
 from goal.models import Goal
-from routine.models import HabitRecommendation, HealthProfile
+from routine.models import HabitRecommendation
+from routine.health_profile_selector import get_effective_profile
 
 
 def _build_habit_prompt(profile_context: dict, goal: Goal | None) -> str:
@@ -126,19 +127,10 @@ def generate_habit_recommendations_for_user(
     goal_id: str | None = None,
     profile_id: str | None = None,
 ) -> list[HabitRecommendation]:
-    profile = None
-    if profile_id:
-        profile = HealthProfile.objects.filter(id=profile_id, user=user).first()
-        if not profile:
-            raise ValueError("Health profile not found.")
-    else:
-        profile = (
-            HealthProfile.objects.filter(user=user)
-            .order_by("-updated_at", "-created_at")
-            .first()
-        )
-        if not profile:
-            raise ValueError("Complete your health profile first.")
+    try:
+        profile = get_effective_profile(user=user, profile_id=profile_id, require_existing=True)
+    except Exception as exc:
+        raise ValueError(exc.message if hasattr(exc, "message") else str(exc))
 
     goal = None
     if goal_id:

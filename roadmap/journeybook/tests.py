@@ -4,7 +4,7 @@ import shutil
 import tempfile
 from datetime import date, timedelta
 from io import BytesIO
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
@@ -306,8 +306,42 @@ class JourneyBookAPITestCase(TestCase):
 
         response = self.client.post(url, payload, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(response.json()["code"], "journeybook_generation_failed")
         self.assertEqual(JourneyBook.objects.filter(user=self.user).count(), 1)
+
+    @patch("journeybook.views.JourneyBookViewSet._generate_sync")
+    def test_generate_returns_failed_contract_when_sync_generation_marks_failed_and_raises(
+        self,
+        mock_generate_sync,
+    ):
+        goal = self._create_goal(status="completed", start_days_ago=0)
+
+        def _fail_generation(*args, **kwargs):
+            book = kwargs["book"]
+            book.mark_failed("provider unavailable")
+            raise RuntimeError("provider unavailable")
+
+        mock_generate_sync.side_effect = _fail_generation
+
+        response = self.client.post(
+            reverse("journeybook:journeybook-list"),
+            {
+                "goal_id": str(goal.id),
+                "book_type": "in_progress",
+                "privacy_settings": {"exclude_journal_ids": []},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        payload = response.json()
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["code"], "journeybook_generation_failed")
+        book = JourneyBook.objects.get(user=self.user)
+        self.assertEqual(payload["book_id"], str(book.id))
+        self.assertEqual(payload["status"], JourneyBook.STATUS_FAILED)
+        self.assertEqual(book.status, JourneyBook.STATUS_FAILED)
 
     def test_generate_demo_mode_returns_payload_without_writes(self):
         url = reverse("journeybook:journeybook-list")
@@ -590,11 +624,32 @@ class JourneyBookAPITestCase(TestCase):
 
     def test_failed_serializer_exposes_error_mapping_and_retry_context(self):
         goal = self._create_goal(status="completed")
-        self._create_book(
+        book = self._create_book(
             goal=goal,
             status_value=JourneyBook.STATUS_FAILED,
             error_message="ReportLab is required to build Journey Book PDFs.",
         )
+        book.metadata = {
+            "generation_source": {
+                "overall": "mixed",
+                "chapters": "ai",
+                "motivational_pages": "fallback",
+                "counts": {
+                    "chapters_ai": 2,
+                    "chapters_fallback": 0,
+                    "motivational_ai": 0,
+                    "motivational_fallback": 1,
+                },
+            },
+            "asset_generation_warnings": [{"asset_key": "heatmap", "severity": "required", "error": "RuntimeError"}],
+            "content_stats": {
+                "chapter_count": 2,
+                "motivational_page_count": 1,
+                "word_count": 420,
+                "page_count": 17,
+            },
+        }
+        book.save(update_fields=["metadata"])
 
         url = reverse("journeybook:journeybook-list")
         response = self.client.get(url)
@@ -606,6 +661,9 @@ class JourneyBookAPITestCase(TestCase):
         self.assertTrue(record["can_retry"])
         self.assertIn("retry_context", record)
         self.assertIn("error_display", record)
+        self.assertEqual(record["generation_source"]["counts"]["motivational_fallback"], 1)
+        self.assertEqual(record["asset_generation"]["status"], "degraded")
+        self.assertEqual(record["content_stats"]["word_count"], 420)
 
     def test_serializer_exposes_multi_goal_selection_metadata(self):
         first_goal = self._create_goal(status="completed", title="Goal 1")
@@ -673,7 +731,14 @@ class JourneyBookAPITestCase(TestCase):
             word_count=80,
             is_projection=False,
         )
-        book.metadata = {"chapter_count": 1, "page_count": 10, "word_count": 80}
+        book.metadata = {
+            "chapter_count": 1,
+            "page_count": 10,
+            "word_count": 80,
+            "motivational_pages": [
+                {"page_type": "letter_to_past_self", "content": "Persisted motivational text.", "content_source": "ai"}
+            ],
+        }
         book.save(update_fields=["metadata"])
 
         url = reverse("journeybook:journeybook-export", args=[str(book.id)])
@@ -684,8 +749,38 @@ class JourneyBookAPITestCase(TestCase):
         self.assertFalse(payload["is_demo_pdf"])
         self.assertIn("pdf_url", payload)
         self.assertIsNone(payload["error_type"])
+        self.assertEqual(payload["asset_generation"]["status"], "complete")
         book.refresh_from_db()
         self.assertTrue(bool(book.pdf_file))
+
+    @patch(
+        "journeybook.services.pdf_builder.PDFBuilder.build",
+        return_value=BytesIO(b"%PDF-1.4\nreal-export\n%%EOF"),
+    )
+    def test_export_reuses_stored_motivational_pages(self, mock_pdf):
+        goal = self._create_goal(status="completed")
+        book = self._create_book(goal=goal, status_value=JourneyBook.STATUS_READY, with_pdf=False)
+        BookChapter.objects.create(
+            journey_book=book,
+            chapter_number=1,
+            chapter_title="Chapter One",
+            content="Generated chapter content " * 20,
+            word_count=80,
+            is_projection=False,
+        )
+        book.metadata = {
+            "motivational_pages": [
+                {"page_type": "letter_to_past_self", "content": "Stored motivation one.", "content_source": "ai"},
+                {"page_type": "streak_heatmap", "content": "Stored motivation two.", "content_source": "fallback"},
+            ]
+        }
+        book.save(update_fields=["metadata"])
+
+        response = self.client.post(reverse("journeybook:journeybook-export", args=[str(book.id)]), {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        pdf_args = mock_pdf.call_args.args
+        self.assertEqual(pdf_args[2], ["Stored motivation one.", "Stored motivation two."])
 
     @patch(
         "journeybook.services.pdf_builder.PDFBuilder.build",
@@ -872,6 +967,26 @@ class JourneyBookAPITestCase(TestCase):
         ).calculate_all()
         self.assertTrue(any(m["trigger_type"] == "streak_7" for m in result["derived_milestones"]))
 
+    def test_metrics_calculator_does_not_persist_derived_milestones(self):
+        entry_day = date.today() - timedelta(days=1)
+        result = MetricsCalculator(
+            {
+                "user": self.user,
+                "journals": [
+                    {
+                        "entry_date": entry_day,
+                        "reflection_raw": "Persistence owner should be generation, not calculation.",
+                        "struggle_raw": "Still enough detail.",
+                        "sentiment_score": 0.3,
+                        "total_word_count": 90,
+                    }
+                ],
+                "streaks": {"longest_streak": 7, "last_entry_date": entry_day},
+            }
+        ).calculate_all()
+        self.assertTrue(result["derived_milestones"])
+        self.assertEqual(DerivedMilestone.objects.filter(user=self.user).count(), 0)
+
     def test_privacy_excludes_journal_ids(self):
         day_one = date.today() - timedelta(days=2)
         day_two = date.today() - timedelta(days=1)
@@ -926,18 +1041,12 @@ class JourneyBookAPITestCase(TestCase):
         "journeybook.services.image_generator.ImageGenerator.generate_completion_chart",
         return_value=BytesIO(b"completion"),
     )
-    @patch(
-        "journeybook.services.ai_generator.AIGenerator.generate_motivational_page",
-        return_value="Motivational page text for testing.",
-    )
-    @patch(
-        "journeybook.services.ai_generator.AIGenerator.generate_chapter",
-        return_value="Generated chapter text " * 50,
-    )
+    @patch("journeybook.services.ai_generator.AIGenerator.generate_motivational_page_result")
+    @patch("journeybook.services.ai_generator.AIGenerator.generate_chapter_result")
     def test_book_chapter_saved_per_chapter(
         self,
-        _mock_chapter,
-        _mock_motivational,
+        mock_chapter,
+        mock_motivational,
         _mock_completion,
         _mock_sentiment,
         _mock_streak,
@@ -945,6 +1054,26 @@ class JourneyBookAPITestCase(TestCase):
         _mock_timeline,
         _mock_pdf,
     ):
+        mock_chapter.return_value = MagicMock(
+            content="Generated chapter text " * 50,
+            to_metadata=lambda: {
+                "content": "Generated chapter text " * 50,
+                "content_source": "ai",
+                "provider": "ollama",
+                "model": "journeybook-test",
+                "error_summary": None,
+            },
+        )
+        mock_motivational.return_value = MagicMock(
+            content="Motivational page text for testing.",
+            to_metadata=lambda: {
+                "content": "Motivational page text for testing.",
+                "content_source": "fallback",
+                "provider": "ollama",
+                "model": "journeybook-test",
+                "error_summary": "provider_not_configured",
+            },
+        )
         goal = self._create_goal(status="completed")
         url = reverse("journeybook:journeybook-list")
         payload = {
@@ -958,6 +1087,178 @@ class JourneyBookAPITestCase(TestCase):
         book = JourneyBook.objects.filter(user=self.user).order_by("-created_at").first()
         self.assertIsNotNone(book)
         self.assertEqual(BookChapter.objects.filter(journey_book=book).count(), 5)
+        self.assertEqual(book.metadata["generation_source"]["counts"]["chapters_ai"], 5)
+        self.assertEqual(book.metadata["generation_source"]["counts"]["motivational_fallback"], 5)
+        self.assertEqual(len(book.metadata["motivational_pages"]), 5)
+        self.assertEqual(book.metadata["content_stats"]["chapter_count"], 5)
+
+    def test_is_empty_content_recomputes_stats_instead_of_trusting_stale_metadata(self):
+        goal = self._create_goal(status="completed")
+        book = self._create_book(goal=goal, status_value=JourneyBook.STATUS_READY, with_pdf=False)
+        book.metadata = {"chapter_count": 3, "page_count": 20, "word_count": 600}
+        book.save(update_fields=["metadata"])
+        BookChapter.objects.create(
+            journey_book=book,
+            chapter_number=1,
+            chapter_title="Empty chapter",
+            content="",
+            word_count=0,
+            is_projection=False,
+        )
+
+        response = self.client.post(reverse("journeybook:journeybook-export", args=[str(book.id)]), {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertTrue(payload["is_demo_pdf"])
+        self.assertEqual(payload["error_type"], "EMPTY_CONTENT")
+        book.refresh_from_db()
+        self.assertEqual(book.metadata["content_stats"]["chapter_count"], 0)
+        self.assertEqual(book.metadata["content_stats"]["word_count"], 0)
+
+    @patch(
+        "journeybook.services.pdf_builder.PDFBuilder.build",
+        return_value=BytesIO(b"%PDF-1.4\njourney\n%%EOF"),
+    )
+    @patch(
+        "journeybook.services.image_generator.ImageGenerator.generate_milestone_timeline",
+        return_value=BytesIO(b"timeline"),
+    )
+    @patch(
+        "journeybook.services.image_generator.ImageGenerator.generate_heatmap",
+        side_effect=RuntimeError("heatmap failed"),
+    )
+    @patch(
+        "journeybook.services.image_generator.ImageGenerator.generate_streak_chart",
+        return_value=BytesIO(b"streak"),
+    )
+    @patch(
+        "journeybook.services.image_generator.ImageGenerator.generate_sentiment_chart",
+        return_value=BytesIO(b"sentiment"),
+    )
+    @patch(
+        "journeybook.services.image_generator.ImageGenerator.generate_completion_chart",
+        return_value=BytesIO(b"completion"),
+    )
+    @patch("journeybook.services.ai_generator.AIGenerator.generate_motivational_page_result")
+    @patch("journeybook.services.ai_generator.AIGenerator.generate_chapter_result")
+    def test_generation_records_chart_failure_warnings_while_staying_ready(
+        self,
+        mock_chapter,
+        mock_motivational,
+        _mock_completion,
+        _mock_sentiment,
+        _mock_streak,
+        _mock_heatmap,
+        _mock_timeline,
+        _mock_pdf,
+    ):
+        mock_chapter.return_value = MagicMock(
+            content="Generated chapter text " * 50,
+            to_metadata=lambda: {
+                "content": "Generated chapter text " * 50,
+                "content_source": "ai",
+                "provider": "ollama",
+                "model": "journeybook-test",
+                "error_summary": None,
+            },
+        )
+        mock_motivational.return_value = MagicMock(
+            content="Motivational page text for testing.",
+            to_metadata=lambda: {
+                "content": "Motivational page text for testing.",
+                "content_source": "ai",
+                "provider": "ollama",
+                "model": "journeybook-test",
+                "error_summary": None,
+            },
+        )
+
+        response = self.client.post(
+            reverse("journeybook:journeybook-list"),
+            {"goal_id": str(self._create_goal(status='completed').id), "book_type": "in_progress"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        book = JourneyBook.objects.latest("created_at")
+        self.assertEqual(book.status, JourneyBook.STATUS_READY)
+        self.assertEqual(book.metadata["asset_generation_warnings"][0]["asset_key"], "heatmap")
+        response_payload = response.json()
+        self.assertEqual(response_payload["asset_generation"]["status"], "degraded")
+        self.assertEqual(response_payload["asset_generation"]["warnings"][0]["asset_key"], "heatmap")
+
+    @patch(
+        "journeybook.services.pdf_builder.PDFBuilder.build",
+        return_value=BytesIO(b"%PDF-1.4\njourney\n%%EOF"),
+    )
+    @patch(
+        "journeybook.services.image_generator.ImageGenerator.generate_milestone_timeline",
+        return_value=BytesIO(b"timeline"),
+    )
+    @patch(
+        "journeybook.services.image_generator.ImageGenerator.generate_heatmap",
+        return_value=BytesIO(b"heatmap"),
+    )
+    @patch(
+        "journeybook.services.image_generator.ImageGenerator.generate_streak_chart",
+        return_value=BytesIO(b"streak"),
+    )
+    @patch(
+        "journeybook.services.image_generator.ImageGenerator.generate_sentiment_chart",
+        return_value=BytesIO(b"sentiment"),
+    )
+    @patch(
+        "journeybook.services.image_generator.ImageGenerator.generate_completion_chart",
+        return_value=BytesIO(b"completion"),
+    )
+    @patch("journeybook.services.ai_generator.AIGenerator.generate_motivational_page_result")
+    @patch("journeybook.services.ai_generator.AIGenerator.generate_chapter_result")
+    def test_generation_persists_derived_milestones_once(
+        self,
+        mock_chapter,
+        mock_motivational,
+        _mock_completion,
+        _mock_sentiment,
+        _mock_streak,
+        _mock_heatmap,
+        _mock_timeline,
+        _mock_pdf,
+    ):
+        mock_chapter.return_value = MagicMock(
+            content="Generated chapter text " * 50,
+            to_metadata=lambda: {
+                "content": "Generated chapter text " * 50,
+                "content_source": "ai",
+                "provider": "ollama",
+                "model": "journeybook-test",
+                "error_summary": None,
+            },
+        )
+        mock_motivational.return_value = MagicMock(
+            content="Motivational page text for testing.",
+            to_metadata=lambda: {
+                "content": "Motivational page text for testing.",
+                "content_source": "ai",
+                "provider": "ollama",
+                "model": "journeybook-test",
+                "error_summary": None,
+            },
+        )
+        goal = self._create_goal(status="completed")
+        journal_day = date.today() - timedelta(days=1)
+        self._create_journal_entry(entry_date=journal_day, reflection_raw="Detailed enough to derive milestones.")
+
+        response = self.client.post(
+            reverse("journeybook:journeybook-list"),
+            {"goal_id": str(goal.id), "book_type": "in_progress"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        milestones = list(DerivedMilestone.objects.filter(user=self.user))
+        trigger_types = [milestone.trigger_type for milestone in milestones]
+        self.assertEqual(len(trigger_types), len(set(trigger_types)))
 
     def test_pdf_builder_respects_trim_page_size(self):
         builder = PDFBuilder(

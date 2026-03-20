@@ -6,6 +6,7 @@ import uuid
 from datetime import timedelta
 from django.apps import apps
 from django.db import models
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 
@@ -101,6 +102,7 @@ class HealthProfile(models.Model):
     commitment_words = models.TextField(blank=True)
     commitment_person = models.CharField(max_length=100, blank=True)
     commitment_emoji = models.CharField(max_length=10, blank=True)
+    is_active = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -110,6 +112,42 @@ class HealthProfile(models.Model):
 
     def __str__(self):
         return f"{self.user.email} - health profile"
+
+    def save(self, *args, **kwargs):
+        is_create = self._state.adding
+        if not self.user_id:
+            raise ValidationError("HealthProfile.user is required.")
+
+        existing_profiles = HealthProfile.objects.filter(user_id=self.user_id)
+        if self.pk:
+            existing_profiles = existing_profiles.exclude(pk=self.pk)
+
+        if not existing_profiles.exists():
+            self.is_active = True
+        elif not self.is_active and not existing_profiles.filter(is_active=True).exists():
+            self.is_active = True
+
+        super().save(*args, **kwargs)
+
+        if self.is_active:
+            HealthProfile.objects.filter(user_id=self.user_id).exclude(pk=self.pk).update(is_active=False)
+        elif is_create and not HealthProfile.objects.filter(user_id=self.user_id, is_active=True).exists():
+            self.is_active = True
+            super().save(update_fields=["is_active", "updated_at"])
+
+    def delete(self, *args, **kwargs):
+        user_id = self.user_id
+        was_active = self.is_active
+        super().delete(*args, **kwargs)
+        if was_active:
+            replacement = (
+                HealthProfile.objects.filter(user_id=user_id)
+                .order_by("-updated_at", "-created_at")
+                .first()
+            )
+            if replacement and not replacement.is_active:
+                replacement.is_active = True
+                replacement.save(update_fields=["is_active", "updated_at"])
 
     def as_ai_context(self) -> dict:
         return {
@@ -251,6 +289,7 @@ class DailyTaskItem(models.Model):
     ITEM_TYPE_CHOICES = [
         ('habit',     'Daily Habit'),
         ('goal_task', 'Goal Task'),
+        ('manual_task', 'Manual Task'),
         ('event',     'Event'),
         ('journal',   'Journal'),
     ]
@@ -291,6 +330,7 @@ class DailyTaskItem(models.Model):
         null=True, blank=True,
         related_name='daily_items',
     )
+    occurrence_id = models.CharField(max_length=120, blank=True)
 
     title       = models.CharField(max_length=255)
     description = models.TextField(blank=True)
@@ -585,6 +625,83 @@ class HabitTracker(models.Model):
             'progress_pct': latest_entry.progress_percentage,
             'days_tracked': entries.count(),
         }
+
+    SYSTEM_MUTABLE_FIELDS = {"estimated_minutes", "suggested_time", "time_slot", "updated_at"}
+    SYSTEM_INTERNAL_COUNTER_FIELDS = {
+        "current_streak",
+        "longest_streak",
+        "total_completions",
+        "last_completed_date",
+    }
+
+    def validate_system_habit_mutation(self, *, update_fields=None, incoming_data=None):
+        if not self.is_system:
+            return
+
+        candidate_fields = set()
+        if update_fields:
+            candidate_fields.update(str(field) for field in update_fields)
+        if incoming_data:
+            candidate_fields.update(str(field) for field in incoming_data.keys())
+
+        tracked_fields = [
+            "name",
+            "description",
+            "icon",
+            "category",
+            "why_important",
+            "reason_headline",
+            "reason_body",
+            "science_badge",
+            "rewards",
+            "proof_metric_name",
+            "frequency",
+            "custom_days",
+            "estimated_minutes",
+            "suggested_time",
+            "time_slot",
+            "priority",
+            "linked_goal",
+            "ai_suggested",
+            "is_active",
+            "is_system",
+            "is_deletable",
+        ]
+
+        if not self.pk:
+            return
+
+        previous = HabitTracker.objects.filter(pk=self.pk).values(*tracked_fields).first()
+        if previous is None:
+            return
+
+        changed_fields = {
+            field
+            for field in tracked_fields
+            if getattr(self, field) != previous.get(field)
+        }
+        allowed_fields = self.SYSTEM_MUTABLE_FIELDS | self.SYSTEM_INTERNAL_COUNTER_FIELDS
+        disallowed_fields = sorted(
+            field for field in changed_fields | candidate_fields
+            if field not in allowed_fields
+        )
+        if disallowed_fields:
+            raise ValidationError(
+                {
+                    "error": "Only estimated_minutes, suggested_time, and time_slot can be updated on system habits.",
+                    "disallowed_fields": disallowed_fields,
+                }
+            )
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get("update_fields")
+        self.validate_system_habit_mutation(update_fields=update_fields)
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.is_system:
+            raise ValidationError("System habits cannot be deleted.")
+        super().delete(*args, **kwargs)
 
 
 # ==============================================================================

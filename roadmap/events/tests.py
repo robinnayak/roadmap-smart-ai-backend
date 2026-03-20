@@ -1,4 +1,5 @@
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from django.utils import timezone
 from rest_framework import status
@@ -6,6 +7,7 @@ from rest_framework.test import APITestCase
 
 from authentication.models import CustomUser
 from events.models import Event
+from routine.services import _fetch_day_event_constraints, _get_event_occurrences_for_day
 
 
 class EventApiTests(APITestCase):
@@ -156,6 +158,39 @@ class EventApiTests(APITestCase):
         self.assertTrue(starts[0].startswith("2026-03-09T09:00:00"))
         self.assertTrue(starts[1].startswith("2026-03-11T09:00:00"))
 
+    def test_all_day_event_normalizes_to_local_day_boundaries(self):
+        self._auth_owner()
+        response = self._create_event(
+            title="Holiday",
+            event_type="one_time",
+            start_at="2026-03-14T10:30:00+05:45",
+            end_at="2026-03-14T11:00:00+05:45",
+            is_all_day=True,
+            recurrence=None,
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        event = Event.objects.get(id=response.data["id"])
+        event_tz = ZoneInfo("Asia/Katmandu")
+        self.assertEqual(event.start_at.astimezone(event_tz).isoformat(), "2026-03-14T00:00:00+05:45")
+        self.assertEqual(event.end_at.astimezone(event_tz).isoformat(), "2026-03-14T23:59:59.999999+05:45")
+
+        range_response = self.client.get("/events/range/?start_date=2026-03-14&end_date=2026-03-14&timezone=Asia/Katmandu")
+        self.assertEqual(range_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(range_response.data["occurrences"][0]["start_at"], "2026-03-14T00:00:00+05:45")
+        self.assertEqual(range_response.data["occurrences"][0]["end_at"], "2026-03-14T23:59:59.999999+05:45")
+
+    def test_unsupported_recurrence_frequency_is_rejected_clearly(self):
+        self._auth_owner()
+        response = self._create_event(
+            recurrence={
+                "frequency": "yearly",
+                "interval": 1,
+                "count": 2,
+            }
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("frequency", response.data)
+
     def test_range_overlap_metadata(self):
         self._auth_owner()
         self._create_event(
@@ -177,3 +212,24 @@ class EventApiTests(APITestCase):
         self.assertEqual(len(response.data["occurrences"]), 2)
         overlaps = [item["overlap"]["has_overlap"] for item in response.data["occurrences"]]
         self.assertEqual(overlaps, [True, True])
+
+    def test_range_returns_true_event_times_while_routine_constraints_apply_buffer_once(self):
+        self._auth_owner()
+        self._create_event(
+            title="Buffered Meeting",
+            event_type="one_time",
+            start_at="2026-03-14T10:00:00+05:45",
+            end_at="2026-03-14T11:00:00+05:45",
+            recurrence=None,
+        )
+        response = self.client.get("/events/range/?start_date=2026-03-14&end_date=2026-03-14&timezone=Asia/Katmandu")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["occurrences"][0]["start_at"], "2026-03-14T10:00:00+05:45")
+
+        event = Event.objects.get(user=self.owner, title="Buffered Meeting")
+        occurrences = _get_event_occurrences_for_day(self.owner, event.start_at.date())
+        constraints = _fetch_day_event_constraints(self.owner, event.start_at.date(), occurrences)
+        self.assertEqual(
+            constraints["occupied_windows"][0]["start_at"].isoformat(),
+            "2026-03-14T09:45:00+05:45",
+        )

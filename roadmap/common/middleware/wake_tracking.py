@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 class WakeInteractionTrackingMiddleware:
     """
     Track first authenticated API interaction per local day for wake-baseline signals.
+
+    This middleware runs before DRF view authentication, so it performs a narrow
+    JWTAuthentication pass itself. That second pass is intentional: wake tracking
+    must work for any bearer-authenticated API request, not only routine views or
+    view code paths that later touch request.user. Tracking failures remain
+    non-blocking and must never affect the response.
     """
 
     def __init__(self, get_response):
@@ -28,6 +34,8 @@ class WakeInteractionTrackingMiddleware:
             return
 
         try:
+            # Deliberately authenticate bearer tokens here so endpoint-agnostic
+            # wake tracking does not depend on DRF view auth running first.
             auth_result = self._jwt_auth.authenticate(request)
         except Exception:
             return

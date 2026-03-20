@@ -4,8 +4,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.utils import timezone
+from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -29,6 +31,8 @@ from routine.models import (
     WakeInteraction,
 )
 from routine.services import (
+    _fetch_day_event_constraints,
+    _get_event_occurrences_for_day,
     _select_balanced_goal_tasks,
     build_adaptive_roadmap_adjustment,
     get_or_create_today_task_list,
@@ -378,7 +382,7 @@ class RoutineTaskSoftRemoveAPITests(APITestCase):
         )
         self.manual_task = DailyTaskItem.objects.create(
             task_list=self.task_list,
-            item_type="goal_task",
+            item_type="manual_task",
             title="Manual routine note",
             priority="medium",
             estimated_minutes=20,
@@ -465,7 +469,7 @@ class RoutineTaskInlineManagementAPITests(APITestCase):
         self.task_list = DailyTaskList.objects.create(user=self.user, date=timezone.localdate())
         self.task_item = DailyTaskItem.objects.create(
             task_list=self.task_list,
-            item_type="goal_task",
+            item_type="manual_task",
             title="Existing Task",
             priority="medium",
             estimated_minutes=25,
@@ -485,7 +489,78 @@ class RoutineTaskInlineManagementAPITests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["task"]["title"], "New Routine Task")
+        self.assertEqual(response.data["task"]["item_type"], "manual_task")
         self.assertEqual(response.data["task"]["display_order"], 1)
+
+    def test_create_task_rejects_blocked_schedule_slot(self):
+        self.task_list.schedule_constraints = {
+            "timezone": "UTC",
+            "occupied_windows": [
+                {
+                    "start_at": f"{self.task_list.date.isoformat()}T06:00:00+00:00",
+                    "end_at": f"{self.task_list.date.isoformat()}T12:00:00+00:00",
+                    "constraint_mode": "hard",
+                    "routine_policy": "block",
+                }
+            ],
+        }
+        self.task_list.save(update_fields=["schedule_constraints", "updated_at"])
+
+        response = self.client.post(
+            f"/routines/{self.task_list.id}/tasks/",
+            data={
+                "title": "Blocked Task",
+                "estimated_minutes": 30,
+                "time_slot": "morning",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "routine_task_conflicts_schedule")
+
+    def test_patch_task_rejects_blocked_schedule_slot(self):
+        self.task_list.schedule_constraints = {
+            "timezone": "UTC",
+            "occupied_windows": [
+                {
+                    "start_at": f"{self.task_list.date.isoformat()}T12:00:00+00:00",
+                    "end_at": f"{self.task_list.date.isoformat()}T18:00:00+00:00",
+                    "constraint_mode": "hard",
+                    "routine_policy": "block",
+                }
+            ],
+        }
+        self.task_list.save(update_fields=["schedule_constraints", "updated_at"])
+
+        response = self.client.patch(
+            f"/routines/tasks/{self.task_item.id}/",
+            data={"time_slot": "afternoon", "estimated_minutes": 30},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "routine_task_conflicts_schedule")
+
+    def test_create_flexible_task_without_slot_still_succeeds(self):
+        self.task_list.schedule_constraints = {
+            "timezone": "UTC",
+            "occupied_windows": [
+                {
+                    "start_at": f"{self.task_list.date.isoformat()}T06:00:00+00:00",
+                    "end_at": f"{self.task_list.date.isoformat()}T23:59:59+00:00",
+                    "constraint_mode": "hard",
+                    "routine_policy": "block",
+                }
+            ],
+        }
+        self.task_list.save(update_fields=["schedule_constraints", "updated_at"])
+
+        response = self.client.post(
+            f"/routines/{self.task_list.id}/tasks/",
+            data={"title": "Flexible Task", "estimated_minutes": 15},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["task"]["item_type"], "manual_task")
 
     def test_patch_task_detail_updates_fields(self):
         response = self.client.patch(
@@ -877,6 +952,82 @@ class DailyTaskGenerationTests(APITestCase):
         self.assertEqual(
             first_list.schedule_constraints.get("organization_policy"),
             regenerated_list.schedule_constraints.get("organization_policy"),
+        )
+
+    def test_event_pre_buffer_is_applied_once_in_schedule_constraints(self):
+        target_date = timezone.localdate()
+        Event.objects.create(
+            user=self.user,
+            title="Buffered Event",
+            description="One buffered event",
+            event_type="one_time",
+            start_at=datetime.fromisoformat(f"{target_date.isoformat()}T10:00:00+00:00"),
+            end_at=datetime.fromisoformat(f"{target_date.isoformat()}T11:00:00+00:00"),
+            is_all_day=False,
+            timezone="UTC",
+            recurrence=None,
+            routine_constraint={
+                "constraint_mode": "hard",
+                "buffer_before_minutes": 15,
+                "buffer_after_minutes": 10,
+                "routine_policy": "block",
+            },
+        )
+
+        occurrences = _get_event_occurrences_for_day(self.user, target_date)
+        self.assertEqual(occurrences[0]["start_at"].isoformat(), f"{target_date.isoformat()}T10:00:00+00:00")
+        constraints = _fetch_day_event_constraints(self.user, target_date, occurrences)
+        self.assertEqual(
+            constraints["occupied_windows"][0]["start_at"].isoformat(),
+            f"{target_date.isoformat()}T09:45:00+00:00",
+        )
+
+    def test_force_regenerate_preserves_manual_tasks_and_removed_generated_items(self):
+        target_date = timezone.localdate()
+        goal, subgoal = self._create_goal_with_subgoal("Overlay Goal", priority="high")
+        Task.objects.create(
+            subgoal=subgoal,
+            title="Generated focus task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=45,
+            display_order=1,
+        )
+
+        first_list, created = get_or_create_today_task_list(self.user, target_date)
+        self.assertTrue(created)
+        generated_item = first_list.tasks.filter(goal_task__isnull=False).first()
+        self.assertIsNotNone(generated_item)
+        generated_item.removed_by_user = True
+        generated_item.removed_at = timezone.now()
+        generated_item.save(update_fields=["removed_by_user", "removed_at", "updated_at"])
+        DailyTaskItem.objects.create(
+            task_list=first_list,
+            item_type="manual_task",
+            title="Preserved manual task",
+            priority="medium",
+            estimated_minutes=25,
+            display_order=999,
+        )
+
+        regenerated_list, regenerated_created = get_or_create_today_task_list(
+            self.user,
+            target_date,
+            force_regenerate=True,
+        )
+        self.assertTrue(regenerated_created)
+
+        preserved_manual = regenerated_list.tasks.filter(item_type="manual_task", title="Preserved manual task").first()
+        self.assertIsNotNone(preserved_manual)
+        preserved_generated = regenerated_list.tasks.get(goal_task_id=generated_item.goal_task_id)
+        self.assertTrue(preserved_generated.removed_by_user)
+        self.assertEqual(
+            regenerated_list.schedule_constraints["regeneration_overlay"]["manual_tasks_preserved"],
+            1,
+        )
+        self.assertEqual(
+            regenerated_list.schedule_constraints["regeneration_overlay"]["removed_items_restored"],
+            1,
         )
 
     def test_flex_day_profile_caps_actionable_non_event_work_to_two_items(self):
@@ -2450,24 +2601,14 @@ class SystemHabitsServiceTests(APITestCase):
             name="Visualization",
             is_system=True,
         )
-        habit.description = ""
-        habit.reason_body = ""
-        habit.why_important = ""
-        habit.estimated_minutes = 17
-        habit.time_slot = "evening"
-        habit.suggested_time = datetime.strptime("20:45:00", "%H:%M:%S").time()
-        habit.is_active = False
-        habit.save(
-            update_fields=[
-                "description",
-                "reason_body",
-                "why_important",
-                "estimated_minutes",
-                "time_slot",
-                "suggested_time",
-                "is_active",
-                "updated_at",
-            ]
+        HabitTracker.objects.filter(pk=habit.pk).update(
+            description="",
+            reason_body="",
+            why_important="",
+            estimated_minutes=17,
+            time_slot="evening",
+            suggested_time=datetime.strptime("20:45:00", "%H:%M:%S").time(),
+            is_active=False,
         )
 
         created_count = seed_system_habits_for_user(user)
@@ -2492,9 +2633,10 @@ class SystemHabitsServiceTests(APITestCase):
             name="Gratitude Practice",
             is_system=True,
         )
-        habit.description = "Custom guidance stays."
-        habit.reason_body = "Custom body stays."
-        habit.save(update_fields=["description", "reason_body", "updated_at"])
+        HabitTracker.objects.filter(pk=habit.pk).update(
+            description="Custom guidance stays.",
+            reason_body="Custom body stays.",
+        )
 
         seed_system_habits_for_user(user)
         habit.refresh_from_db()
@@ -2507,7 +2649,8 @@ class SystemHabitsServiceTests(APITestCase):
             email="seed-command@test.com",
             password="Password@123",
         )
-        HabitTracker.objects.filter(user=user, is_system=True).first().delete()
+        missing_habit = HabitTracker.objects.filter(user=user, is_system=True).first()
+        HabitTracker.objects.filter(pk=missing_habit.pk).delete()
 
         output = StringIO()
         call_command("seed_system_habits", stdout=output)
@@ -2603,9 +2746,7 @@ class SystemHabitDetailApiTests(APITestCase):
             name="Visualization",
             is_system=True,
         )
-        habit.description = ""
-        habit.reason_body = ""
-        habit.save(update_fields=["description", "reason_body", "updated_at"])
+        HabitTracker.objects.filter(pk=habit.pk).update(description="", reason_body="")
 
         response = self.client.get("/routines/habits/")
 
@@ -2620,8 +2761,7 @@ class SystemHabitDetailApiTests(APITestCase):
             name="Gratitude Practice",
             is_system=True,
         )
-        habit.reason_body = ""
-        habit.save(update_fields=["reason_body", "updated_at"])
+        HabitTracker.objects.filter(pk=habit.pk).update(reason_body="")
 
         response = self.client.get(f"/routines/habits/{habit.id}/")
 
@@ -2688,6 +2828,17 @@ class HealthProfileEndpointTests(APITestCase):
         response = self.client.post(self.url, data={"bad_habits": ["smoking"]}, format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(HealthProfile.objects.filter(user=self.user).count(), 2)
+        self.assertEqual(HealthProfile.objects.filter(user=self.user, is_active=True).count(), 1)
+
+    def test_new_profile_becomes_active_and_deactivates_previous_profile(self):
+        self.client.force_authenticate(self.user)
+        original = HealthProfile.objects.create(user=self.user, bad_habits=["sleeping_late"])
+        response = self.client.post(self.url, data={"bad_habits": ["smoking"]}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        original.refresh_from_db()
+        new_profile = HealthProfile.objects.get(id=response.data["health_profile"]["id"])
+        self.assertFalse(original.is_active)
+        self.assertTrue(new_profile.is_active)
 
     def test_patch_updates_only_supplied_fields(self):
         self.client.force_authenticate(self.user)
@@ -2707,6 +2858,14 @@ class HealthProfileEndpointTests(APITestCase):
         self.assertEqual(profile.stress_level, "low")
         self.assertEqual(profile.bad_habits, ["smoking"])
         self.assertEqual(profile.commitment_words, "Original words")
+
+    def test_collection_patch_rejects_ambiguity_when_multiple_profiles_exist(self):
+        self.client.force_authenticate(self.user)
+        HealthProfile.objects.create(user=self.user, bad_habits=["smoking"])
+        HealthProfile.objects.create(user=self.user, bad_habits=["junk_food"])
+        response = self.client.patch(self.url, data={"stress_level": "low"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Multiple health profiles exist", response.data["error"])
 
     def test_job_type_other_roundtrip(self):
         self.client.force_authenticate(self.user)
@@ -2747,6 +2906,27 @@ class HealthProfileEndpointTests(APITestCase):
         self.assertEqual(profile_payload["bad_habits"], ["smoking", "sleeping_late"])
         self.assertEqual(profile_payload["conditions"], ["anxiety"])
         self.assertEqual(profile_payload["commitment_person"], "My daughter")
+
+    def test_detail_patch_can_activate_specific_profile(self):
+        self.client.force_authenticate(self.user)
+        active_profile = HealthProfile.objects.create(user=self.user, bad_habits=["sleeping_late"])
+        inactive_profile = HealthProfile.objects.create(user=self.user, bad_habits=["smoking"])
+        response = self.client.patch(
+            f"/routines/health-profile/{active_profile.id}/",
+            data={"is_active": False},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        response = self.client.patch(
+            f"/routines/health-profile/{inactive_profile.id}/",
+            data={"is_active": True},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        active_profile.refresh_from_db()
+        inactive_profile.refresh_from_db()
+        self.assertFalse(active_profile.is_active)
+        self.assertTrue(inactive_profile.is_active)
 
 
 class HabitRecommendationServiceTests(APITestCase):
@@ -2846,6 +3026,36 @@ class HabitRecommendationServiceTests(APITestCase):
             2,
         )
 
+    @patch("routine.habit_recommendation_service.ResponseParser")
+    @patch("routine.habit_recommendation_service.OllamaProvider")
+    def test_generation_uses_active_profile_when_profile_id_is_omitted(self, mock_provider_cls, mock_parser_cls):
+        active_profile = HealthProfile.objects.create(
+            user=self.user,
+            bad_habits=["junk_food"],
+            is_active=True,
+        )
+        old_profile = HealthProfile.objects.filter(user=self.user).exclude(id=active_profile.id).first()
+        old_profile.is_active = False
+        old_profile.save(update_fields=["is_active", "updated_at"])
+
+        mock_provider = mock_provider_cls.return_value
+        mock_provider.generate_response.return_value = SimpleNamespace(content="{}")
+        mock_parser = mock_parser_cls.return_value
+        mock_parser.parse_json.return_value = {
+            "habits": [
+                {
+                    "name": "Box breathing",
+                    "category": "breathing",
+                    "estimated_minutes": 10,
+                    "frequency": "daily",
+                }
+            ]
+        }
+
+        generated = generate_habit_recommendations_for_user(self.user)
+        self.assertEqual(len(generated), 1)
+        self.assertEqual(generated[0].source_health_profile_id, active_profile.id)
+
 
 class HabitRecommendationEndpointTests(APITestCase):
     def setUp(self):
@@ -2888,6 +3098,7 @@ class HabitRecommendationEndpointTests(APITestCase):
         return HabitRecommendation.objects.create(**defaults)
 
     def test_suggest_without_health_profile_returns_400(self):
+        HealthProfile.objects.filter(user=self.user).delete()
         response = self.client.post(self.suggest_url, data={"goal_id": str(self.goal.id)}, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"], "Complete your health profile first.")
@@ -2896,7 +3107,7 @@ class HabitRecommendationEndpointTests(APITestCase):
     def test_suggest_creates_pending_recommendations_and_not_habits(self, mock_generate):
         HealthProfile.objects.create(user=self.user, existing_habits=[])
 
-        def _factory(user, goal_id=None):
+        def _factory(user, goal_id=None, profile_id=None):
             rec1 = self._create_recommendation(name="Morning hydration")
             rec2 = self._create_recommendation(name="Evening breathing")
             return [rec1, rec2]
@@ -2909,7 +3120,7 @@ class HabitRecommendationEndpointTests(APITestCase):
 
         from routine.models import HabitRecommendation
         self.assertEqual(HabitRecommendation.objects.filter(user=self.user, status="pending").count(), 2)
-        self.assertEqual(HabitTracker.objects.filter(user=self.user).count(), 0)
+        self.assertEqual(HabitTracker.objects.filter(user=self.user, ai_suggested=True).count(), 0)
 
     def test_accept_creates_habit_tracker_and_returns_it(self):
         recommendation = self._create_recommendation(
@@ -3316,6 +3527,37 @@ class DailyBriefAPITests(APITestCase):
         self.assertEqual(DailyBrief.objects.filter(user=self.user, date=timezone.localdate()).count(), 1)
         self.assertEqual(first_response.data["brief"]["id"], second_response.data["brief"]["id"])
 
+    def test_get_includes_recurring_and_multi_day_events(self):
+        today = timezone.localdate()
+        Event.objects.create(
+            user=self.user,
+            title="Recurring Standup",
+            description="Daily sync",
+            event_type="recurring",
+            start_at=datetime.fromisoformat(f"{today.isoformat()}T09:00:00+00:00"),
+            end_at=datetime.fromisoformat(f"{today.isoformat()}T09:30:00+00:00"),
+            is_all_day=False,
+            timezone="UTC",
+            recurrence={"frequency": "daily", "interval": 1, "until_date": today.isoformat(), "count": None},
+        )
+        Event.objects.create(
+            user=self.user,
+            title="Conference",
+            description="Multi-day event",
+            event_type="multi_day",
+            start_at=datetime.fromisoformat(f"{(today - timedelta(days=1)).isoformat()}T12:00:00+00:00"),
+            end_at=datetime.fromisoformat(f"{(today + timedelta(days=1)).isoformat()}T12:00:00+00:00"),
+            is_all_day=False,
+            timezone="UTC",
+            recurrence=None,
+        )
+
+        response = self.client.get(self.today_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        event_titles = {item["title"] for item in response.data["brief"]["upcoming_events_today"]}
+        self.assertIn("Recurring Standup", event_titles)
+        self.assertIn("Conference", event_titles)
+
     def test_get_reconciles_streak_snapshot_before_brief_creation(self):
         today = timezone.localdate()
         completed_day = today - timedelta(days=2)
@@ -3396,6 +3638,49 @@ class DailyBriefAPITests(APITestCase):
         track_response = self.client.post(self.track_status_url, data={"status": "on_track"}, format="json")
         self.assertEqual(today_response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(track_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class SystemHabitModelGuardTests(TestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="system-habit-model@test.com",
+            password="Password@123",
+        )
+        self.system_habit = HabitTracker.objects.create(
+            user=self.user,
+            name="Protected System Habit",
+            frequency="daily",
+            estimated_minutes=10,
+            is_system=True,
+            is_deletable=False,
+            suggested_time=datetime.strptime("07:00", "%H:%M").time(),
+            time_slot="morning",
+        )
+
+    def test_delete_system_habit_is_blocked_at_model_layer(self):
+        with self.assertRaises(ValidationError):
+            self.system_habit.delete()
+
+    def test_mutating_disallowed_system_habit_field_is_blocked(self):
+        self.system_habit.name = "Renamed"
+        with self.assertRaises(ValidationError):
+            self.system_habit.save()
+
+    def test_mutating_allowed_system_habit_timing_field_succeeds(self):
+        self.system_habit.estimated_minutes = 15
+        self.system_habit.save(update_fields=["estimated_minutes", "updated_at"])
+        self.system_habit.refresh_from_db()
+        self.assertEqual(self.system_habit.estimated_minutes, 15)
+
+    def test_record_completion_updates_system_habit_streak_fields(self):
+        completion_date = timezone.localdate()
+        self.system_habit.record_completion(completion_date)
+        self.system_habit.refresh_from_db()
+
+        self.assertEqual(self.system_habit.current_streak, 1)
+        self.assertEqual(self.system_habit.longest_streak, 1)
+        self.assertEqual(self.system_habit.total_completions, 1)
+        self.assertEqual(self.system_habit.last_completed_date, completion_date)
 
 
 class WakeUpDetectionTests(APITestCase):

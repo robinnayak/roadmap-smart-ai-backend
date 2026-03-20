@@ -4,6 +4,7 @@
 import logging
 from collections import defaultdict
 
+from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
 from django.db import transaction, models
 from django.utils import timezone
@@ -39,8 +40,13 @@ from routine.serializers import (
     UpdateRoutineTaskRequestSerializer,
 )
 from routine.daily_brief_service import get_or_generate_today_brief
+from routine.health_profile_selector import activate_profile
 from routine.habit_recommendation_service import generate_habit_recommendations_for_user
-from routine.services import get_or_create_today_task_list, update_discipline_streak
+from routine.services import (
+    get_or_create_today_task_list,
+    update_discipline_streak,
+    validate_manual_task_schedule_fit,
+)
 from routine.system_habits_service import seed_system_habits_for_user
 from routine.progress_services import (
     build_progress_overview_payload,
@@ -244,15 +250,31 @@ class RoutineTaskListCreateAPIView(APIView):
         if max_order is None:
             max_order = -1
         validated = request_serializer.validated_data
+        fit_result = validate_manual_task_schedule_fit(
+            task_list=routine,
+            estimated_minutes=validated.get("estimated_minutes", 30),
+            time_slot=validated.get("time_slot"),
+            suggested_time=validated.get("suggested_time"),
+        )
+        if not fit_result["ok"]:
+            return Response(
+                {
+                    "error": fit_result["error"],
+                    "code": fit_result["code"],
+                    "details": fit_result["details"],
+                },
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
         task_item = DailyTaskItem.objects.create(
             task_list=routine,
-            item_type="goal_task",
+            item_type="manual_task",
             title=validated["title"],
             description=validated.get("description", ""),
             icon=validated.get("icon", "✅"),
             priority=validated.get("priority", "medium"),
             estimated_minutes=validated.get("estimated_minutes", 30),
             time_slot=validated.get("time_slot"),
+            suggested_time=validated.get("suggested_time"),
             why_important=validated.get("why_important", ""),
             display_order=max_order + 1,
         )
@@ -288,7 +310,25 @@ class RoutineTaskDetailAPIView(APIView):
                 status=http_status.HTTP_403_FORBIDDEN,
             )
 
-        for field, value in request_serializer.validated_data.items():
+        updated_values = dict(request_serializer.validated_data)
+        fit_result = validate_manual_task_schedule_fit(
+            task_list=task_item.task_list,
+            estimated_minutes=updated_values.get("estimated_minutes", task_item.estimated_minutes),
+            time_slot=updated_values.get("time_slot", task_item.time_slot),
+            suggested_time=updated_values.get("suggested_time", task_item.suggested_time),
+            exclude_task_id=task_item.id,
+        )
+        if not fit_result["ok"]:
+            return Response(
+                {
+                    "error": fit_result["error"],
+                    "code": fit_result["code"],
+                    "details": fit_result["details"],
+                },
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        for field, value in updated_values.items():
             setattr(task_item, field, value)
         task_item.save()
 
@@ -750,7 +790,11 @@ class HabitDetailAPIView(APIView):
             )
         serializer = HabitTrackerSerializer(habit, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
+            try:
+                serializer.save()
+            except ValidationError as exc:
+                detail = exc.message_dict if hasattr(exc, "message_dict") else {"error": exc.messages[0]}
+                return Response(detail, status=http_status.HTTP_403_FORBIDDEN)
             return Response(serializer.data, status=http_status.HTTP_200_OK)
         return Response(serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
 
@@ -776,12 +820,20 @@ class HabitDetailAPIView(APIView):
             }
             serializer = HabitTrackerSerializer(habit, data=filtered_data, partial=True)
             serializer.is_valid(raise_exception=True)
-            serializer.save()
+            try:
+                serializer.save()
+            except ValidationError as exc:
+                detail = exc.message_dict if hasattr(exc, "message_dict") else {"error": exc.messages[0]}
+                return Response(detail, status=http_status.HTTP_403_FORBIDDEN)
             return Response(serializer.data, status=http_status.HTTP_200_OK)
 
         serializer = HabitTrackerSerializer(habit, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
+            try:
+                serializer.save()
+            except ValidationError as exc:
+                detail = exc.message_dict if hasattr(exc, "message_dict") else {"error": exc.messages[0]}
+                return Response(detail, status=http_status.HTTP_403_FORBIDDEN)
             return Response(serializer.data, status=http_status.HTTP_200_OK)
         return Response(serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
 
@@ -792,7 +844,11 @@ class HabitDetailAPIView(APIView):
                 {"error": "System habits cannot be deleted."},
                 status=http_status.HTTP_403_FORBIDDEN,
             )
-        habit.delete()
+        try:
+            habit.delete()
+        except ValidationError as exc:
+            detail = exc.message_dict if hasattr(exc, "message_dict") else {"error": exc.messages[0]}
+            return Response(detail, status=http_status.HTTP_403_FORBIDDEN)
         return Response(status=http_status.HTTP_204_NO_CONTENT)
 
 
@@ -806,10 +862,11 @@ class HealthProfileView(APIView):
         if not profiles:
             return Response({"error": "Health profile not found."}, status=http_status.HTTP_404_NOT_FOUND)
         serializer = HealthProfileSerializer(profiles, many=True)
+        active_profile = next((profile for profile in profiles if profile.is_active), profiles[0])
         return Response(
             {
                 "health_profiles": serializer.data,
-                "health_profile": serializer.data[0],  # backward compatibility
+                "health_profile": HealthProfileSerializer(active_profile).data,
             },
             status=http_status.HTTP_200_OK,
         )
@@ -822,11 +879,17 @@ class HealthProfileView(APIView):
         return Response(serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
 
     def patch(self, request):
-        profile = (
-            HealthProfile.objects.filter(user=request.user).order_by("-updated_at", "-created_at").first()
+        profiles = list(
+            HealthProfile.objects.filter(user=request.user).order_by("-updated_at", "-created_at")
         )
-        if not profile:
+        if not profiles:
             return Response({"error": "Health profile not found."}, status=http_status.HTTP_404_NOT_FOUND)
+        if len(profiles) > 1:
+            return Response(
+                {"error": "Multiple health profiles exist. Use the detail endpoint to update a specific profile."},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        profile = profiles[0]
         serializer = HealthProfileSerializer(profile, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -846,8 +909,13 @@ class HealthProfileDetailView(APIView):
         profile = get_object_or_404(HealthProfile, id=profile_id, user=request.user)
         serializer = HealthProfileSerializer(profile, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
-            return Response({"health_profile": serializer.data}, status=http_status.HTTP_200_OK)
+            updated_profile = serializer.save()
+            if serializer.validated_data.get("is_active") is True:
+                updated_profile = activate_profile(user=request.user, profile=updated_profile)
+            return Response(
+                {"health_profile": HealthProfileSerializer(updated_profile).data},
+                status=http_status.HTTP_200_OK,
+            )
         return Response(serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, profile_id):

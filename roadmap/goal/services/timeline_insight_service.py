@@ -170,10 +170,10 @@ class GoalTimelineInsightService:
     @staticmethod
     def _get_latest_health_profile(*, user):
         try:
-            from routine.models import HealthProfile
+            from routine.health_profile_selector import get_effective_profile
         except Exception:
             return None
-        return HealthProfile.objects.filter(user=user).order_by("-updated_at").first()
+        return get_effective_profile(user=user)
 
     @staticmethod
     def _get_finance_profile(*, user, goal: Goal):

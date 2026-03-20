@@ -2,7 +2,7 @@
 # roadmap/ai/services/current_situation_generator.py
 # =============================================================================
 import logging
-from django.utils import timezone
+from django.core.exceptions import ImproperlyConfigured
 
 from ai.services.base_service import BaseAIService
 from ai.prompts.personalization.user_context_prompts import UserContextPrompt
@@ -15,6 +15,21 @@ from ai.utils.formatters import ResponseFormatter
 logger = logging.getLogger(__name__)
 
 SITUATION_JOB_TYPE = "situation_analysis"
+
+
+class CurrentSituationGenerationError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "situation_analysis_failed",
+        http_status: int = 502,
+        job_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.http_status = http_status
+        self.job_id = job_id
 
 
 class CurrentSituationGenerator(BaseAIService):
@@ -33,11 +48,11 @@ class CurrentSituationGenerator(BaseAIService):
         self.response_parser = ResponseParser()
         self.response_formatter = ResponseFormatter()
 
-    def generate(self, raw_data: str, user_age: int, user) -> dict | None:
+    def generate(self, raw_data: str, user_age: int, user) -> dict:
         """
         Accept raw user input and return a structured situation analysis.
 
-        Returns a dict with keys 'data' and 'job_id' on success, or None on failure.
+        Returns a dict with keys 'data' and 'job_id' on success.
 
         FIX 1: 'row_data' → 'input_data' to match the actual model field.
         FIX 2: job_type uses the canonical constant, not a made-up uppercase string.
@@ -54,11 +69,10 @@ class CurrentSituationGenerator(BaseAIService):
         )
         print("Job created...")
 
-        # Mark as processing
-        job.status = "processing"
-        job.started_at = timezone.now()
+        job.user_raw_text = raw_data
         job.ai_model_used = self.provider.model
-        job.save(update_fields=["status", "started_at", "ai_model_used"])
+        job.save(update_fields=["user_raw_text", "ai_model_used", "updated_at"])
+        job.start_processing()
 
         try:
             print("Calling AI provider...")
@@ -77,25 +91,11 @@ class CurrentSituationGenerator(BaseAIService):
                 response.content
             )
 
-            # FIX: Persist the result on the job itself (output_data not row_data)
-            job.status = "completed"
-            job.output_data = parsed_data
-            job.raw_ai_response = response.content
-            job.user_raw_text = raw_data
-            job.completed_at = timezone.now()
-            if job.started_at:
-                job.processing_time_seconds = (
-                    job.completed_at - job.started_at
-                ).total_seconds()
-            job.save(
-                update_fields=[
-                    "status",
-                    "output_data",
-                    "raw_ai_response",
-                    "user_raw_text",
-                    "completed_at",
-                    "processing_time_seconds",
-                ]
+            job.mark_completed(
+                output_data=parsed_data,
+                raw_response=response.content,
+                model_used=self.provider.model,
+                tokens=response.token_used or 0,
             )
 
             print("AI situation analysis completed...")
@@ -108,13 +108,23 @@ class CurrentSituationGenerator(BaseAIService):
             )
 
         except Exception as exc:
-            # FIX: Always mark the job as failed so stuck-pending jobs are visible
             print("AI situation analysis failed...")
             logger.exception(
                 "AI situation analysis failed for user %s: %s", user.id, exc
             )
-            job.status = "failed"
-            job.error_message = str(exc)
-            job.completed_at = timezone.now()
-            job.save(update_fields=["status", "error_message", "completed_at"])
-            return None
+            job.mark_failed(error_message=str(exc))
+
+            if isinstance(exc, ImproperlyConfigured):
+                raise CurrentSituationGenerationError(
+                    str(exc),
+                    code="ai_provider_unavailable",
+                    http_status=503,
+                    job_id=str(job.id),
+                ) from exc
+
+            raise CurrentSituationGenerationError(
+                str(exc),
+                code="situation_analysis_failed",
+                http_status=502,
+                job_id=str(job.id),
+            ) from exc

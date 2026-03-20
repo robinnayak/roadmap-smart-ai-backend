@@ -20,6 +20,8 @@ from django.core.exceptions import (
 from django.db import DatabaseError
 import logging
 from common.ownership import get_owned_object_or_404
+from goal.serializers import _goal_attributes_defaults
+from ai.services.text_extraction import resolve_goal_attributes_field
 
 # from django.contrib.auth import get_user_model
 # User = get_user_model()
@@ -27,6 +29,7 @@ from common.ownership import get_owned_object_or_404
 # Create your views here.
 
 from .services.current_situation_generator import CurrentSituationGenerator
+from .services.current_situation_generator import CurrentSituationGenerationError
 from .providers.ollama_provider import OllamaProvider
 
 logger = logging.getLogger(__name__)
@@ -60,11 +63,10 @@ class AIProcessTextDataCurrentSituation(APIView):
             raw_data = request.data.get("raw_data")
             user_age = request.data.get("user_age")
 
+            personal_details = None
             if not raw_data:
                 try:
-                    personal_details = UserPersonalDetails.objects.get(
-                        user=request.user
-                    )
+                    personal_details = UserPersonalDetails.objects.get(user=request.user)
                     raw_data = personal_details.current_situation
                     user_age = personal_details.current_age
                 except UserPersonalDetails.DoesNotExist:
@@ -88,18 +90,23 @@ class AIProcessTextDataCurrentSituation(APIView):
             print(f"Job ID: {job_id}")  # Debug
 
             job = AIProcessingJob.objects.get(id=job_id)
-            situation_goal, created = UserCurrentSituationGoal.objects.get_or_create(
+            defaults = {
+                "ai_processing_job": job,
+                "current_situation": structured_data,
+                "current_role": structured_data.get("current_role"),
+                "age": structured_data.get("age"),
+                "key_skills": structured_data.get("key_skills"),
+                "main_goals": structured_data.get("main_goals"),
+                "time_availability": structured_data.get("time_availability"),
+                "constraints": structured_data.get("constraints"),
+                "priority_areas": structured_data.get("priority_areas"),
+            }
+            if personal_details is not None:
+                defaults["user_personal_details"] = personal_details
+
+            situation_goal, created = UserCurrentSituationGoal.objects.update_or_create(
                 ai_processing_job=job,
-                defaults={
-                    "current_situation": structured_data,
-                    "current_role": structured_data.get("current_role"),
-                    "age": structured_data.get("age"),
-                    "key_skills": structured_data.get("key_skills"),
-                    "main_goals": structured_data.get("main_goals"),
-                    "time_availability": structured_data.get("time_availability"),
-                    "constraints": structured_data.get("constraints"),
-                    "priority_areas": structured_data.get("priority_areas"),
-                },
+                defaults=defaults,
             )
             print(f"Situation & Goals saved for User {user.id}")  # Debug
             print(f"Situation & Goals created: {created}")  # Debug
@@ -107,6 +114,21 @@ class AIProcessTextDataCurrentSituation(APIView):
 
             return Response(result, status=200)
 
+        except CurrentSituationGenerationError as exc:
+            logger.warning(
+                "AI current-situation generation failed for user %s: %s",
+                request.user.id,
+                exc,
+            )
+            return Response(
+                {
+                    "status": "error",
+                    "code": exc.code,
+                    "message": str(exc),
+                    "job_id": exc.job_id,
+                },
+                status=exc.http_status,
+            )
         except ValueError as ve:
             return Response({"error": str(ve)}, status=400)
         except (TypeError, KeyError, AttributeError, DjangoValidationError) as exc:
@@ -208,6 +230,19 @@ class GoalAttributeExtractorAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            extracted_data = result.get("data", {})
+            target_field = resolve_goal_attributes_field(goal.primary_category)
+            target_payload = extracted_data.get(target_field, extracted_data)
+            defaults = _goal_attributes_defaults(target_field, target_payload)
+            goal_attributes, _ = GoalAttributes.objects.update_or_create(
+                goal=goal,
+                defaults=defaults,
+            )
+
+            result["persisted"] = True
+            result["goal_id"] = str(goal.id)
+            result["goal_attributes_id"] = str(goal_attributes.id)
+
             return Response(result, status=200)
         except ValueError as ve:
             return Response({"status": "error", "message": str(ve)}, status=400)
@@ -296,13 +331,17 @@ class GenerateMileStonesAPIView(APIView):
                     },
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
+
+            hierarchy_data = result.get("data", {})
+            partial_failure_count = hierarchy_data.get("partial_failure_count", 0)
             return Response(
                 {
-                    "status": "success",
+                    "status": "success_with_warnings" if partial_failure_count else "success",
                     "message": result.get("message", "Milestones generated successfully."),
-                    "data": result.get("data", {}),
+                    "data": hierarchy_data,
                     "job_id": result.get("job_id"),
+                    "partial_failure_count": partial_failure_count,
+                    "partial_failures": hierarchy_data.get("partial_failures", []),
                 },
                 status=status.HTTP_200_OK,
             )
@@ -378,6 +417,12 @@ class AIJobStatusAPIView(APIView):
                 "elapsedSeconds": elapsed_seconds,
                 "estimatedRemainingSeconds": eta_seconds,
                 "processingTimeSeconds": job.processing_time_seconds,
+                "partialFailureCount": (job.output_data or {}).get("partial_failure_count", 0)
+                if isinstance(job.output_data, dict)
+                else 0,
+                "partialFailures": (job.output_data or {}).get("partial_failures", [])
+                if isinstance(job.output_data, dict)
+                else [],
             },
             status=status.HTTP_200_OK,
         )

@@ -349,6 +349,12 @@ class UserPersonalDetailsSerializer(serializers.ModelSerializer):
 
 
 class NotificationSettingsSerializer(serializers.ModelSerializer):
+    preference_contract = serializers.CharField(
+        read_only=True,
+        default="preference_only",
+        help_text="These fields store user preferences only, not confirmed delivery subscriptions.",
+    )
+
     class Meta:
         model = NotificationSettings
         fields = (
@@ -359,4 +365,5 @@ class NotificationSettingsSerializer(serializers.ModelSerializer):
             "personalize_assistant",
             "push_notifications",
             "email_notifications",
+            "preference_contract",
         )

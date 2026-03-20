@@ -36,6 +36,12 @@ SENTIMENT_NEGATIVE_WORDS = {
 }
 
 JOURNAL_FIELDS = {"reflection", "struggle", "tomorrow_priority", "gratitude"}
+JOURNAL_PARSE_ORDER = ("reflection", "struggle", "tomorrow_priority", "gratitude")
+JOURNAL_SECTION_KEYWORDS = {
+    "struggle": {"stress", "stressed", "difficult", "hard", "problem", "struggle", "anxious", "worried", "tired", "late", "delay", "pressure"},
+    "tomorrow_priority": {"tomorrow", "plan", "planned", "next", "priority", "focus", "start", "finish", "complete"},
+    "gratitude": {"grateful", "thankful", "appreciate", "gratitude", "blessed"},
+}
 
 
 @dataclass
@@ -92,6 +98,44 @@ def clean_text_tokens(text: str) -> list[str]:
     normalized = re.sub(r"[^a-zA-Z0-9\s]", " ", text.lower())
     tokens = [token.strip() for token in normalized.split() if token.strip()]
     return [token for token in tokens if len(token) >= 3 and token not in STOPWORDS]
+
+
+def parse_full_day_input(full_day_input: str) -> dict[str, str]:
+    text = (full_day_input or "").strip()
+    if not text:
+        return {field: "" for field in JOURNAL_PARSE_ORDER}
+
+    raw_parts = [part.strip(" ,") for part in re.split(r"[.!?\n;]+|,\s*", text) if part.strip(" ,")]
+    sections = {field: [] for field in JOURNAL_PARSE_ORDER}
+    unassigned: list[str] = []
+
+    for part in raw_parts:
+        tokens = set(clean_text_tokens(part))
+        matched_field = None
+        for field in ("gratitude", "tomorrow_priority", "struggle"):
+            if tokens & JOURNAL_SECTION_KEYWORDS[field]:
+                matched_field = field
+                break
+        if matched_field is None:
+            unassigned.append(part)
+        else:
+            sections[matched_field].append(part)
+
+    if unassigned:
+        sections["reflection"].append(unassigned.pop(0))
+
+    for part in unassigned:
+        for field in JOURNAL_PARSE_ORDER:
+            if not sections[field]:
+                sections[field].append(part)
+                break
+        else:
+            sections["reflection"].append(part)
+
+    return {
+        field: " ".join(parts).strip()
+        for field, parts in sections.items()
+    }
 
 
 def build_field_word_counts(entry: JournalEntry) -> dict[str, int]:
@@ -289,7 +333,7 @@ def ai_or_fallback_summary_refine(text: str) -> str:
     return fallback_refine_summary(text)
 
 
-def consume_autophrase_quota(user, user_timezone: str) -> tuple[bool, int]:
+def consume_autophrase_quota(user, user_timezone: str, feature: str) -> tuple[bool, int, int]:
     local_today = today_for_timezone(user_timezone)
     profile, _ = Profile.objects.get_or_create(user=user)
     limit = 200 if profile.subscription_tier in {"pro_monthly", "lifetime"} else 20
@@ -298,14 +342,15 @@ def consume_autophrase_quota(user, user_timezone: str) -> tuple[bool, int]:
         usage, _ = AutoPhraseUsage.objects.select_for_update().get_or_create(
             user=user,
             usage_date=local_today,
+            feature=feature,
             defaults={"count": 0},
         )
         if usage.count >= limit:
-            return False, limit
+            return False, limit, 0
         usage.count += 1
         usage.save(update_fields=["count", "updated_at"])
 
-    return True, limit
+    return True, limit, max(limit - usage.count, 0)
 
 
 def make_snippet(raw_text: str, query: str, max_len: int = 150) -> str:

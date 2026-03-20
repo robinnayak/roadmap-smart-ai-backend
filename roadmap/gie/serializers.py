@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from gie.models import GIEAdaptationProposal, GIEPlanSnapshot, GIESession, GIESlotDefinition, GIESlotState, GIETurn
 from goal.services.create_contract import COMMITMENT_REQUIRED_FIELDS, list_missing_commitment_fields, required_goal_fields_error_details
+from goal.services.category_pillars import normalize_category_pillar
 
 
 class GIEGoalStartRequestSerializer(serializers.Serializer):
@@ -100,6 +101,17 @@ class GIEFinalizeRequestSerializer(serializers.Serializer):
             return {}
         if not isinstance(value, dict):
             raise serializers.ValidationError("goal_context must be a JSON object.")
+        if "category_pillar" in value:
+            raw_pillar = value.get("category_pillar")
+            if raw_pillar in ("", None):
+                value["category_pillar"] = None
+            else:
+                normalized_pillar = normalize_category_pillar(raw_pillar)
+                if normalized_pillar is None:
+                    raise serializers.ValidationError(
+                        {"category_pillar": "Use one of: Money, Health, Career, Learning, Relationships, Personal."}
+                    )
+                value["category_pillar"] = normalized_pillar
         missing_commitment_fields = [
             field
             for field in list_missing_commitment_fields(value)
@@ -124,6 +136,17 @@ class GIEAutofillRequestSerializer(serializers.Serializer):
             return {}
         if not isinstance(value, dict):
             raise serializers.ValidationError("goal_context must be a JSON object.")
+        if "category_pillar" in value:
+            raw_pillar = value.get("category_pillar")
+            if raw_pillar in ("", None):
+                value["category_pillar"] = None
+            else:
+                normalized_pillar = normalize_category_pillar(raw_pillar)
+                if normalized_pillar is None:
+                    raise serializers.ValidationError(
+                        {"category_pillar": "Use one of: Money, Health, Career, Learning, Relationships, Personal."}
+                    )
+                value["category_pillar"] = normalized_pillar
         return value
 
 

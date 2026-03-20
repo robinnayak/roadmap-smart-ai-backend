@@ -111,7 +111,10 @@ class GIEGoalStartAPIView(APIView):
         goal_text = request_serializer.validated_data["goal_text"]
         intake_analysis = GIEIntakeUnderstandingService.analyze_goal_text(goal_text)
         schema = GIEDynamicSchemaService.generate_schema(goal_text=goal_text, intake_analysis=intake_analysis)
-        dialogue_state = GIEDialogueManagerService.build_initial_state(schema=schema, intake_analysis=intake_analysis)
+        dialogue_state = GIEDialogueManagerService.build_initial_state(
+            schema=schema,
+            intake_analysis={**intake_analysis, "goal_text": goal_text},
+        )
 
         completeness = dialogue_state["completeness"]
         next_prompt = dialogue_state["next_prompt"]
@@ -205,15 +208,19 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
     @staticmethod
     def _get_latest_health_profile(*, user):
         try:
-            from routine.models import HealthProfile
+            from routine.health_profile_selector import get_effective_profile
         except Exception:
             return None
-        return HealthProfile.objects.filter(user=user).order_by("-updated_at").first()
+        return get_effective_profile(user=user)
 
     @classmethod
     def _sync_timeline_reframe_states(cls, *, session: GIESession, state_map: dict[str, GIESlotState], turn_index: int | None):
         required_definitions = list(session.slot_definitions.filter(required=True).order_by("key"))
-        pending_required_prompt = GIETurnPipelineService.select_next_prompt(required_definitions, state_map)
+        pending_required_prompt = GIETurnPipelineService.select_next_prompt(
+            required_definitions,
+            state_map,
+            goal_text=session.goal_text,
+        )
 
         # Only evaluate timeline realism once required slots are complete.
         if pending_required_prompt:
@@ -333,7 +340,11 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
         slot_states = list(session.slot_states.all().order_by("slot_key"))
         required_definitions = list(session.slot_definitions.filter(required=True).order_by("key"))
         slot_map = {state.slot_key: state for state in slot_states}
-        pending_required_prompt = GIETurnPipelineService.select_next_prompt(required_definitions, slot_map)
+        pending_required_prompt = GIETurnPipelineService.select_next_prompt(
+            required_definitions,
+            slot_map,
+            goal_text=session.goal_text,
+        )
         if pending_required_prompt:
             feasibility_state, _ = GIESlotState.objects.update_or_create(
                 session=session,
@@ -442,6 +453,7 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
             next_prompt = GIETurnPipelineService.select_next_prompt_with_timeline_reframe(
                 required_definitions,
                 slot_states_by_key,
+                goal_text=session_locked.goal_text,
             )
             target_slot_key = next_prompt["target_slot_key"] if next_prompt else None
             if target_slot_key == TIMELINE_REFRAME_DECISION_KEY:
@@ -487,6 +499,7 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
             followup_prompt = GIETurnPipelineService.select_next_prompt_with_timeline_reframe(
                 required_definitions,
                 refreshed_state_map,
+                goal_text=session_locked.goal_text,
             )
             timeline_blocking = self._is_timeline_reframe_unresolved(refreshed_state_map)
             session_status = GIESession.STATUS_READY_TO_FINALIZE
@@ -551,7 +564,11 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
         completeness = GIETurnPipelineService.compute_completeness_from_states(all_states)
         required_definitions = list(session.slot_definitions.filter(required=True).order_by("key"))
         state_map = {state.slot_key: state for state in all_states}
-        next_prompt = GIETurnPipelineService.select_next_prompt_with_timeline_reframe(required_definitions, state_map)
+        next_prompt = GIETurnPipelineService.select_next_prompt_with_timeline_reframe(
+            required_definitions,
+            state_map,
+            goal_text=session.goal_text,
+        )
         session_status = GIESession.STATUS_READY_TO_FINALIZE
         if completeness["filled_required_slot_count"] != completeness["required_slot_count"] or self._is_timeline_reframe_unresolved(state_map):
             session_status = GIESession.STATUS_ACTIVE

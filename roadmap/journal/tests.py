@@ -7,7 +7,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from authentication.models import CustomUser, Profile
-from journal.models import JournalEntry
+from journal.models import AutoPhraseUsage, JournalEntry
 from journal.utils import build_locked_at
 
 
@@ -163,6 +163,32 @@ class JournalApiTests(APITestCase):
         self.assertEqual(response.data["entry"]["full_day_input"], payload["full_day_input"])
         self.assertEqual(response.data["entry"]["parsed_via"], "ollama_frontend")
 
+    def test_full_day_input_backfills_blank_structured_fields(self):
+        date_value = timezone.localdate().isoformat()
+        payload = {
+            "full_day_input": "Morning study progress. Difficult client meeting. Tomorrow finish the proposal first. Thankful for my family at dinner.",
+        }
+        response = self.client.put(f"/journal/entries/?date={date_value}", payload, format="json", **self.base_headers)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        entry = response.data["entry"]
+        self.assertIn("Morning study progress", entry["reflection_raw"])
+        self.assertIn("Difficult client meeting", entry["struggle_raw"])
+        self.assertIn("Tomorrow finish the proposal first", entry["tomorrow_priority_raw"])
+        self.assertIn("Thankful for my family at dinner", entry["gratitude_raw"])
+        self.assertEqual(entry["parsed_via"], "backend_heuristic")
+        self.assertIsNotNone(entry["parsed_at"])
+
+    def test_parsed_via_rejects_unknown_values(self):
+        date_value = timezone.localdate().isoformat()
+        response = self.client.put(
+            f"/journal/entries/?date={date_value}",
+            {"reflection_raw": "test", "parsed_via": "unknown_parser"},
+            format="json",
+            **self.base_headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("parsed_via", response.data)
+
     @patch("journal.views.ai_or_fallback_summary_refine")
     def test_refine_summary_success(self, mock_refine):
         mock_refine.return_value = "I am grateful for this beautiful life. Today I made strong progress."
@@ -177,6 +203,8 @@ class JournalApiTests(APITestCase):
             response.data["refined_text"],
             "I am grateful for this beautiful life. Today I made strong progress.",
         )
+        self.assertEqual(response.data["daily_limit"], 20)
+        self.assertEqual(response.data["remaining_today"], 19)
         mock_refine.assert_called_once()
 
     def test_refine_summary_rejects_blank_text(self):
@@ -206,4 +234,35 @@ class JournalApiTests(APITestCase):
         )
         self.assertEqual(blocked.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
         self.assertEqual(blocked.data["code"], "summary_refine_rate_limited")
+
+    def test_auto_phrase_and_summary_refine_have_independent_quotas(self):
+        for idx in range(20):
+            ok = self.client.post(
+                "/journal/auto-phrase/",
+                {"field": "reflection", "text": f"raw text {idx}"},
+                format="json",
+                **self.base_headers,
+            )
+            self.assertEqual(ok.status_code, status.HTTP_200_OK)
+
+        blocked_auto_phrase = self.client.post(
+            "/journal/auto-phrase/",
+            {"field": "reflection", "text": "blocked"},
+            format="json",
+            **self.base_headers,
+        )
+        self.assertEqual(blocked_auto_phrase.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+        summary_response = self.client.post(
+            "/journal/refine-summary/",
+            {"text": "i am still allowed here"},
+            format="json",
+            **self.base_headers,
+        )
+        self.assertEqual(summary_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(summary_response.data["remaining_today"], 19)
+        self.assertEqual(
+            AutoPhraseUsage.objects.filter(user=self.user, usage_date=timezone.localdate()).count(),
+            2,
+        )
 

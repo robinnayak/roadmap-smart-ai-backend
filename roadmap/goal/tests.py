@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -11,10 +12,11 @@ from authentication.models import CustomUser
 from ai.models import AIProcessingJob
 from ai.providers.base import AIResponse, BaseAIProvider
 from ai.utils.validators import normalize_task_type
-from goal.models import Goal, GoalCommitmentRecord, Milestone, SubGoal, Task, GoalLink, UserFinancialProfile, FinancialProgressEntry
+from goal.models import Goal, GoalAttributes, GoalCommitmentRecord, Milestone, SubGoal, Task, GoalLink, UserFinancialProfile, FinancialProgressEntry
 from goal.serializers import GoalSerializer
 from goal.services.goal_domain import build_goal_seed_data
-from goal.services.category_resolver import resolve_category
+from goal.services.category_resolver import GOAL_CATEGORIES, resolve_category
+from goal.services.category_pillars import canonical_to_pillar, pillar_to_default_canonical
 from goal.services.contract_template import GoalContractTemplateService
 from goal.services.financial_intelligence import build_financial_plan_summary
 from goal.services.timeline_ai_provider import (
@@ -304,6 +306,50 @@ class GoalCreateContractValidationTests(APITestCase):
         self.assertEqual(payload["why_do_i_want_this"], "Personal growth")
         self.assertEqual(payload["specific_measurable_target"], "Lead two projects by Q4")
         self.assertEqual(payload["why_it_matters"], ["Relevance", "Impact"])
+
+    @patch("ai.services.text_extraction.GoalAttributeExtractor.extract_goal_attributes")
+    def test_extract_and_save_attributes_stores_inner_payload_in_financial_field(self, mock_extract):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Emergency Fund",
+            primary_category="finance",
+            target_date=timezone.localdate() + timedelta(days=90),
+        )
+        mock_extract.return_value = {
+            "status": "success",
+            "data": {
+                "financial_data": {
+                    "target_amount": 500000,
+                    "current_amount": 100000,
+                }
+            },
+        }
+
+        serializer = GoalSerializer(context={"request": type("Req", (), {"user": self.user})()})
+        saved = serializer._extract_and_save_attributes(goal, "Save 500000", self.user)
+
+        self.assertTrue(saved)
+        goal.refresh_from_db()
+        self.assertEqual(
+            goal.attributes.financial_data,
+            {
+                "target_amount": 500000,
+                "current_amount": 100000,
+            },
+        )
+        self.assertIsNone(goal.attributes.personal_data)
+        self.assertIsNone(goal.attributes.career_data)
+        self.assertIsNone(goal.attributes.health_data)
+
+    def test_goal_save_without_goal_attributes_input_does_not_create_placeholder_attributes(self):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="No Attribute Signal Goal",
+            primary_category="career",
+            target_date=timezone.localdate() + timedelta(days=30),
+        )
+
+        self.assertFalse(GoalAttributes.objects.filter(goal=goal).exists())
 
 
 class GoalContractTemplateServiceTests(APITestCase):
@@ -865,8 +911,15 @@ class CreateGoalWithHierarchyConfigFallbackTests(APITestCase):
             "goal_attributes_input": "Learn machine learning fundamentals in 60 days",
         }
 
-    @patch("goal.services.goal_domain.list_missing_commitment_fields", return_value=["wave1_bypass_for_existing_async_tests"])
-    def test_async_create_returns_failed_job_when_ai_runtime_not_configured(self):
+    @patch("goal.services.create_contract.list_missing_commitment_fields", return_value=["wave1_bypass_for_existing_async_tests"])
+    @patch("goal.views.build_ai_runtime_error_message", return_value="AI runtime is not configured. Missing environment variable(s): OLLAMA_HOST. Set them in backend environment and restart the server.")
+    @patch("goal.views.get_missing_ai_env_vars", return_value=["OLLAMA_HOST"])
+    def test_async_create_returns_failed_job_when_ai_runtime_not_configured(
+        self,
+        _mocked_commitment_bypass,
+        _mock_missing_ai_env,
+        _mock_error_message,
+    ):
         with patch.dict("os.environ", {"OLLAMA_MODEL": "", "OLLAMA_HOST": ""}, clear=False):
             response = self.client.post(
                 "/goal/create-with-hierarchy/",
@@ -885,8 +938,15 @@ class CreateGoalWithHierarchyConfigFallbackTests(APITestCase):
         self.assertEqual(job.status, "failed")
         self.assertIn("Missing environment variable(s): OLLAMA_HOST", job.error_message)
 
-    @patch("goal.services.goal_domain.list_missing_commitment_fields", return_value=["wave1_bypass_for_existing_async_tests"])
-    def test_sync_create_returns_created_goal_with_hierarchy_unavailable_message(self):
+    @patch("goal.services.create_contract.list_missing_commitment_fields", return_value=["wave1_bypass_for_existing_async_tests"])
+    @patch("goal.views.build_ai_runtime_error_message", return_value="AI runtime is not configured. Missing environment variable(s): OLLAMA_HOST. Set them in backend environment and restart the server.")
+    @patch("goal.views.get_missing_ai_env_vars", return_value=["OLLAMA_HOST"])
+    def test_sync_create_returns_created_goal_with_hierarchy_unavailable_message(
+        self,
+        _mocked_commitment_bypass,
+        _mock_missing_ai_env,
+        _mock_error_message,
+    ):
         with patch.dict("os.environ", {"OLLAMA_MODEL": "", "OLLAMA_HOST": ""}, clear=False):
             response = self.client.post(
                 "/goal/create-with-hierarchy/?sync=true",
@@ -921,7 +981,7 @@ class CreateGoalWithHierarchyAsyncCommitSafetyTests(APITestCase):
 
     @patch("goal.views.get_missing_ai_env_vars", return_value=[])
     @patch("goal.views.threading.Thread")
-    @patch("goal.services.goal_domain.list_missing_commitment_fields", return_value=["wave1_bypass_for_existing_async_tests"])
+    @patch("goal.services.create_contract.list_missing_commitment_fields", return_value=["wave1_bypass_for_existing_async_tests"])
     def test_async_worker_starts_only_after_transaction_commit(
         self,
         _mocked_commitment_bypass,
@@ -2894,6 +2954,19 @@ class TimelineInsightServiceWaveOneTests(APITestCase):
         self.assertIsInstance(payload["missing_elements"], list)
         self.assertIsInstance(payload["conflicts"], list)
 
+    def test_health_profile_lookup_uses_active_profile(self):
+        from routine.models import HealthProfile
+
+        first_profile = HealthProfile.objects.create(user=self.user, stress_level="high")
+        active_profile = HealthProfile.objects.create(user=self.user, stress_level="low")
+        first_profile.refresh_from_db()
+        active_profile.refresh_from_db()
+
+        resolved = self.service._get_latest_health_profile(user=self.user)
+        self.assertFalse(first_profile.is_active)
+        self.assertTrue(active_profile.is_active)
+        self.assertEqual(resolved.id, active_profile.id)
+
 
 class TimelineInsightServiceWaveTwoTests(APITestCase):
     def setUp(self):
@@ -3217,3 +3290,274 @@ class TimelineInsightEndpointTests(APITestCase):
 
         self.goal.refresh_from_db()
         self.assertEqual(self.goal.timeline_insight_payload, second_response.data)
+
+
+class GoalCategoryNormalizationContractTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="goal-category-normalization@test.com",
+            password="Password@123",
+        )
+        UserFinancialProfile.objects.create(
+            user=self.user,
+            employment_type="salaried_employee",
+            monthly_income_range="50k_1l",
+            monthly_surplus_range="10k_30k",
+            primary_skill_area="technology",
+            total_current_savings_range="5l_20l",
+        )
+        self.client.force_authenticate(self.user)
+
+    def test_create_accepts_legacy_financial_and_persists_finance(self):
+        payload = full_commitment_payload(user=self.user)
+        payload.update(
+            {
+                "title": "Emergency fund",
+                "description": "Save money for emergencies.",
+                "why_it_matters": ["Security"],
+                "why_do_i_want_this": "I want a safer financial buffer for emergencies.",
+                "specific_measurable_target": "Save 200000 for a dedicated emergency fund.",
+                "primary_category": "financial",
+                "priority": "medium",
+                "target_date": str(timezone.localdate() + timedelta(days=180)),
+                "financial_target_amount": "200000.00",
+                "financial_current_saved": "50000.00",
+                "financial_goal_type": "emergency_fund",
+                "financial_timeline_flexibility": "fixed",
+                "financial_proceed_anyway": True,
+            }
+        )
+        response = self.client.post(
+            "/goal/",
+            data=payload,
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        goal = Goal.objects.get(user=self.user, title="Emergency fund")
+        self.assertEqual(goal.primary_category, "finance")
+
+    def test_patch_accepts_legacy_health_and_persists_fitness(self):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Get stronger",
+            description="Lift weights consistently.",
+            primary_category="career",
+            target_date=timezone.localdate() + timedelta(days=90),
+        )
+
+        response = self.client.patch(
+            f"/goal/goals/{goal.id}/",
+            data={"primary_category": "health"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        goal.refresh_from_db()
+        self.assertEqual(goal.primary_category, "fitness")
+
+    def test_patch_accepts_legacy_personal_and_persists_productivity(self):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Get organized",
+            description="Build a better weekly planning system.",
+            primary_category="career",
+            target_date=timezone.localdate() + timedelta(days=60),
+        )
+
+        response = self.client.patch(
+            f"/goal/goals/{goal.id}/",
+            data={"primary_category": "personal"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        goal.refresh_from_db()
+        self.assertEqual(goal.primary_category, "productivity")
+
+    def test_list_filter_accepts_legacy_financial_query_and_matches_canonical_rows(self):
+        Goal.objects.create(
+            user=self.user,
+            title="Finance Goal",
+            primary_category="finance",
+            target_date=timezone.localdate() + timedelta(days=120),
+        )
+        Goal.objects.create(
+            user=self.user,
+            title="Career Goal",
+            primary_category="career",
+            target_date=timezone.localdate() + timedelta(days=120),
+        )
+
+        response = self.client.get("/goal/goals/?category=financial")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["goals"][0]["primary_category"], "finance")
+
+
+class GoalCategoryPillarContractTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="goal-category-pillars@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+
+    def _full_payload(self, **overrides):
+        payload = full_commitment_payload(user=self.user)
+        payload.update(
+            {
+                "title": "Pillar Contract Goal",
+                "description": "Ship the next version with clear milestones.",
+                "why_it_matters": ["Momentum"],
+                "why_do_i_want_this": "I want consistent execution.",
+                "specific_measurable_target": "Release one stable version in 90 days.",
+                "primary_category": "career",
+                "priority": "medium",
+                "target_date": str(timezone.localdate() + timedelta(days=90)),
+            }
+        )
+        payload.update(overrides)
+        return payload
+
+    def test_canonical_to_pillar_mapping_is_complete_for_all_goal_categories(self):
+        for category in GOAL_CATEGORIES:
+            pillar = canonical_to_pillar(category)
+            self.assertIn(
+                pillar,
+                {"Money", "Health", "Career", "Learning", "Relationships", "Personal"},
+            )
+
+    def test_pillar_to_default_canonical_mapping_matches_contract(self):
+        self.assertEqual(pillar_to_default_canonical("Money"), "finance")
+        self.assertEqual(pillar_to_default_canonical("Health"), "fitness")
+        self.assertEqual(pillar_to_default_canonical("Career"), "career")
+        self.assertEqual(pillar_to_default_canonical("Learning"), "learning")
+        self.assertEqual(pillar_to_default_canonical("Relationships"), "relationships")
+        self.assertEqual(pillar_to_default_canonical("Personal"), "productivity")
+
+    def test_create_with_only_category_pillar_maps_to_default_canonical(self):
+        payload = self._full_payload()
+        payload.pop("primary_category")
+        payload["category_pillar"] = "Career"
+
+        response = self.client.post("/goal/", data=payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        goal = Goal.objects.get(user=self.user, title="Pillar Contract Goal")
+        self.assertEqual(goal.primary_category, "career")
+        self.assertEqual(response.data["category_pillar"], "Career")
+
+    def test_create_prefers_primary_category_when_both_primary_and_pillar_provided(self):
+        payload = self._full_payload(
+            primary_category="learning",
+            category_pillar="Money",
+        )
+        payload["contract_snapshot"] = full_commitment_payload(
+            user=self.user,
+            goal_data={
+                "title": payload["title"],
+                "description": payload["description"],
+                "why_it_matters": payload["why_it_matters"],
+                "why_do_i_want_this": payload["why_do_i_want_this"],
+                "specific_measurable_target": payload["specific_measurable_target"],
+                "primary_category": "learning",
+                "target_date": payload["target_date"],
+            },
+            signed_name=payload["signed_name"],
+            signed_at=payload["signed_at"],
+        )["contract_snapshot"]
+
+        response = self.client.post("/goal/", data=payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        goal = Goal.objects.get(user=self.user, title="Pillar Contract Goal")
+        self.assertEqual(goal.primary_category, "learning")
+        self.assertEqual(response.data["category_pillar"], "Learning")
+
+    def test_patch_with_only_category_pillar_updates_canonical_category(self):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Patch Pillar Goal",
+            description="Initial",
+            primary_category="career",
+            target_date=timezone.localdate() + timedelta(days=45),
+        )
+
+        response = self.client.patch(
+            f"/goal/goals/{goal.id}/",
+            data={"category_pillar": "Health"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        goal.refresh_from_db()
+        self.assertEqual(goal.primary_category, "fitness")
+        self.assertEqual(response.data["category_pillar"], "Health")
+
+    def test_payloads_include_category_pillar_for_list_detail_seed_and_hierarchy(self):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Payload Pillar Goal",
+            description="Payload checks",
+            primary_category="relationships",
+            status="in_progress",
+            target_date=timezone.localdate() + timedelta(days=60),
+        )
+
+        list_response = self.client.get("/goal/goals/")
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data["goals"][0]["category_pillar"], "Relationships")
+
+        detail_response = self.client.get(f"/goal/goals/{goal.id}/")
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data["goal"]["category_pillar"], "Relationships")
+
+        hierarchy_response = self.client.get(f"/goal/goals/{goal.id}/hierarchy/")
+        self.assertEqual(hierarchy_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(hierarchy_response.data["goal"]["category_pillar"], "Relationships")
+
+        seed_payload = build_goal_seed_data(goal)
+        self.assertEqual(seed_payload["category_pillar"], "Relationships")
+
+
+class GoalCategoryMigrationTests(TransactionTestCase):
+    migrate_from = ("goal", "0013_rename_goal_commitm_user_id_ef18db_idx_goal_commit_user_id_ba780e_idx")
+    migrate_to = ("goal", "0014_normalize_legacy_goal_categories")
+
+    def setUp(self):
+        super().setUp()
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
+
+        self.executor = MigrationExecutor(connection)
+        self.executor.migrate([self.migrate_from])
+
+        old_apps = self.executor.loader.project_state([self.migrate_from]).apps
+        User = old_apps.get_model("authentication", "CustomUser")
+        Goal = old_apps.get_model("goal", "Goal")
+        user = User.objects.create(email="migration-goal@test.com", username="migration-goal@test.com")
+        Goal.objects.create(user=user, title="Legacy Financial", primary_category="financial")
+        Goal.objects.create(user=user, title="Legacy Health", primary_category="health")
+        Goal.objects.create(user=user, title="Legacy Personal", primary_category="personal")
+        Goal.objects.create(user=user, title="Canonical Career", primary_category="career")
+
+    def test_migration_normalizes_legacy_categories(self):
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
+
+        self.executor = MigrationExecutor(connection)
+        self.executor.migrate([self.migrate_to])
+        apps = self.executor.loader.project_state([self.migrate_to]).apps
+        Goal = apps.get_model("goal", "Goal")
+
+        categories = {
+            goal.title: goal.primary_category
+            for goal in Goal.objects.all()
+        }
+
+        self.assertEqual(categories["Legacy Financial"], "finance")
+        self.assertEqual(categories["Legacy Health"], "fitness")
+        self.assertEqual(categories["Legacy Personal"], "productivity")
+        self.assertEqual(categories["Canonical Career"], "career")

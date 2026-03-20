@@ -17,8 +17,9 @@ def _resolve_client_class():
 
         Client = OllamaClient
     return Client
-from common.env import get_required_env
+
 from ai.config import (
+    get_ollama_host,
     get_ollama_model,
     get_ollama_request_timeout_seconds,
     get_ollama_max_retries,
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 class OllamaProvider(BaseAIProvider):
     def __init__(self, host=None, model=None, temperature=0.7, max_tokens=None, stream=False):
-        resolved_host = host or get_required_env("OLLAMA_HOST")
+        resolved_host = host or get_ollama_host()
         resolved_model = model or get_ollama_model()
         super().__init__(resolved_model, temperature, max_tokens, stream)
         self.host = resolved_host

@@ -154,6 +154,14 @@ class UserPersonalDetails(models.Model):
         return f"{self.user.email} - Personal details"
 
 class NotificationSettings(models.Model):
+    """
+    Stored notification preferences only.
+
+    These flags are launch-stage user preferences consumed by currently
+    implemented features such as channel gating. They are not confirmations that
+    a general push/email notification delivery subsystem exists.
+    """
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(
         CustomUser,
@@ -162,7 +170,10 @@ class NotificationSettings(models.Model):
     )
     
     #master toggle 
-    notifications_enabled = models.BooleanField(default=True)
+    notifications_enabled = models.BooleanField(
+        default=True,
+        help_text="Master preference toggle only; this does not guarantee notification delivery.",
+    )
     
     #Notification Types
     routine_remainders = models.BooleanField(default=True)
@@ -172,8 +183,14 @@ class NotificationSettings(models.Model):
     personalize_assistant = models.BooleanField(default=True)
     
     #channels
-    push_notifications = models.BooleanField(default=True)
-    email_notifications = models.BooleanField(default=False)
+    push_notifications = models.BooleanField(
+        default=True,
+        help_text="Preferred push channel if a feature supports it; not a delivery subscription.",
+    )
+    email_notifications = models.BooleanField(
+        default=False,
+        help_text="Preferred email channel if a feature supports it; not a delivery subscription.",
+    )
     
     def __str__(self):
         return f"{self.user.email}'s Notfication settings"

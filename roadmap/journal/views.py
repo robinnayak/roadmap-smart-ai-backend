@@ -8,7 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from journal.models import JournalEntry, WordCloudAggregate
+from journal.models import AutoPhraseUsage, JournalEntry, WordCloudAggregate
 from journal.serializers import AutoPhraseSerializer, JournalEntrySerializer, RefineSummarySerializer
 from journal.utils import (
     apply_search_filters,
@@ -20,6 +20,7 @@ from journal.utils import (
     enrich_entry,
     is_locked,
     make_snippet,
+    parse_full_day_input,
     recalc_wordcloud_for_user,
     resolve_search_text,
     resolve_user_timezone,
@@ -146,6 +147,8 @@ class JournalEntryByDateAPIView(APIView):
                     locked_at=build_locked_at(entry_date, user_tz),
                 )
 
+            self._apply_full_day_parsing(entry)
+
             enrich_entry(entry)
             entry.save(
                 update_fields=[
@@ -181,13 +184,47 @@ class JournalEntryByDateAPIView(APIView):
             status=status.HTTP_200_OK,
         )
 
+    @staticmethod
+    def _apply_full_day_parsing(entry: JournalEntry):
+        if not (entry.full_day_input or "").strip():
+            if entry.parsed_via == JournalEntry.PARSED_VIA_BACKEND_HEURISTIC:
+                entry.parsed_via = JournalEntry.PARSED_VIA_NONE
+                entry.parsed_at = None
+            return
+
+        field_map = {
+            "reflection": "reflection_raw",
+            "struggle": "struggle_raw",
+            "tomorrow_priority": "tomorrow_priority_raw",
+            "gratitude": "gratitude_raw",
+        }
+        blank_fields = [field for field, attr in field_map.items() if not getattr(entry, attr).strip()]
+        if not blank_fields:
+            return
+
+        parsed_sections = parse_full_day_input(entry.full_day_input)
+        populated_any = False
+        for field in blank_fields:
+            parsed_value = parsed_sections.get(field, "").strip()
+            if parsed_value:
+                setattr(entry, field_map[field], parsed_value)
+                populated_any = True
+
+        if populated_any:
+            entry.parsed_via = JournalEntry.PARSED_VIA_BACKEND_HEURISTIC
+            entry.parsed_at = timezone.now()
+
 
 class JournalAutoPhraseAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         user_tz = resolve_user_timezone(request, request.user)
-        allowed, limit = consume_autophrase_quota(request.user, user_tz)
+        allowed, limit, remaining = consume_autophrase_quota(
+            request.user,
+            user_tz,
+            AutoPhraseUsage.FEATURE_AUTO_PHRASE,
+        )
         if not allowed:
             return Response(
                 {
@@ -209,6 +246,8 @@ class JournalAutoPhraseAPIView(APIView):
             {
                 "polished": result.polished,
                 "confidence": result.confidence,
+                "daily_limit": limit,
+                "remaining_today": remaining,
             },
             status=status.HTTP_200_OK,
         )
@@ -219,7 +258,11 @@ class JournalSummaryRefineAPIView(APIView):
 
     def post(self, request):
         user_tz = resolve_user_timezone(request, request.user)
-        allowed, limit = consume_autophrase_quota(request.user, user_tz)
+        allowed, limit, remaining = consume_autophrase_quota(
+            request.user,
+            user_tz,
+            AutoPhraseUsage.FEATURE_SUMMARY_REFINE,
+        )
         if not allowed:
             return Response(
                 {
@@ -236,6 +279,8 @@ class JournalSummaryRefineAPIView(APIView):
         return Response(
             {
                 "refined_text": refined_text,
+                "daily_limit": limit,
+                "remaining_today": remaining,
             },
             status=status.HTTP_200_OK,
         )

@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from rest_framework import serializers
@@ -6,6 +6,7 @@ from rest_framework import serializers
 from .models import Event
 
 WEEKDAY_VALUES = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+SUPPORTED_RECURRENCE_FREQUENCIES = ("daily", "weekly", "monthly")
 
 
 def _validate_timezone_name(value: str) -> str:
@@ -17,7 +18,10 @@ def _validate_timezone_name(value: str) -> str:
 
 
 class RecurrenceSerializer(serializers.Serializer):
-    frequency = serializers.ChoiceField(choices=("daily", "weekly", "monthly"))
+    frequency = serializers.ChoiceField(
+        choices=SUPPORTED_RECURRENCE_FREQUENCIES,
+        help_text="Supported recurrence frequencies are daily, weekly, and monthly only. Yearly recurrence and exceptions are not supported.",
+    )
     interval = serializers.IntegerField(min_value=1, max_value=30)
     by_weekday = serializers.ListField(
         child=serializers.ChoiceField(choices=WEEKDAY_VALUES),
@@ -50,6 +54,10 @@ class RoutineConstraintSerializer(serializers.Serializer):
 
 
 class EventSerializer(serializers.ModelSerializer):
+    is_all_day = serializers.BooleanField(
+        required=False,
+        help_text="When true, start_at and end_at are normalized to local-day boundaries in the event timezone.",
+    )
     recurrence = serializers.JSONField(required=False, allow_null=True)
     routine_constraint = RoutineConstraintSerializer(required=False)
 
@@ -79,6 +87,7 @@ class EventSerializer(serializers.ModelSerializer):
 
         start_at = attrs.get("start_at", getattr(instance, "start_at", None))
         end_at = attrs.get("end_at", getattr(instance, "end_at", None))
+        is_all_day = attrs.get("is_all_day", getattr(instance, "is_all_day", False))
         event_type = attrs.get("event_type", getattr(instance, "event_type", None))
         timezone_name = attrs.get("timezone", getattr(instance, "timezone", None))
         recurrence = attrs.get("recurrence", getattr(instance, "recurrence", None))
@@ -99,6 +108,13 @@ class EventSerializer(serializers.ModelSerializer):
 
         start_local = start_at.astimezone(event_tz)
         end_local = end_at.astimezone(event_tz)
+
+        if is_all_day:
+            start_local = datetime.combine(start_local.date(), time.min, tzinfo=event_tz)
+            end_local = datetime.combine(end_local.date(), time.max, tzinfo=event_tz)
+            attrs["start_at"] = start_local.astimezone(start_at.tzinfo)
+            attrs["end_at"] = end_local.astimezone(end_at.tzinfo)
+
         if end_local <= start_local:
             raise serializers.ValidationError({"end_at": "end_at must be greater than start_at in event timezone."})
 

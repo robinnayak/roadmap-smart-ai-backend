@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Any
 
 from ai.config import get_journeybook_model, get_ollama_host
+
+
+@dataclass
+class GenerationResult:
+    content: str
+    content_source: str
+    provider: str | None
+    model: str | None
+    error_summary: str | None = None
+
+    def to_metadata(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 class AIGenerator:
@@ -17,47 +30,90 @@ class AIGenerator:
 
     def __init__(self):
         self.provider = None
+        self.provider_name = None
+        self.model_name = get_journeybook_model()
         try:
             from ai.providers.ollama_provider import OllamaProvider
 
             self.provider = OllamaProvider(
                 host=get_ollama_host(),
-                model=get_journeybook_model(),
+                model=self.model_name,
                 temperature=0.45,
             )
+            self.provider_name = "ollama"
         except Exception:
             self.provider = None
+            self.provider_name = "ollama"
 
     def generate_chapter(self, chapter_config: dict[str, Any], metrics: dict[str, Any], book_type: str) -> str:
+        return self.generate_chapter_result(chapter_config, metrics, book_type).content
+
+    def generate_chapter_result(
+        self,
+        chapter_config: dict[str, Any],
+        metrics: dict[str, Any],
+        book_type: str,
+    ) -> GenerationResult:
         chapter_id = chapter_config.get("id", "ch1")
         chapter_title = chapter_config.get("title", "Journey Chapter")
 
         prompt = self._build_chapter_prompt(chapter_id, chapter_title, metrics, book_type)
-        text = self._generate_with_ollama(prompt, self.SYSTEM_PROMPT)
+        text, error_summary = self._generate_with_ollama(prompt, self.SYSTEM_PROMPT)
         if text:
-            return text
-        return ChapterFallbacks.get(chapter_id, metrics, book_type)
+            return GenerationResult(
+                content=text,
+                content_source="ai",
+                provider=self.provider_name,
+                model=self.model_name,
+            )
+        return GenerationResult(
+            content=ChapterFallbacks.get(chapter_id, metrics, book_type),
+            content_source="fallback",
+            provider=self.provider_name,
+            model=self.model_name,
+            error_summary=error_summary,
+        )
 
     def generate_motivational_page(self, page_type: str, metrics: dict[str, Any]) -> str:
+        return self.generate_motivational_page_result(page_type, metrics).content
+
+    def generate_motivational_page_result(
+        self,
+        page_type: str,
+        metrics: dict[str, Any],
+    ) -> GenerationResult:
         prompt = self._build_motivational_prompt(page_type, metrics)
         system_prompt = (
             "Write a compassionate motivational page for a personal journey book. "
             "Use concrete facts from the provided data. Keep it 300-500 words."
         )
-        text = self._generate_with_ollama(prompt, system_prompt)
+        text, error_summary = self._generate_with_ollama(prompt, system_prompt)
         if text:
-            return text
-        return MotivationalFallbacks.get(page_type, metrics)
+            return GenerationResult(
+                content=text,
+                content_source="ai",
+                provider=self.provider_name,
+                model=self.model_name,
+            )
+        return GenerationResult(
+            content=MotivationalFallbacks.get(page_type, metrics),
+            content_source="fallback",
+            provider=self.provider_name,
+            model=self.model_name,
+            error_summary=error_summary,
+        )
 
-    def _generate_with_ollama(self, prompt: str, system_prompt: str) -> str | None:
+    def _generate_with_ollama(self, prompt: str, system_prompt: str) -> tuple[str | None, str | None]:
         if not self.provider:
-            return None
+            return None, "provider_not_configured"
         try:
             response = self.provider.generate_response(prompt=prompt, system_prompt=system_prompt)
             content = (response.content or "").strip()
-            return content or None
-        except Exception:
-            return None
+            if content:
+                return content, None
+            return None, "empty_provider_response"
+        except Exception as exc:
+            return None, exc.__class__.__name__
 
     @staticmethod
     def _build_chapter_prompt(

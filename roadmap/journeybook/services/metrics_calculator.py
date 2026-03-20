@@ -399,8 +399,6 @@ class MetricsCalculator:
 
         milestones = [m for m in milestones if m.get("achieved_date")]
         milestones.sort(key=lambda x: x["achieved_date"])
-
-        self._upsert_derived_milestones(milestones)
         return milestones
 
     @staticmethod
@@ -493,34 +491,3 @@ class MetricsCalculator:
         except (ImportError, Exception):
             return None
 
-    def _upsert_derived_milestones(self, milestones: list[dict[str, Any]]) -> None:
-        if not self.user or not milestones:
-            return
-        try:
-            from journeybook.models import DerivedMilestone
-        except Exception:
-            return
-
-        for milestone in milestones:
-            trigger_type = milestone["trigger_type"]
-            defaults = {
-                "label": milestone["label"],
-                "achieved_date": milestone["achieved_date"],
-                "category": milestone.get("category", "personal"),
-            }
-            try:
-                obj, created = DerivedMilestone.objects.get_or_create(
-                    user=self.user,
-                    trigger_type=trigger_type,
-                    defaults=defaults,
-                )
-                if not created:
-                    updated = False
-                    for key, value in defaults.items():
-                        if getattr(obj, key) != value:
-                            setattr(obj, key, value)
-                            updated = True
-                    if updated:
-                        obj.save(update_fields=["label", "achieved_date", "category"])
-            except Exception:
-                continue

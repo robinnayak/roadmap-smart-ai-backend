@@ -437,16 +437,13 @@ class UserLogoutView(ProductionApiView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Simply validate the refresh token (no blacklisting)
+            # Validate the submitted refresh token, verify it belongs to the
+            # authenticated user, then blacklist it to prevent reuse.
             token = RefreshToken(refresh_token)
 
             # Verify the token is valid and belongs to the authenticated user
             token_user_id = token.payload.get("user_id")
             current_user_id = request.user.id
-
-            print("==" * 70)
-            print(f"Token user ID: {token_user_id}, Current user ID: {current_user_id}")
-            print("==" * 70)
 
             if str(token_user_id) != str(current_user_id):
                 return error_response(
@@ -857,6 +854,13 @@ class NotificationDetailView(ProductionApiView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [UserRateThrottle]
 
+    @staticmethod
+    def _preference_only_metadata():
+        return {
+            "meta": {"preference_only": True},
+            "capabilities": {"notification_delivery": "preference_only"},
+        }
+
     def get(self, request):
         try:
             notification, _ = NotificationSettings.objects.get_or_create(user=request.user)
@@ -865,6 +869,7 @@ class NotificationDetailView(ProductionApiView):
                 data=serializer.data,
                 message="Notification settings retrieved successfully",
                 status=status.HTTP_200_OK,
+                extra=self._preference_only_metadata(),
             )
         except Exception as e:
             logger.error(f"Error retrieving notification settings: {str(e)}", exc_info=True)
@@ -891,6 +896,7 @@ class NotificationDetailView(ProductionApiView):
                 data=serializer.data,
                 message="Notification settings updated successfully",
                 status=status.HTTP_200_OK,
+                extra=self._preference_only_metadata(),
             )
         except Exception as e:
             logger.error(f"Error updating notification settings: {str(e)}", exc_info=True)

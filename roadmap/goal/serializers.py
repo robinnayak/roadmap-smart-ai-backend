@@ -26,9 +26,29 @@ from .services.create_contract import (
     normalize_why_it_matters,
     required_goal_fields_error_details,
 )
-from .services.category_resolver import DEFAULT_GOAL_CATEGORY
+from .services.category_resolver import (
+    DEFAULT_GOAL_CATEGORY,
+    is_finance_goal_category,
+    normalize_goal_category_for_storage,
+)
+from .services.category_pillars import (
+    canonical_to_pillar,
+    normalize_category_pillar,
+    resolve_canonical_category,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _goal_attributes_defaults(target_field: str, extracted_payload):
+    defaults = {
+        "financial_data": None,
+        "career_data": None,
+        "health_data": None,
+        "personal_data": None,
+    }
+    defaults[target_field] = extracted_payload
+    return defaults
 
 
 class UserCurrentSituationGoalSerializer(serializers.ModelSerializer):
@@ -480,6 +500,7 @@ class GoalSerializer(serializers.ModelSerializer):
         default=False,
     )
     primary_category = serializers.CharField(required=False, allow_blank=False)
+    category_pillar = serializers.CharField(required=False, allow_blank=False, allow_null=True)
 
     class Meta:
         model = Goal
@@ -489,6 +510,7 @@ class GoalSerializer(serializers.ModelSerializer):
             "description",
             "why_it_matters",
             "primary_category",
+            "category_pillar",
             "impact_dimensions",
             "priority",
             "status",
@@ -572,10 +594,35 @@ class GoalSerializer(serializers.ModelSerializer):
                     required_goal_fields_error_details(commitment_missing_fields)
                 )
 
-        primary_category = attrs.get("primary_category") or (
-            self.instance.primary_category if self.instance else None
-        )
-        if primary_category == "finance":
+        primary_category_present = "primary_category" in attrs
+        category_pillar_present = "category_pillar" in attrs
+        raw_pillar = attrs.get("category_pillar")
+        normalized_pillar = normalize_category_pillar(raw_pillar)
+        category_pillar_supplied = category_pillar_present and raw_pillar not in (None, "")
+        if category_pillar_supplied and normalized_pillar is None:
+            raise serializers.ValidationError(
+                {"category_pillar": "Invalid category pillar. Use Money, Health, Career, Learning, Relationships, or Personal."}
+            )
+        attrs["category_pillar"] = normalized_pillar
+
+        goal_title = attrs.get("title") or getattr(self.instance, "title", "")
+        goal_description = attrs.get("description") or getattr(self.instance, "description", "")
+        if primary_category_present or category_pillar_supplied:
+            normalized_category = resolve_canonical_category(
+                attrs.get("primary_category") if primary_category_present else None,
+                normalized_pillar,
+                goal_title,
+                goal_description,
+            )
+        else:
+            normalized_category = self.instance.primary_category if self.instance else resolve_canonical_category(
+                None,
+                None,
+                goal_title,
+                goal_description,
+            )
+        attrs["primary_category"] = normalized_category
+        if is_finance_goal_category(normalized_category):
             request = self.context.get("request")
             if self.instance is None and request is not None:
                 if not UserFinancialProfile.objects.filter(user=request.user).exists():
@@ -624,12 +671,16 @@ class GoalSerializer(serializers.ModelSerializer):
         Returns True on success, False on failure (non-fatal).
         """
         try:
-            from ai.services.text_extraction import GoalAttributeExtractor
+            from ai.services.text_extraction import (
+                GoalAttributeExtractor,
+                resolve_goal_attributes_field,
+            )
 
             result = GoalAttributeExtractor().extract_goal_attributes(
                 user_input=user_input,
                 user=user,
                 goal_id=str(goal.id),
+                primary_category=goal.primary_category,
             )
 
             if result.get("status") != "success" or "data" not in result:
@@ -637,18 +688,9 @@ class GoalSerializer(serializers.ModelSerializer):
                 return False
 
             extracted = result["data"]
-            category = goal.primary_category.lower()
-            
-            category_field_map = {
-                "finance": "financial_data",
-                "career": "career_data",
-                "fitness": "health_data",
-            }
-
-            defaults = {f: None for f in category_field_map.values()}
-            target_field = category_field_map.get(category, "personal_data")
-            defaults["personal_data"] = None
-            defaults[target_field] = extracted
+            target_field = resolve_goal_attributes_field(goal.primary_category)
+            target_payload = extracted.get(target_field, extracted)
+            defaults = _goal_attributes_defaults(target_field, target_payload)
 
             GoalAttributes.objects.update_or_create(goal=goal, defaults=defaults)
             logger.info("GoalAttributes saved for goal %s", goal.id)
@@ -670,6 +712,7 @@ class GoalSerializer(serializers.ModelSerializer):
     # --- Create / Update ---
 
     def create(self, validated_data):
+        validated_data.pop("category_pillar", None)
         goal_attributes_input = validated_data.pop("goal_attributes_input", None)
         validated_data.pop("commitment_confirmed", None)
         validated_data.pop("commitment_note", None)
@@ -694,7 +737,11 @@ class GoalSerializer(serializers.ModelSerializer):
         # User-created goals are always marked as modified
         if not validated_data.get("is_ai_generated", False):
             validated_data["is_user_modified"] = True
-        validated_data["primary_category"] = validated_data.get("primary_category") or DEFAULT_GOAL_CATEGORY
+        validated_data["primary_category"] = normalize_goal_category_for_storage(
+            validated_data.get("primary_category"),
+            goal_title=validated_data.get("title", ""),
+            goal_description=validated_data.get("description", ""),
+        )
 
         with transaction.atomic():
             goal = Goal.objects.create(**validated_data)
@@ -712,6 +759,7 @@ class GoalSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         # Attribute extraction only happens at create time
+        validated_data.pop("category_pillar", None)
         validated_data.pop("goal_attributes_input", None)
         validated_data.pop("financial_proceed_anyway", None)
         validated_data.pop("commitment_confirmed", None)
@@ -736,10 +784,22 @@ class GoalSerializer(serializers.ModelSerializer):
         if instance.is_ai_generated:
             validated_data["is_user_modified"] = True
 
+        if "primary_category" in validated_data:
+            validated_data["primary_category"] = normalize_goal_category_for_storage(
+                validated_data.get("primary_category"),
+                goal_title=validated_data.get("title") or instance.title,
+                goal_description=validated_data.get("description") or instance.description or "",
+            )
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
         return instance
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["category_pillar"] = canonical_to_pillar(instance.primary_category)
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +817,7 @@ class GoalListSerializer(serializers.ModelSerializer):
     milestone_count = serializers.SerializerMethodField()
     completed_milestones = serializers.SerializerMethodField()
     needs_profile_review = serializers.SerializerMethodField()
+    category_pillar = serializers.SerializerMethodField()
 
     class Meta:
         model = Goal
@@ -764,6 +825,7 @@ class GoalListSerializer(serializers.ModelSerializer):
             "id",
             "title",
             "primary_category",
+            "category_pillar",
             "priority",
             "status",
             "progress_percentage",
@@ -787,6 +849,9 @@ class GoalListSerializer(serializers.ModelSerializer):
         profile = UserFinancialProfile.objects.filter(user=obj.user).first()
         return bool(profile and profile.needs_review)
 
+    def get_category_pillar(self, obj) -> str:
+        return canonical_to_pillar(obj.primary_category)
+
 
 class GoalDetailSerializer(serializers.ModelSerializer):
     """
@@ -806,6 +871,7 @@ class GoalDetailSerializer(serializers.ModelSerializer):
     total_subgoal_count = serializers.SerializerMethodField()
     total_task_count = serializers.SerializerMethodField()
     completed_task_count = serializers.SerializerMethodField()
+    category_pillar = serializers.SerializerMethodField()
 
     class Meta:
         model = Goal
@@ -815,6 +881,7 @@ class GoalDetailSerializer(serializers.ModelSerializer):
             "description",
             "why_it_matters",
             "primary_category",
+            "category_pillar",
             "impact_dimensions",
             "priority",
             "status",
@@ -861,6 +928,9 @@ class GoalDetailSerializer(serializers.ModelSerializer):
             for m in obj.milestones.all()
             for sg in m.subgoals.all()
         )
+
+    def get_category_pillar(self, obj) -> str:
+        return canonical_to_pillar(obj.primary_category)
 
 
 class CommitmentContractSerializer(serializers.ModelSerializer):
@@ -999,9 +1069,9 @@ class GoalLinkSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         source_goal = self.context["source_goal"]
         contributing_goal = attrs["contributing_goal"]
-        if source_goal.primary_category != "finance":
+        if not is_finance_goal_category(source_goal.primary_category):
             raise serializers.ValidationError("Source goal must be finance.")
-        if contributing_goal.primary_category == "finance":
+        if is_finance_goal_category(contributing_goal.primary_category):
             raise serializers.ValidationError("Contributing goal cannot also be finance.")
         if contributing_goal.user_id != source_goal.user_id:
             raise serializers.ValidationError("Contributing goal must belong to the same user.")

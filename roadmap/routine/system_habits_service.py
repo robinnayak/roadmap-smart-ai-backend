@@ -29,7 +29,9 @@ def _backfill_habit_from_fixture(habit, habit_data) -> bool:
     if not update_fields:
         return False
 
-    habit.save(update_fields=[*update_fields, "updated_at"])
+    HabitTracker.objects.filter(pk=habit.pk).update(
+        **{field_name: getattr(habit, field_name) for field_name in update_fields}
+    )
     return True
 
 

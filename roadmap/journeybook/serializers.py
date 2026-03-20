@@ -32,6 +32,9 @@ class JourneyBookSerializer(serializers.ModelSerializer):
     can_preview_sample = serializers.SerializerMethodField()
     can_retry = serializers.SerializerMethodField()
     retry_context = serializers.SerializerMethodField()
+    generation_source = serializers.SerializerMethodField()
+    content_stats = serializers.SerializerMethodField()
+    asset_generation = serializers.SerializerMethodField()
 
     class Meta:
         model = JourneyBook
@@ -58,6 +61,9 @@ class JourneyBookSerializer(serializers.ModelSerializer):
             "can_preview_sample",
             "can_retry",
             "retry_context",
+            "generation_source",
+            "content_stats",
+            "asset_generation",
             "created_at",
             "updated_at",
         ]
@@ -134,6 +140,47 @@ class JourneyBookSerializer(serializers.ModelSerializer):
             "include_all_goals": selection_mode == "all",
             "selection_mode": selection_mode,
             "book_type": obj.book_type,
+        }
+
+    @staticmethod
+    def get_generation_source(obj: JourneyBook) -> dict[str, Any]:
+        metadata = obj.metadata or {}
+        return metadata.get(
+            "generation_source",
+            {
+                "overall": "unknown",
+                "chapters": "unknown",
+                "motivational_pages": "unknown",
+                "counts": {
+                    "chapters_ai": 0,
+                    "chapters_fallback": 0,
+                    "motivational_ai": 0,
+                    "motivational_fallback": 0,
+                },
+            },
+        )
+
+    @staticmethod
+    def get_content_stats(obj: JourneyBook) -> dict[str, Any]:
+        metadata = obj.metadata or {}
+        return metadata.get(
+            "content_stats",
+            {
+                "chapter_count": int(metadata.get("chapter_count") or 0),
+                "motivational_page_count": len(metadata.get("motivational_pages") or []),
+                "word_count": int(metadata.get("word_count") or 0),
+                "page_count": int(metadata.get("page_count") or 0),
+            },
+        )
+
+    @staticmethod
+    def get_asset_generation(obj: JourneyBook) -> dict[str, Any]:
+        metadata = obj.metadata or {}
+        warnings = metadata.get("asset_generation_warnings") or []
+        return {
+            "status": "degraded" if warnings else "complete",
+            "warnings": warnings,
+            "generated_count": int(metadata.get("images_generated") or 0),
         }
 
     @staticmethod

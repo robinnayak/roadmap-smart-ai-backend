@@ -1,6 +1,9 @@
 import re
 from datetime import timedelta
-from goal.services.category_resolver import classify_goal_category_deterministic
+from goal.services.category_resolver import (
+    classify_goal_category_deterministic,
+    normalize_goal_category_for_storage,
+)
 
 from django.utils import timezone
 
@@ -38,15 +41,23 @@ class GIETurnPipelineService:
         }
 
     @staticmethod
-    def select_next_prompt(slot_definitions: list[GIESlotDefinition], slot_states: dict[str, GIESlotState]) -> dict | None:
+    def select_next_prompt(
+        slot_definitions: list[GIESlotDefinition],
+        slot_states: dict[str, GIESlotState],
+        *,
+        goal_text: str | None = None,
+    ) -> dict | None:
         for definition in slot_definitions:
             state = slot_states.get(definition.key)
             if not state:
                 continue
             if state.status in (GIESlotState.STATUS_FILLED, GIESlotState.STATUS_LOCKED):
                 continue
-            question = GIEDialogueManagerService.SLOT_QUESTION_MAP.get(definition.key) or (
-                f"What is your {definition.label.lower()}?"
+            question = GIEDialogueManagerService.build_question(
+                slot_key=definition.key,
+                slot_label=definition.label,
+                slot_description=definition.description,
+                goal_text=goal_text,
             )
             return {"question": question, "target_slot_key": definition.key}
         return None
@@ -55,8 +66,14 @@ class GIETurnPipelineService:
     def select_next_prompt_with_timeline_reframe(
         slot_definitions: list[GIESlotDefinition],
         slot_states: dict[str, GIESlotState],
+        *,
+        goal_text: str | None = None,
     ) -> dict | None:
-        missing_required_prompt = GIETurnPipelineService.select_next_prompt(slot_definitions, slot_states)
+        missing_required_prompt = GIETurnPipelineService.select_next_prompt(
+            slot_definitions,
+            slot_states,
+            goal_text=goal_text,
+        )
         if missing_required_prompt:
             return missing_required_prompt
 
@@ -260,6 +277,22 @@ class GIETurnPipelineService:
                 return True, 0.92
             if lowered in {"false", "no", "n", "0"}:
                 return False, 0.92
+            # Accept common UI suggestion phrasings for equipment-availability style questions.
+            if lowered in {
+                "basic setup only",
+                "home equipment only",
+                "gym access",
+                "have equipment",
+                "i have equipment",
+            }:
+                return True, 0.9
+            if lowered in {
+                "no equipment yet",
+                "dont have equipment",
+                "don't have equipment",
+                "i do not have equipment",
+            }:
+                return False, 0.9
             return None, None
 
         if data_type == GIESlotDefinition.TYPE_DATE:
@@ -325,4 +358,8 @@ class GIETurnPipelineService:
 
 
 def map_goal_domain_to_primary_category(goal_domain: str) -> str:
-    return classify_goal_category_deterministic(goal_title=goal_domain or "", goal_description="")
+    return normalize_goal_category_for_storage(
+        classify_goal_category_deterministic(goal_title=goal_domain or "", goal_description=""),
+        goal_title=goal_domain or "",
+        goal_description="",
+    )

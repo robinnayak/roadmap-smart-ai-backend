@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 
 from django.utils import timezone
@@ -8,6 +9,7 @@ from gie.models import GIESession, GIESlotState
 from gie.services.dynamic_schema import (
     WAVE4_DOMAIN_CAREER,
     WAVE4_DOMAIN_FINANCE,
+    WAVE4_DOMAIN_NUTRITION,
     WAVE4_DOMAIN_RUNNING_ENDURANCE,
     WAVE4_DOMAIN_SKILL_ACQUISITION,
     map_session_domain_to_wave4_domain,
@@ -15,6 +17,7 @@ from gie.services.dynamic_schema import (
 
 DOMAIN_MINIMUM_WEEKS = {
     WAVE4_DOMAIN_RUNNING_ENDURANCE: 12,
+    WAVE4_DOMAIN_NUTRITION: 6,
     WAVE4_DOMAIN_FINANCE: 4,
     WAVE4_DOMAIN_SKILL_ACQUISITION: 8,
     WAVE4_DOMAIN_CAREER: 26,
@@ -68,7 +71,12 @@ class GIEUnifiedContextService:
         domain_minimum_weeks = DOMAIN_MINIMUM_WEEKS.get(wave_domain, 8)
 
         goal_details = {
-            "title": cls._build_title(session.goal_text, wave_domain),
+            "title": cls._build_title(
+                raw_goal=session.goal_text,
+                wave_domain=wave_domain,
+                slot_profile=slot_profile,
+                target_date=end_date.isoformat(),
+            ),
             "description": cls._build_description(slot_profile, wave_domain, end_date.isoformat()),
             "why": cls._build_why(slot_profile, session.goal_text),
             "measurable_target": cls._build_measurable_target(slot_profile, wave_domain, end_date.isoformat()),
@@ -114,6 +122,16 @@ class GIEUnifiedContextService:
                 "existing_debt",
                 "savings_purpose",
             ]
+        if wave_domain == WAVE4_DOMAIN_NUTRITION:
+            return [
+                "current_nutrition_baseline",
+                "meal_prep_days_per_week",
+                "meals_to_prepare_per_day",
+                "protein_goal_grams_per_day",
+                "dietary_constraints",
+                "prep_time_per_day_minutes",
+                "motivation_driver",
+            ]
         if wave_domain == WAVE4_DOMAIN_SKILL_ACQUISITION:
             return [
                 "current_skill_level",
@@ -157,12 +175,35 @@ class GIEUnifiedContextService:
             return fallback
 
     @staticmethod
-    def _build_title(raw_goal: str, wave_domain: str) -> str:
+    def _build_title(*, raw_goal: str, wave_domain: str, slot_profile: dict, target_date: str) -> str:
         trimmed = (raw_goal or "").strip()
-        if trimmed:
-            return trimmed[:255]
+        normalized_phrase = GIEUnifiedContextService._normalize_goal_phrase(trimmed)
+        if normalized_phrase:
+            if wave_domain == WAVE4_DOMAIN_SKILL_ACQUISITION:
+                focus = GIEUnifiedContextService._extract_goal_focus(normalized_phrase)
+                if focus:
+                    return f"Build {focus.title()} Skills Through Consistent Practice by {target_date}"[:255]
+                return f"Build Practical Skills Through Consistent Practice by {target_date}"[:255]
+            if wave_domain == WAVE4_DOMAIN_RUNNING_ENDURANCE:
+                return f"Build Running Endurance Consistently by {target_date}"[:255]
+            if wave_domain == WAVE4_DOMAIN_NUTRITION:
+                return f"Build a Consistent High-Protein Meal Prep Routine by {target_date}"[:255]
+            if wave_domain == WAVE4_DOMAIN_FINANCE:
+                return f"Reach Savings Target with a Structured Plan by {target_date}"[:255]
+            if wave_domain == WAVE4_DOMAIN_CAREER:
+                target_role = GIEUnifiedContextService._as_text(slot_profile.get("target_role"), fallback="")
+                if target_role:
+                    return f"Progress into {target_role} with a Structured Growth Plan by {target_date}"[:255]
+                return f"Advance Career Growth Through Structured Weekly Execution by {target_date}"[:255]
+            return f"{normalized_phrase[:1].upper() + normalized_phrase[1:]} by {target_date}"[:255]
+
+        target_role = GIEUnifiedContextService._as_text(slot_profile.get("target_role"), fallback="")
+        if target_role and wave_domain == WAVE4_DOMAIN_CAREER:
+            return f"Progress into {target_role} with a Structured Growth Plan by {target_date}"[:255]
+
         fallback = {
             WAVE4_DOMAIN_RUNNING_ENDURANCE: "Running Endurance Goal",
+            WAVE4_DOMAIN_NUTRITION: "Nutrition Consistency Goal",
             WAVE4_DOMAIN_FINANCE: "Financial Savings Goal",
             WAVE4_DOMAIN_SKILL_ACQUISITION: "Skill Acquisition Goal",
             WAVE4_DOMAIN_CAREER: "Career Growth Goal",
@@ -172,22 +213,41 @@ class GIEUnifiedContextService:
     @staticmethod
     def _build_description(slot_profile: dict, wave_domain: str, target_date: str) -> str:
         if wave_domain == WAVE4_DOMAIN_RUNNING_ENDURANCE:
+            weekly_training_days = GIEUnifiedContextService._as_text(slot_profile.get("weekly_training_days"), fallback="3")
+            daily_session_minutes = GIEUnifiedContextService._as_text(slot_profile.get("daily_session_minutes"), fallback="30")
             return (
-                f"Train {slot_profile.get('weekly_training_days')} days/week for "
-                f"{slot_profile.get('daily_session_minutes')} minutes to reach your running milestone by {target_date}."
+                f"Train {weekly_training_days} days/week for "
+                f"{daily_session_minutes} minutes to reach your running milestone by {target_date}."
             )
         if wave_domain == WAVE4_DOMAIN_FINANCE:
+            savings_target = GIEUnifiedContextService._as_text(slot_profile.get("savings_target"), fallback="your target amount")
             return (
-                f"Build savings to {slot_profile.get('savings_target')} by {target_date} "
+                f"Build savings to {savings_target} by {target_date} "
                 f"while balancing monthly income, expenses, and debt obligations."
             )
-        if wave_domain == WAVE4_DOMAIN_SKILL_ACQUISITION:
+        if wave_domain == WAVE4_DOMAIN_NUTRITION:
+            meals_to_prepare_per_day = GIEUnifiedContextService._as_text(slot_profile.get("meals_to_prepare_per_day"), fallback="2")
+            meal_prep_days_per_week = GIEUnifiedContextService._as_text(slot_profile.get("meal_prep_days_per_week"), fallback="4")
+            protein_goal_grams_per_day = GIEUnifiedContextService._as_text(slot_profile.get("protein_goal_grams_per_day"), fallback="100")
+            dietary_constraints = GIEUnifiedContextService._as_text(slot_profile.get("dietary_constraints"), fallback="personal dietary constraints")
             return (
-                f"Practice {slot_profile.get('daily_practice_minutes')} minutes daily using "
-                f"{slot_profile.get('learning_method')} to hit the milestone event by {target_date}."
+                f"Prep {meals_to_prepare_per_day} high-protein meals per day on "
+                f"{meal_prep_days_per_week} days/week, targeting "
+                f"{protein_goal_grams_per_day}g protein daily while respecting "
+                f"{dietary_constraints} by {target_date}."
             )
+        if wave_domain == WAVE4_DOMAIN_SKILL_ACQUISITION:
+            daily_practice_minutes = GIEUnifiedContextService._as_text(slot_profile.get("daily_practice_minutes"), fallback="30")
+            learning_method = GIEUnifiedContextService._as_text(slot_profile.get("learning_method"), fallback="a consistent learning method")
+            goal_milestone_event = GIEUnifiedContextService._as_text(slot_profile.get("goal_milestone_event"), fallback="a clear milestone event")
+            return (
+                f"Practice {daily_practice_minutes} minutes daily using "
+                f"{learning_method} to hit {goal_milestone_event} by {target_date}."
+            )
+        current_role = GIEUnifiedContextService._as_text(slot_profile.get("current_role"), fallback="your current role")
+        target_role = GIEUnifiedContextService._as_text(slot_profile.get("target_role"), fallback="your target role")
         return (
-            f"Transition from {slot_profile.get('current_role')} to {slot_profile.get('target_role')} "
+            f"Transition from {current_role} to {target_role} "
             f"within the target timeline while closing identified gaps."
         )
 
@@ -197,14 +257,70 @@ class GIEUnifiedContextService:
             return str(slot_profile["motivation_driver"])
         if isinstance(slot_profile.get("savings_purpose"), str) and slot_profile.get("savings_purpose"):
             return str(slot_profile["savings_purpose"])
-        return (raw_goal or "").strip()[:500]
+        normalized_goal = GIEUnifiedContextService._normalize_goal_phrase(raw_goal or "")
+        focus = GIEUnifiedContextService._extract_goal_focus(normalized_goal)
+        if focus:
+            return f"I want this goal because building {focus} consistently will improve confidence, discipline, and long-term progress."
+        if normalized_goal:
+            return (
+                f"I want this goal because {normalized_goal} will improve my consistency and create meaningful "
+                f"long-term progress."
+            )[:500]
+        return "I want this goal because consistent execution will improve my long-term quality of life."
 
     @staticmethod
     def _build_measurable_target(slot_profile: dict, wave_domain: str, target_date: str) -> str:
         if wave_domain == WAVE4_DOMAIN_FINANCE:
-            return f"Reach savings target of {slot_profile.get('savings_target')} by {target_date}."
+            savings_target = GIEUnifiedContextService._as_text(slot_profile.get("savings_target"), fallback="your target amount")
+            return f"Reach savings target of {savings_target} by {target_date}."
         if wave_domain == WAVE4_DOMAIN_RUNNING_ENDURANCE:
             return f"Complete running milestone by {target_date}."
+        if wave_domain == WAVE4_DOMAIN_NUTRITION:
+            protein_goal_grams_per_day = GIEUnifiedContextService._as_text(slot_profile.get("protein_goal_grams_per_day"), fallback="100")
+            meal_prep_days_per_week = GIEUnifiedContextService._as_text(slot_profile.get("meal_prep_days_per_week"), fallback="4")
+            return (
+                f"Hit {protein_goal_grams_per_day}g protein daily and maintain "
+                f"{meal_prep_days_per_week} prep days/week by {target_date}."
+            )
         if wave_domain == WAVE4_DOMAIN_SKILL_ACQUISITION:
-            return f"Deliver {slot_profile.get('goal_milestone_event')} by {target_date}."
+            goal_milestone_event = GIEUnifiedContextService._as_text(slot_profile.get("goal_milestone_event"), fallback="a meaningful milestone")
+            return f"Deliver {goal_milestone_event} by {target_date}."
         return f"Reach target role by {target_date}."
+
+    @staticmethod
+    def _as_text(value, *, fallback: str) -> str:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, (int, float)):
+            if isinstance(value, float) and value.is_integer():
+                return str(int(value))
+            return str(value)
+        return fallback
+
+    @staticmethod
+    def _normalize_goal_phrase(raw_goal: str) -> str:
+        text = re.sub(r"\s+", " ", (raw_goal or "").strip())
+        text = text.rstrip(".!?")
+        lower = text.lower()
+        prefixes = (
+            "i want to ",
+            "i want ",
+            "my goal is to ",
+            "my goal is ",
+            "goal: ",
+        )
+        for prefix in prefixes:
+            if lower.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+        return text
+
+    @staticmethod
+    def _extract_goal_focus(goal_phrase: str) -> str:
+        if not goal_phrase:
+            return ""
+        lowered = goal_phrase.lower()
+        for prefix in ("learn ", "practice ", "build ", "improve ", "develop ", "master "):
+            if lowered.startswith(prefix):
+                return goal_phrase[len(prefix):].strip()
+        return goal_phrase.strip()

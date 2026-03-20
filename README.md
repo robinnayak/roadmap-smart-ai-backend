@@ -96,6 +96,11 @@ The platform assists users in achieving goals across career, financial, health, 
 
 The API uses JWT (JSON Web Tokens) for authentication. Include the token in the `Authorization` header as `Bearer <token>`.
 
+Launch auth posture:
+- JWT under `/auth/` is the only supported application auth contract.
+- `/api-auth/` is a debug-only DRF browsable-API/session tool and is not part of the product surface.
+- Notification settings endpoints store preference flags only; they do not imply a general push/email delivery subsystem.
+
 ### Obtaining Tokens
 - Register a new user via `POST /auth/register/`
 - Login via `POST /auth/login/` to receive access and refresh tokens
@@ -690,6 +695,13 @@ pip install coverage
 coverage run manage.py test
 coverage report
 ```
+
+## Backend Environment Contracts
+
+- Logging is console-only in the active launch configuration unless explicit file handlers are added in [`roadmap/roadmap/settings.py`](./roadmap/roadmap/settings.py).
+- The checked-in `roadmap/logs/` files are repository artifacts, not the active logging subsystem.
+- Production rendering uses the shared JSON contract renderer only.
+- The DRF browsable API renderer is enabled only when `DEBUG=True`.
 
 ### API Testing with cURL
 ```bash

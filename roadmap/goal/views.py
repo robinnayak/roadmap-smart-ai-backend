@@ -96,6 +96,11 @@ from goal.services.goal_domain import (
     get_user_goals_payload,
 )
 from goal.services.category_resolver import GOAL_CATEGORIES
+from goal.services.category_resolver import (
+    get_goal_attribute_bucket,
+    normalize_goal_category_for_query,
+)
+from goal.services.category_pillars import canonical_to_pillar
 from goal.services.financial_intelligence import (
     calculate_feasibility,
     evaluate_profile_review_for_goal,
@@ -1263,7 +1268,11 @@ class GoalListAPIView(APIView):
         if s := request.query_params.get("status"):
             goals = goals.filter(status=s)
         if c := request.query_params.get("category"):
-            goals = goals.filter(primary_category=c)
+            normalized_category = normalize_goal_category_for_query(c)
+            if normalized_category is None:
+                goals = goals.none()
+            else:
+                goals = goals.filter(primary_category=normalized_category)
         if p := request.query_params.get("priority"):
             goals = goals.filter(priority=p)
 
@@ -1301,6 +1310,7 @@ class GoalListAPIView(APIView):
                 "description":         goal.description,
                 "why_it_matters":      goal.why_it_matters,
                 "primary_category":    goal.primary_category,
+                "category_pillar":     canonical_to_pillar(goal.primary_category),
                 "priority":            goal.priority,
                 "status":              goal.status,
                 "progress_percentage": goal.progress_percentage,
@@ -1344,14 +1354,8 @@ class GoalListAPIView(APIView):
         """Return only the relevant category's attribute data, not all four fields."""
         try:
             attr = goal.attributes  # select_related — no extra query
-            if goal.primary_category == "finance":
-                data = attr.financial_data
-            elif goal.primary_category == "career":
-                data = attr.career_data
-            elif goal.primary_category in {"fitness", "wellness", "nutrition"}:
-                data = attr.health_data
-            else:
-                data = attr.personal_data
+            bucket = get_goal_attribute_bucket(goal.primary_category)
+            data = getattr(attr, bucket)
             return {goal.primary_category: data} if data else None
         except GoalAttributes.DoesNotExist:
             return None

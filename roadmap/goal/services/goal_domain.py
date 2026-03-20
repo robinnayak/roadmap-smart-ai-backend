@@ -7,6 +7,7 @@ from goal.services.create_contract import (
     normalize_goal_create_payload,
 )
 from goal.services.category_resolver import classify_goal_category, DEFAULT_GOAL_CATEGORY
+from goal.services.category_pillars import canonical_to_pillar, resolve_canonical_category
 from goal.services.financial_intelligence import calculate_feasibility
 
 
@@ -100,11 +101,19 @@ def evaluate_financial_goal_feasibility(*, user, validated_data, instance=None):
 
 def create_goal_for_user(*, request_data, user, request):
     data = sanitize_goal_payload(request_data)
-    data["primary_category"] = classify_goal_category(
-        goal_title=str(data.get("title") or ""),
-        goal_description=str(data.get("description") or ""),
-        current_category=data.get("primary_category") or DEFAULT_GOAL_CATEGORY,
-    )
+    if data.get("primary_category") or data.get("category_pillar"):
+        data["primary_category"] = resolve_canonical_category(
+            data.get("primary_category"),
+            data.get("category_pillar"),
+            str(data.get("title") or ""),
+            str(data.get("description") or ""),
+        )
+    else:
+        data["primary_category"] = classify_goal_category(
+            goal_title=str(data.get("title") or ""),
+            goal_description=str(data.get("description") or ""),
+            current_category=data.get("primary_category") or DEFAULT_GOAL_CATEGORY,
+        )
     serializer = GoalSerializer(data=data, context={"request": request})
     if not serializer.is_valid():
         return None, serializer.errors
@@ -143,6 +152,7 @@ def build_goal_seed_data(goal):
         "why_do_i_want_this": impact_dimensions.get("why_do_i_want_this", ""),
         "specific_measurable_target": impact_dimensions.get("specific_measurable_target", ""),
         "primary_category": goal.primary_category,
+        "category_pillar": canonical_to_pillar(goal.primary_category),
         "resolved_category": goal.primary_category,
         "impact_dimensions": goal.impact_dimensions,
         "start_date": goal.start_date,
@@ -168,6 +178,7 @@ def build_goal_hierarchy_payload(*, goal, today):
         "description": goal.description,
         "why_it_matters": goal.why_it_matters,
         "primary_category": goal.primary_category,
+        "category_pillar": canonical_to_pillar(goal.primary_category),
         "priority": goal.priority,
         "status": goal.status,
         "progress_percentage": goal.progress_percentage,

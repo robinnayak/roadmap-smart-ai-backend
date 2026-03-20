@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from decimal import Decimal
 from datetime import timedelta
 from django.test import TestCase
 from django.contrib.auth import get_user_model
@@ -14,11 +15,14 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from authentication.models import NotificationSettings
-from ai.models import AIReengagementAction, AIUserChurnState
+from ai.models import AIModelUsageStats, AIProcessingJob, AIReengagementAction, AIUserChurnState
 from ai.providers.ollama_provider import OllamaProvider
+from ai.providers.base import AIResponse
 from ai.prompts.GoalHierarchyGeneratorPrompts import GoalHierarchyGeneratorPrompts, _load
+from ai.services.GoalHierarchyGenerator import GoalHierarchyGenerator
 from ai.services.churn_reengagement import ChurnReengagementService
-from goal.models import Goal, Milestone
+from ai.services.current_situation_generator import CurrentSituationGenerationError, CurrentSituationGenerator
+from goal.models import Goal, GoalAttributes, Milestone
 from ai.utils.validators import OutputValidator
 
 
@@ -119,17 +123,14 @@ class PromptAssetTests(TestCase):
         system_text = system_path.read_text(encoding="utf-8")
         output_schema = output_schema_path.read_text(encoding="utf-8")
 
-        self.assertIn("RULE · DO NOT PATTERN-LOCK TO SUBGOAL TITLES", system_text)
-        self.assertIn("RULE · NO REPEATED TASK TITLES ACROSS THE FULL GOAL", system_text)
-        self.assertIn("OUTPUT QUALITY SELF-CHECK", system_text)
-        self.assertEqual(system_text.count("□ "), 9)
+        self.assertIn("SYSTEM: SUBGOAL TASK GENERATION ENGINE", system_text)
+        self.assertIn("Return valid JSON with a single top-level \"tasks\" array.", system_text)
+        self.assertIn("Use only valid item_type values: physical, cognitive, habit, ritual, task.", system_text)
 
         self.assertIn('"item_type": "physical | cognitive | habit | ritual | task"', output_schema)
-        self.assertIn("VALIDATION RULES FOR YOUR OUTPUT", output_schema)
-        self.assertIn(
-            "Do not use: practice, learning,\n   project, review, assessment, planning, evaluation, exercise.",
-            output_schema,
-        )
+        self.assertIn("VALIDATION RULES", output_schema)
+        self.assertIn('"tasks": [', output_schema)
+        self.assertIn("Ensure titles are unique within this array.", output_schema)
 
     def test_all_category_prompt_assets_exist(self):
         prompts_dir = Path(__file__).resolve().parent / "prompts" / "categories"
@@ -211,7 +212,7 @@ class GoalHierarchyPromptBuilderTests(TestCase):
         markers = [
             "SHARED BASE RULES",
             "TASK TYPE DEFINITIONS",
-            "SYSTEM: GOAL-TASK GENERATION ENGINE",
+            "SYSTEM: SUBGOAL TASK GENERATION ENGINE",
             "CATEGORY: BUSINESS",
             "USER AND GOAL CONTEXT",
             "OUTPUT — RETURN THIS JSON ONLY",
@@ -450,7 +451,11 @@ class AIExplicitExceptionHandlingTests(APITestCase):
 
     @patch("ai.views.CurrentSituationGenerator.generate")
     def test_process_current_situation_handles_invalid_payload_type_error(self, mock_generate):
-        mock_generate.return_value = {"data": None, "job_id": "abc-123"}
+        job = AIProcessingJob.objects.create(
+            user=self.user,
+            job_type="situation_analysis",
+        )
+        mock_generate.return_value = {"data": None, "job_id": str(job.id)}
 
         response = self.client.post(
             reverse("ai-process-text-data-current-situation"),
@@ -460,6 +465,177 @@ class AIExplicitExceptionHandlingTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"], "Invalid AI response payload")
+
+    @patch("ai.views.CurrentSituationGenerator.generate")
+    def test_process_current_situation_returns_provider_failure_contract(self, mock_generate):
+        mock_generate.side_effect = CurrentSituationGenerationError(
+            "provider unavailable",
+            code="ai_provider_unavailable",
+            http_status=503,
+            job_id="job-123",
+        )
+
+        response = self.client.post(
+            reverse("ai-process-text-data-current-situation"),
+            data={"raw_data": "I am currently stuck and need help."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data["status"], "error")
+        self.assertEqual(response.data["code"], "ai_provider_unavailable")
+        self.assertEqual(response.data["job_id"], "job-123")
+
+    @patch("ai.views.CurrentSituationGenerator.generate")
+    def test_process_current_situation_refreshes_existing_record(self, mock_generate):
+        job = AIProcessingJob.objects.create(
+            user=self.user,
+            job_type="situation_analysis",
+        )
+        mock_generate.side_effect = [
+            {
+                "data": {
+                    "current_role": "Designer",
+                    "age": 29,
+                    "key_skills": ["Figma"],
+                    "main_goals": ["Build portfolio"],
+                    "time_availability": "5 hours",
+                    "constraints": ["budget"],
+                    "priority_areas": ["career"],
+                },
+                "job_id": str(job.id),
+            },
+            {
+                "data": {
+                    "current_role": "Product Designer",
+                    "age": 29,
+                    "key_skills": ["Figma", "Research"],
+                    "main_goals": ["Get promoted"],
+                    "time_availability": "8 hours",
+                    "constraints": ["time"],
+                    "priority_areas": ["career", "learning"],
+                },
+                "job_id": str(job.id),
+            },
+        ]
+
+        url = reverse("ai-process-text-data-current-situation")
+        first = self.client.post(url, data={"raw_data": "first"}, format="json")
+        second = self.client.post(url, data={"raw_data": "second"}, format="json")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(AIProcessingJob.objects.filter(user=self.user, job_type="situation_analysis").count(), 1)
+
+        record = job.current_situation_goal
+        self.assertEqual(record.current_role, "Product Designer")
+        self.assertEqual(record.key_skills, ["Figma", "Research"])
+        self.assertEqual(record.main_goals, ["Get promoted"])
+        self.assertEqual(record.time_availability, "8 hours")
+        self.assertEqual(record.constraints, ["time"])
+        self.assertEqual(record.priority_areas, ["career", "learning"])
+
+    @patch("ai.views.GoalAttributeExtractor.extract_goal_attributes")
+    def test_goal_attribute_extractor_persists_goal_attributes_and_declares_it(self, mock_extract):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Save for house",
+            primary_category="finance",
+        )
+        mock_extract.return_value = {
+            "status": "success",
+            "data": {
+                "financial_data": {
+                    "target_amount": 500000,
+                    "current_amount": 75000,
+                }
+            },
+            "job_id": "job-goal-attr",
+        }
+
+        response = self.client.post(
+            reverse("goal-attribute-extractor"),
+            data={"user_input": "Save 500000 for house deposit", "goal_id": str(goal.id)},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["persisted"])
+        goal.refresh_from_db()
+        self.assertEqual(
+            goal.attributes.financial_data,
+            {"target_amount": 500000, "current_amount": 75000},
+        )
+
+    @patch("ai.services.current_situation_generator.ResponseFormatter")
+    @patch("ai.services.current_situation_generator.ResponseParser")
+    @patch("ai.services.current_situation_generator.SystemPrompts")
+    @patch("ai.services.current_situation_generator.UserContextPrompt")
+    @patch("ai.services.current_situation_generator.OllamaProvider")
+    @patch("ai.services.current_situation_generator.get_ollama_model", return_value="test-situation-model")
+    def test_current_situation_generator_uses_job_helpers_for_lifecycle_fields(
+        self,
+        _mock_model,
+        mock_provider_cls,
+        mock_user_prompt_cls,
+        mock_system_prompts_cls,
+        mock_parser_cls,
+        mock_formatter_cls,
+    ):
+        provider = mock_provider_cls.return_value
+        provider.model = "test-situation-model"
+        provider.generate_response.return_value = AIResponse(
+            content='{"current_role": "Designer", "age": 29}',
+            model="test-situation-model",
+            token_used=321,
+        )
+        mock_user_prompt_cls.return_value.format.return_value = "formatted prompt"
+        mock_system_prompts_cls.return_value.get_current_situation_prompt.return_value = "system prompt"
+        mock_parser_cls.return_value.parse_current_situation_response.return_value = {
+            "current_role": "Designer",
+            "age": 29,
+        }
+        mock_formatter_cls.return_value.format_success.side_effect = (
+            lambda **kwargs: {"data": kwargs["parsed_data"], "job_id": str(kwargs["job"].id)}
+        )
+
+        service = CurrentSituationGenerator()
+        result = service.generate("I am a designer", 29, self.user)
+
+        job = AIProcessingJob.objects.get(id=result["job_id"])
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.progress_percentage, 100)
+        self.assertEqual(job.ai_model_used, "test-situation-model")
+        self.assertEqual(job.ai_tokens_used, 321)
+        self.assertEqual(job.user_raw_text, "I am a designer")
+        self.assertIsNotNone(job.started_at)
+        self.assertIsNotNone(job.completed_at)
+        self.assertGreaterEqual(job.processing_time_seconds, 0)
+
+    def test_mark_completed_updates_daily_usage_stats(self):
+        job = AIProcessingJob.objects.create(
+            user=self.user,
+            job_type="goal_attributes",
+            ai_model_used="test-model",
+        )
+
+        job.start_processing()
+        job.mark_completed(
+            output_data={"ok": True},
+            raw_response="{}",
+            model_used="test-model",
+            tokens=144,
+            cost=Decimal("0.2500"),
+        )
+
+        stats = AIModelUsageStats.objects.get(user=self.user)
+        self.assertEqual(stats.total_jobs, 1)
+        self.assertEqual(stats.successful_jobs, 1)
+        self.assertEqual(stats.failed_jobs, 0)
+        self.assertEqual(stats.total_tokens, 144)
+        self.assertEqual(str(stats.total_cost_usd), "0.2500")
+        self.assertEqual(stats.model_usage["test-model"]["tokens"], 144)
+        self.assertEqual(stats.job_type_usage["goal_attributes"]["count"], 1)
 
     @patch("ai.views.OllamaProvider.health_check", side_effect=OSError("provider unavailable"))
     def test_health_check_handles_provider_os_error(self, _mock_health):
@@ -472,10 +648,14 @@ class AIExplicitExceptionHandlingTests(APITestCase):
 
 class OllamaProviderEnvConfigTests(TestCase):
     @patch("ai.providers.ollama_provider.Client")
-    def test_provider_requires_ollama_host_env_when_host_is_not_passed(self, _mock_client):
+    def test_provider_uses_default_host_when_env_is_not_passed(self, mock_client):
         with patch.dict(os.environ, {"OLLAMA_HOST": "", "OLLAMA_MODEL": "demo-model"}, clear=False):
-            with self.assertRaises(ImproperlyConfigured):
-                OllamaProvider()
+            provider = OllamaProvider()
+
+        mock_client.assert_called_once()
+        called_kwargs = mock_client.call_args.kwargs
+        self.assertEqual(called_kwargs["host"], "http://localhost:11434")
+        self.assertEqual(provider.host, "http://localhost:11434")
 
     @patch("ai.providers.ollama_provider.Client")
     def test_provider_uses_default_model_when_model_env_is_not_passed(self, mock_client):
@@ -577,14 +757,27 @@ class AIHealthCheckConfigTests(APITestCase):
         )
         self.client.force_authenticate(user=self.user)
 
-    def test_health_check_returns_unhealthy_when_required_env_is_missing(self):
+    @patch("ai.views.OllamaProvider.health_check", autospec=True)
+    def test_health_check_uses_default_host_when_env_is_missing(self, mock_health_check):
+        def _healthy(provider_instance):
+            return {
+                "status": "healthy",
+                "service": "ollama",
+                "host": provider_instance.host,
+                "model": provider_instance.model,
+                "error": None,
+            }
+
+        mock_health_check.side_effect = _healthy
+
         with patch.dict(os.environ, {"OLLAMA_HOST": "", "OLLAMA_MODEL": ""}, clear=False):
             response = self.client.get(reverse("ai-health-check"))
 
-        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
-        self.assertEqual(response.data["status"], "unhealthy")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "healthy")
         self.assertEqual(response.data["service"], "ollama")
-        self.assertIn("Missing required environment variable", response.data["error"])
+        self.assertEqual(response.data["host"], "http://localhost:11434")
+        self.assertEqual(response.data["model"], "gpt-oss:120b-cloud")
 
     @patch("ai.views.OllamaProvider.health_check", autospec=True)
     def test_health_check_uses_default_model_when_ollama_model_is_missing(self, mock_health_check):
@@ -610,6 +803,55 @@ class AIHealthCheckConfigTests(APITestCase):
         self.assertEqual(response.data["status"], "healthy")
         self.assertEqual(response.data["service"], "ollama")
         self.assertEqual(response.data["model"], "gpt-oss:120b-cloud")
+
+
+class DeadModuleCleanupTests(TestCase):
+    def test_dead_goal_generator_module_is_removed(self):
+        dead_module = Path(__file__).resolve().parent / "services" / "goal_generator.py"
+        self.assertFalse(dead_module.exists())
+
+
+class HierarchyPartialFailureTests(TestCase):
+    @patch("ai.services.GoalHierarchyGenerator.OllamaProvider")
+    @patch("ai.services.GoalHierarchyGenerator.get_hierarchy_model", return_value="test-hierarchy-model")
+    def test_generate_complete_hierarchy_surfaces_partial_failures(self, _mock_model, mock_provider_cls):
+        user = get_user_model().objects.create_user(
+            email="hierarchy-partial@test.com",
+            password="testpass123",
+        )
+        mock_provider_cls.return_value.model = "test-hierarchy-model"
+        generator = GoalHierarchyGenerator()
+
+        with patch.object(
+            generator,
+            "_generate_milestones",
+            return_value={"status": "success", "data": {"milestones": [{"title": "Month 1"}]}},
+        ), patch.object(
+            generator,
+            "_generate_subgoals",
+            return_value={"status": "success", "data": {"subgoals": [{"title": "Week 1"}]}},
+        ), patch.object(
+            generator,
+            "_generate_tasks",
+            return_value={"status": "error", "message": "Task provider timeout", "data": {"tasks": []}},
+        ):
+            result = generator.generate_complete_hierarchy(
+                goal_data={
+                    "id": "goal-1",
+                    "title": "Launch MVP",
+                    "primary_category": "business",
+                    "start_date": str(timezone.localdate()),
+                    "target_date": str(timezone.localdate() + timedelta(days=30)),
+                },
+                user=user,
+                user_context={},
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["data"]["partial_failure_count"], 1)
+        self.assertEqual(result["data"]["partial_failures"][0]["stage"], "task_generation")
+        subgoal_entry = result["data"]["milestones"][0]["subgoals"][0]
+        self.assertEqual(subgoal_entry["generation_error"]["message"], "Task provider timeout")
 
 
 class ChurnReengagementServiceTests(TestCase):

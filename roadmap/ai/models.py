@@ -4,7 +4,9 @@ AI Processing Models - Production Ready
 Handles AI job processing for roadmap generation and goal analysis.
 """
 
-from django.db import models
+from decimal import Decimal
+
+from django.db import models, transaction
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 import uuid
@@ -203,20 +205,33 @@ class AIProcessingJob(models.Model):
         """Mark job as started"""
         self.status = 'processing'
         self.started_at = timezone.now()
-        self.save(update_fields=['status', 'started_at', 'updated_at'])
+        self.completed_at = None
+        self.processing_time_seconds = None
+        self.progress_percentage = 0
+        self.error_message = ''
+        self.save(update_fields=[
+            'status',
+            'started_at',
+            'completed_at',
+            'processing_time_seconds',
+            'progress_percentage',
+            'error_message',
+            'updated_at',
+        ])
     
     def mark_completed(self, output_data, raw_response="", model_used="", tokens=0, cost=0.0):
         """Mark job as successfully completed"""
         processing_time = None
         if self.started_at:
             processing_time = (timezone.now() - self.started_at).total_seconds()
-        
+        cost_decimal = Decimal(str(cost or 0))
+
         self.status = 'completed'
         self.output_data = output_data
         self.raw_ai_response = raw_response
         self.ai_model_used = model_used
         self.ai_tokens_used = tokens
-        self.ai_cost_usd = cost
+        self.ai_cost_usd = cost_decimal
         self.progress_percentage = 100
         self.completed_at = timezone.now()
         self.processing_time_seconds = processing_time
@@ -226,6 +241,7 @@ class AIProcessingJob(models.Model):
             'ai_tokens_used', 'ai_cost_usd', 'progress_percentage',
             'completed_at', 'processing_time_seconds', 'updated_at'
         ])
+        AIModelUsageStats.record_job_event(self, was_successful=True)
     
     def mark_failed(self, error_message):
         """Mark job as failed"""
@@ -240,6 +256,7 @@ class AIProcessingJob(models.Model):
             'status', 'error_message', 'retry_count', 
             'processing_time_seconds', 'updated_at'
         ])
+        AIModelUsageStats.record_job_event(self, was_successful=False)
     
     def can_retry(self):
         """Check if job can be retried"""
@@ -354,11 +371,65 @@ class AIModelUsageStats(models.Model):
     def __str__(self):
         return f"{self.user.email} - {self.date} - {self.total_jobs} jobs"
 
+    @classmethod
+    def record_job_event(cls, job, *, was_successful: bool):
+        model_name = (job.ai_model_used or "unknown").strip() or "unknown"
+        tokens = int(job.ai_tokens_used or 0)
+        cost = Decimal(str(job.ai_cost_usd or 0))
+        job_type_key = (job.job_type or "unknown").strip() or "unknown"
+
+        with transaction.atomic():
+            stats, _ = cls.objects.select_for_update().get_or_create(
+                user=job.user,
+                date=timezone.localdate(),
+            )
+            stats.total_jobs += 1
+            if was_successful:
+                stats.successful_jobs += 1
+            else:
+                stats.failed_jobs += 1
+
+            stats.total_tokens += tokens
+            stats.total_cost_usd = Decimal(str(stats.total_cost_usd or 0)) + cost
+
+            model_usage = dict(stats.model_usage or {})
+            model_bucket = dict(model_usage.get(model_name, {}))
+            model_bucket["jobs"] = int(model_bucket.get("jobs", 0)) + 1
+            model_bucket["tokens"] = int(model_bucket.get("tokens", 0)) + tokens
+            model_bucket["cost"] = float(Decimal(str(model_bucket.get("cost", 0))) + cost)
+            model_bucket["successful_jobs"] = int(model_bucket.get("successful_jobs", 0)) + int(was_successful)
+            model_bucket["failed_jobs"] = int(model_bucket.get("failed_jobs", 0)) + int(not was_successful)
+            model_usage[model_name] = model_bucket
+
+            job_type_usage = dict(stats.job_type_usage or {})
+            job_type_bucket = dict(job_type_usage.get(job_type_key, {}))
+            job_type_bucket["count"] = int(job_type_bucket.get("count", 0)) + 1
+            job_type_bucket["tokens"] = int(job_type_bucket.get("tokens", 0)) + tokens
+            job_type_bucket["cost"] = float(Decimal(str(job_type_bucket.get("cost", 0))) + cost)
+            job_type_bucket["successful_jobs"] = int(job_type_bucket.get("successful_jobs", 0)) + int(was_successful)
+            job_type_bucket["failed_jobs"] = int(job_type_bucket.get("failed_jobs", 0)) + int(not was_successful)
+            job_type_usage[job_type_key] = job_type_bucket
+
+            stats.model_usage = model_usage
+            stats.job_type_usage = job_type_usage
+            stats.save(update_fields=[
+                "total_jobs",
+                "successful_jobs",
+                "failed_jobs",
+                "total_tokens",
+                "total_cost_usd",
+                "model_usage",
+                "job_type_usage",
+                "updated_at",
+            ])
+
 
 class AIPromptTemplate(models.Model):
     """
-    Store and version AI prompt templates for different job types.
-    Allows A/B testing and optimization of prompts.
+    Store prompt template drafts for admin review only.
+
+    The production runtime still loads prompt files from ai/prompts/.
+    These database rows are intentionally not part of live prompt selection.
     """
     
     TEMPLATE_TYPE_CHOICES = [
@@ -410,7 +481,7 @@ class AIPromptTemplate(models.Model):
     is_active = models.BooleanField(
         default=True,
         db_index=True,
-        help_text="Whether this template is currently in use"
+        help_text="Administrative flag only. Production prompt loading still uses ai/prompts/ assets."
     )
     
     is_default = models.BooleanField(

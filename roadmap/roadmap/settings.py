@@ -7,6 +7,8 @@ from datetime import timedelta
 from decouple import config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+JSON_RENDERER_CLASS = 'common.renderers.ContractJSONRenderer'
+BROWSABLE_RENDERER_CLASS = 'rest_framework.renderers.BrowsableAPIRenderer'
 
 
 def bool_env(name: str, default: bool = False) -> bool:
@@ -22,6 +24,35 @@ def bool_env(name: str, default: bool = False) -> bool:
     if value in falsy:
         return False
     raise ValueError(f"Invalid boolean value for {name}: {raw!r}")
+
+
+def build_default_renderer_classes(*, debug: bool) -> list[str]:
+    classes = [JSON_RENDERER_CLASS]
+    if debug:
+        classes.append(BROWSABLE_RENDERER_CLASS)
+    return classes
+
+
+def build_logging_config() -> dict:
+    return {
+        'version': 1,
+        'disable_existing_loggers': False,
+        'handlers': {
+            'console': {
+                'class': 'logging.StreamHandler',
+            },
+        },
+        'loggers': {
+            'django': {
+                'handlers': ['console'],
+                'level': 'INFO',
+            },
+            'authentication': {
+                'handlers': ['console'],
+                'level': 'DEBUG',
+            },
+        },
+    }
 
 # =============================================================================
 # BASIC SECURITY & DEBUG
@@ -195,12 +226,12 @@ CORS_ALLOW_HEADERS = [
 # =============================================================================
 
 REST_FRAMEWORK = {
+    # Launch auth contract: JWT is the supported application auth mechanism.
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
-    'DEFAULT_RENDERER_CLASSES': [
-        'common.renderers.ContractJSONRenderer',
-    ],
+    # Production stays JSON-only; the browsable API is added only in DEBUG below.
+    'DEFAULT_RENDERER_CLASSES': build_default_renderer_classes(debug=False),
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
@@ -239,39 +270,21 @@ GIE_ROLLOUT_ENABLED = bool_env("GIE_ROLLOUT_ENABLED", default=True)
 GIE_DEGRADED_MODE = bool_env("GIE_DEGRADED_MODE", default=False)
 
 # =============================================================================
-# LOGGING (console only for simplicity in dev)
+# LOGGING (console only in the active launch configuration)
+# The repository's roadmap/logs/ files are not active file handlers or a
+# separate logging subsystem unless explicit handlers are added here later.
 # =============================================================================
 
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-        },
-    },
-    'loggers': {
-        'django': {
-            'handlers': ['console'],
-            'level': 'INFO',
-        },
-        'authentication': {
-            'handlers': ['console'],
-            'level': 'DEBUG',
-        },
-    },
-}
+LOGGING = build_logging_config()
 
 # =============================================================================
 # DEVELOPMENT CONVENIENCE
 # =============================================================================
 
 if DEBUG:
-    # Show browsable API in dev
-    REST_FRAMEWORK['DEFAULT_RENDERER_CLASSES'] = [
-        'common.renderers.ContractJSONRenderer',
-        'rest_framework.renderers.BrowsableAPIRenderer',
-    ]
+    # Debug-only developer surface: browsable API renderer and /api-auth/ routes.
+    # Production remains JSON-only and JWT-only for supported app auth.
+    REST_FRAMEWORK['DEFAULT_RENDERER_CLASSES'] = build_default_renderer_classes(debug=True)
     
     # Longer tokens during dev (optional — comment out if you want short tokens)
     # SIMPLE_JWT['ACCESS_TOKEN_LIFETIME'] = timedelta(days=1)

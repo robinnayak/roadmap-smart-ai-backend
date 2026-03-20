@@ -23,10 +23,20 @@ GOAL_ATTRIBUTES_JOB_TYPE = "goal_attributes"
 # Maps primary_category → GoalAttributes field name
 CATEGORY_TO_FIELD = {
     "financial": "financial_data",
-    "career":    "career_data",
-    "health":    "health_data",
-    "personal":  "personal_data",
+    "finance": "financial_data",
+    "career": "career_data",
+    "health": "health_data",
+    "fitness": "health_data",
+    "wellness": "health_data",
+    "nutrition": "health_data",
+    "personal": "personal_data",
+    "productivity": "personal_data",
 }
+
+
+def resolve_goal_attributes_field(primary_category: str | None) -> str:
+    category = (primary_category or "").strip().lower()
+    return CATEGORY_TO_FIELD.get(category, "personal_data")
 
 
 class GoalAttributeExtractor(BaseAIService):
@@ -114,8 +124,7 @@ class GoalAttributeExtractor(BaseAIService):
             # Wrap the raw extracted data under the correct GoalAttributes field name
             # so the serializer / view can call GoalAttributes.objects.update_or_create
             # directly with the returned dict.
-            category = primary_category.lower()
-            field_name = CATEGORY_TO_FIELD.get(category, "personal_data")
+            field_name = resolve_goal_attributes_field(primary_category)
             structured_output = {field_name: parsed_data}
 
             # FIX 4: Use mark_completed() — handles status, timestamps, output_data,
@@ -124,6 +133,7 @@ class GoalAttributeExtractor(BaseAIService):
                 output_data=structured_output,
                 raw_response=response.content,
                 model_used=self.provider.model,
+                tokens=response.token_used or 0,
             )
 
             logger.info("Goal attribute extraction completed for goal %s", goal_id)

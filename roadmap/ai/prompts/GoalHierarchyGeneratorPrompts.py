@@ -77,7 +77,7 @@ IMPORTANT: Return JSON in this EXACT format:
         return prompt
 
     def get_task_generating_prompt(self, subgoal_data, milestone_data, goal_data):
-        resolved_category = goal_data.get("primary_category", "productivity")
+        resolved_category = goal_data.get("resolved_category") or goal_data.get("primary_category", "productivity")
         base_rules = _load("shared/base_rules.txt")
         type_schema = _load("shared/task_type_schema.txt")
         system = _load("goal_task/system.txt")
@@ -167,12 +167,13 @@ def _load_category(category: str) -> str:
 
 
 def _render_context(subgoal_data: dict, milestone_data: dict, goal_data: dict) -> str:
+    resolved_category = goal_data.get("resolved_category") or goal_data.get("primary_category", "")
     return f"""
 USER AND GOAL CONTEXT
 
 GOAL
 Title: {goal_data.get('title', '')}
-Category: {goal_data.get('primary_category', '')}
+Category: {resolved_category}
 Description: {goal_data.get('description', '')}
 Why It Matters: {_format_list(goal_data.get('why_it_matters', []))}
 Goal Motivation: {goal_data.get('why_do_i_want_this', '')}
