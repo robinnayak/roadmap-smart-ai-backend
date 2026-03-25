@@ -766,6 +766,39 @@ class DeviceSessionLimitTests(APITestCase):
         self.assertIn("tokens", newest_response.data)
         self.assertIn("access", newest_response.data["tokens"])
 
+@override_settings(MAX_ACTIVE_DEVICE_SESSIONS=0)
+class UnlimitedDeviceSessionTests(APITestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(
+            email="device-unlimited@test.com",
+            password="StrongPass123!",
+        )
+        self.login_url = reverse("user-login")
+        self.refresh_url = reverse("token-refresh")
+
+    def _login_and_get_refresh(self) -> str:
+        response = self.client.post(
+            self.login_url,
+            data={"email": self.user.email, "password": "StrongPass123!"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data["tokens"]["refresh"]
+
+    def test_login_from_multiple_devices_keeps_older_sessions_active(self):
+        refresh_tokens = [self._login_and_get_refresh() for _ in range(5)]
+
+        for refresh_token in refresh_tokens:
+            response = self.client.post(
+                self.refresh_url,
+                data={"refresh": refresh_token},
+                format="json",
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertIn("tokens", response.data)
+            self.assertIn("access", response.data["tokens"])
+
 
 class LogoutAndAuthContractTests(APITestCase):
     def setUp(self):

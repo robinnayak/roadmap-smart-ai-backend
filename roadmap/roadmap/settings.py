@@ -59,6 +59,8 @@ def build_logging_config() -> dict:
 # =============================================================================
 
 SECRET_KEY = config('DJANGO_SECRET_KEY', default='django-insecure-...change-me...')
+HUGGINGFACE_API_KEY = config("HUGGINGFACE_API_KEY", default="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")
+AI_DEBUG = bool_env("AI_DEBUG", default=False)
 
 DEBUG = bool_env('DEBUG', default=True)
 
@@ -184,6 +186,8 @@ USE_TZ = True
 # =============================================================================
 
 STATIC_URL = 'static/'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # =============================================================================
 # CUSTOM USER MODEL
@@ -261,9 +265,7 @@ SIMPLE_JWT = {
 }
 
 # Maximum number of concurrently active refresh-token sessions per user (device cap).
-MAX_ACTIVE_DEVICE_SESSIONS = max(
-    1, config("MAX_ACTIVE_DEVICE_SESSIONS", default=4, cast=int)
-)
+MAX_ACTIVE_DEVICE_SESSIONS = config("MAX_ACTIVE_DEVICE_SESSIONS", default=0, cast=int)
 
 # GIE rollout controls
 GIE_ROLLOUT_ENABLED = bool_env("GIE_ROLLOUT_ENABLED", default=True)

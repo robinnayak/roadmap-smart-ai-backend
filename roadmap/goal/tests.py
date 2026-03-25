@@ -1,9 +1,13 @@
+import shutil
+import tempfile
 from datetime import timedelta
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
+from django.core.files.storage import default_storage
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import transaction
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -27,6 +31,7 @@ from goal.services.timeline_ai_provider import (
 )
 from goal.services.timeline_conflict_detector import detect_goal_conflicts
 from goal.services.timeline_insight_service import GoalTimelineInsightService
+from goal.services.timeline_overview_insight_service import TimelineOverviewInsightService
 from goal.services.timeline_insight_contract import (
     TIMELINE_INSIGHT_TRIGGER_USER_CLICK,
     TimelineInsightBoundaryError,
@@ -35,6 +40,7 @@ from goal.services.timeline_insight_contract import (
 )
 from goal.services.timeline_similar_goal_detector import detect_similar_goals
 from goal.views import CreateGoalWithHierarchyAPIView
+from routine.models import DailyTaskItem, DailyTaskList
 
 
 def full_commitment_payload(*, user=None, goal_data=None, **overrides):
@@ -3292,6 +3298,123 @@ class TimelineInsightEndpointTests(APITestCase):
         self.assertEqual(self.goal.timeline_insight_payload, second_response.data)
 
 
+class TimelineOverviewInsightServiceTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="timeline-overview-service@test.com",
+            password="Password@123",
+        )
+        self.first_goal = Goal.objects.create(
+            user=self.user,
+            title="Launch product beta",
+            description="Ship beta with a small pilot cohort.",
+            primary_category="business",
+            priority="high",
+            status="in_progress",
+            progress_percentage=45,
+            target_date=timezone.localdate() + timedelta(days=20),
+        )
+        self.second_goal = Goal.objects.create(
+            user=self.user,
+            title="Improve fitness baseline",
+            description="Train four times per week and improve endurance.",
+            primary_category="fitness",
+            priority="medium",
+            status="in_progress",
+            progress_percentage=35,
+            target_date=timezone.localdate() + timedelta(days=40),
+        )
+        self.task_list = DailyTaskList.objects.create(
+            user=self.user,
+            date=timezone.localdate(),
+            total_tasks=4,
+            completed_tasks=2,
+            completion_percentage=50,
+            status="in_progress",
+        )
+        DailyTaskItem.objects.create(
+            task_list=self.task_list,
+            item_type="goal_task",
+            related_goal=self.first_goal,
+            title="Pilot onboarding calls",
+            priority="high",
+            estimated_minutes=180,
+            time_slot="morning",
+        )
+        DailyTaskItem.objects.create(
+            task_list=self.task_list,
+            item_type="goal_task",
+            related_goal=self.second_goal,
+            title="Workout session",
+            priority="high",
+            estimated_minutes=90,
+            time_slot="morning",
+        )
+        self.service = TimelineOverviewInsightService()
+
+    @patch("goal.services.timeline_overview_insight_service.get_timeline_ai_provider_adapter", side_effect=RuntimeError("offline"))
+    def test_service_returns_mobile_shape_with_real_progress_inputs(self, _mock_provider_factory):
+        payload = self.service.analyze(user=self.user)
+
+        self.assertEqual(set(payload.keys()), {
+            "plan_health_score",
+            "conflicts",
+            "at_risk_goals",
+            "recommendations",
+            "daily_hours_planned",
+            "delay_per_missed_day",
+            "weekly_success_rate",
+            "competing_goals_count",
+            "general_note",
+        })
+        self.assertIsInstance(payload["conflicts"], list)
+        self.assertIsInstance(payload["at_risk_goals"], list)
+        self.assertIsInstance(payload["recommendations"], list)
+        self.assertEqual(payload["competing_goals_count"], 2)
+        self.assertEqual(payload["weekly_success_rate"], 0.5)
+        self.assertGreaterEqual(payload["daily_hours_planned"], 4.0)
+        self.assertTrue(any(item["goal_id"] == str(self.first_goal.id) for item in payload["at_risk_goals"]))
+
+
+class TimelineOverviewInsightEndpointTests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="timeline-overview-endpoint@test.com",
+            password="Password@123",
+        )
+        self.goal = Goal.objects.create(
+            user=self.user,
+            title="Grow consulting pipeline",
+            description="Close two retainer clients.",
+            primary_category="career",
+            status="in_progress",
+            progress_percentage=55,
+            target_date=timezone.localdate() + timedelta(days=25),
+        )
+        self.url = "/goal/goals/timeline-insight/"
+
+    def test_endpoint_requires_authentication(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch("goal.services.timeline_overview_insight_service.get_timeline_ai_provider_adapter")
+    def test_endpoint_returns_ai_validated_mobile_shape(self, mock_provider_factory):
+        mock_provider_factory.return_value = _FakeTimelineAdapter(
+            responses=[
+                '{"plan_health_score":81.2,"conflicts":[],"at_risk_goals":[{"goal_id":"%s","goal_title":"Grow consulting pipeline","progress_percentage":55,"days_remaining":25,"description":"Grow consulting pipeline is at risk - 55%% done with 25 day(s) left."}],"recommendations":[{"text":"Protect two high-value sales blocks this week."}],"daily_hours_planned":3.5,"delay_per_missed_day":2,"weekly_success_rate":0.74,"competing_goals_count":1,"general_note":"Your plan looks realistic. Keep this pace."}'
+                % self.goal.id
+            ]
+        )
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["plan_health_score"], 81.2)
+        self.assertEqual(response.data["at_risk_goals"][0]["goal_id"], str(self.goal.id))
+        self.assertEqual(response.data["recommendations"][0]["text"], "Protect two high-value sales blocks this week.")
+
+
 class GoalCategoryNormalizationContractTests(APITestCase):
     def setUp(self):
         self.user = CustomUser.objects.create_user(
@@ -3561,3 +3684,102 @@ class GoalCategoryMigrationTests(TransactionTestCase):
         self.assertEqual(categories["Legacy Health"], "fitness")
         self.assertEqual(categories["Legacy Personal"], "productivity")
         self.assertEqual(categories["Canonical Career"], "career")
+
+
+TEMP_MEDIA_ROOT = tempfile.mkdtemp(prefix="goal_illustration_test_media_")
+
+
+@override_settings(MEDIA_ROOT=TEMP_MEDIA_ROOT)
+class GoalIllustrationContractTests(APITestCase):
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(TEMP_MEDIA_ROOT, ignore_errors=True)
+
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="goal-illustration@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.goal = Goal.objects.create(
+            user=self.user,
+            title="Illustration Goal",
+            description="Test illustration status handling.",
+            primary_category="career",
+            target_date=timezone.localdate() + timedelta(days=30),
+        )
+        self.illustration_url = f"/goal/goals/{self.goal.id}/illustration/"
+
+    def test_upload_succeeds_with_valid_png(self):
+        image = SimpleUploadedFile("illustration.png", b"png-content", content_type="image/png")
+
+        response = self.client.post(self.illustration_url, data={"image": image}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.goal.refresh_from_db()
+        self.assertEqual(self.goal.illustration_status, "done")
+        self.assertTrue(self.goal.illustration_url)
+        stored_path = self.goal.illustration_url.split("/media/", 1)[1]
+        self.assertTrue(default_storage.exists(stored_path))
+
+    def test_upload_rejects_missing_file(self):
+        response = self.client.post(self.illustration_url, data={}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["image"][0], "Please upload an image file.")
+
+    def test_upload_rejects_invalid_file_type(self):
+        image = SimpleUploadedFile("illustration.gif", b"gif-content", content_type="image/gif")
+
+        response = self.client.post(self.illustration_url, data={"image": image}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["image"][0], "Please upload a JPG, PNG, or WebP image.")
+
+    def test_upload_rejects_oversized_file(self):
+        image = SimpleUploadedFile(
+            "illustration.png",
+            b"a" * (5 * 1024 * 1024 + 1),
+            content_type="image/png",
+        )
+
+        response = self.client.post(self.illustration_url, data={"image": image}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["image"][0], "Please upload an image smaller than 5 MB.")
+
+    def test_upload_replaces_previous_local_file(self):
+        first_image = SimpleUploadedFile("first.png", b"first", content_type="image/png")
+        second_image = SimpleUploadedFile("second.png", b"second", content_type="image/png")
+
+        first_response = self.client.post(self.illustration_url, data={"image": first_image}, format="multipart")
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.goal.refresh_from_db()
+        first_path = self.goal.illustration_url.split("/media/", 1)[1]
+        self.assertTrue(default_storage.exists(first_path))
+
+        second_response = self.client.post(self.illustration_url, data={"image": second_image}, format="multipart")
+
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.goal.refresh_from_db()
+        second_path = self.goal.illustration_url.split("/media/", 1)[1]
+        self.assertNotEqual(first_path, second_path)
+        self.assertFalse(default_storage.exists(first_path))
+        self.assertTrue(default_storage.exists(second_path))
+
+    def test_delete_clears_image_and_file(self):
+        image = SimpleUploadedFile("illustration.png", b"png-content", content_type="image/png")
+        upload_response = self.client.post(self.illustration_url, data={"image": image}, format="multipart")
+        self.assertEqual(upload_response.status_code, status.HTTP_200_OK)
+
+        self.goal.refresh_from_db()
+        stored_path = self.goal.illustration_url.split("/media/", 1)[1]
+
+        response = self.client.delete(self.illustration_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.goal.refresh_from_db()
+        self.assertEqual(self.goal.illustration_status, "pending")
+        self.assertIsNone(self.goal.illustration_url)
+        self.assertFalse(default_storage.exists(stored_path))

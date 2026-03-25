@@ -1,3 +1,11 @@
+import uuid
+from copy import deepcopy
+from django.db import models
+from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator, MaxValueValidator
+from django.utils import timezone
+from goal.services.category_resolver import GOAL_CATEGORY_CHOICES, DEFAULT_GOAL_CATEGORY
+
 # =============================================================================
 # roadmap/ai/models.py  (AIProcessingJob - relevant fixes shown)
 # =============================================================================
@@ -28,16 +36,6 @@
 #       ('cancelled', 'Cancelled'),
 #   ]
 #
-
-import uuid
-from copy import deepcopy
-from django.db import models
-from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator, MaxValueValidator
-from django.utils import timezone
-from goal.services.category_resolver import GOAL_CATEGORY_CHOICES, DEFAULT_GOAL_CATEGORY
-
-
 class UserCurrentSituationGoal(models.Model):
     """Structured output extracted from AI for user situation & goals."""
 
@@ -321,6 +319,16 @@ confidence'}
         blank=True,
         help_text="Cached read-only timeline insight payload for this goal.",
     )
+    illustration_url = models.URLField(blank=True, null=True)
+    illustration_status = models.CharField(
+        max_length=20,
+        choices=[
+            ("pending", "Pending"),
+            ("done", "Done"),
+        ],
+        default="pending",
+    )
+    illustration_generated_at = models.DateTimeField(null=True, blank=True)
     timeline_insight_fingerprint = models.CharField(
         max_length=64,
         blank=True,

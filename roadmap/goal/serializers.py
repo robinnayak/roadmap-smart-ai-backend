@@ -501,6 +501,8 @@ class GoalSerializer(serializers.ModelSerializer):
     )
     primary_category = serializers.CharField(required=False, allow_blank=False)
     category_pillar = serializers.CharField(required=False, allow_blank=False, allow_null=True)
+    display_username = serializers.SerializerMethodField()
+    why_summary = serializers.SerializerMethodField()
 
     class Meta:
         model = Goal
@@ -511,6 +513,10 @@ class GoalSerializer(serializers.ModelSerializer):
             "why_it_matters",
             "primary_category",
             "category_pillar",
+            "display_username",
+            "why_summary",
+            "illustration_url",
+            "illustration_status",
             "impact_dimensions",
             "priority",
             "status",
@@ -554,6 +560,10 @@ class GoalSerializer(serializers.ModelSerializer):
             "days_remaining",
             "is_overdue",
             "attributes",
+            "display_username",
+            "why_summary",
+            "illustration_url",
+            "illustration_status",
             "created_at",
             "updated_at",
         ]
@@ -801,6 +811,17 @@ class GoalSerializer(serializers.ModelSerializer):
         data["category_pillar"] = canonical_to_pillar(instance.primary_category)
         return data
 
+    def get_display_username(self, obj) -> str:
+        full_name = obj.user.get_full_name() if hasattr(obj.user, "get_full_name") else ""
+        if full_name:
+            return full_name
+        return getattr(obj.user, "email", "") or getattr(obj.user, "username", "")
+
+    def get_why_summary(self, obj) -> str:
+        why_it_matters = obj.why_it_matters if isinstance(obj.why_it_matters, list) else []
+        first_reason = why_it_matters[0] if why_it_matters else ""
+        return first_reason if isinstance(first_reason, str) else ""
+
 
 # ---------------------------------------------------------------------------
 # Goal — list & detail variants (read-only, with hierarchy counts)
@@ -818,6 +839,8 @@ class GoalListSerializer(serializers.ModelSerializer):
     completed_milestones = serializers.SerializerMethodField()
     needs_profile_review = serializers.SerializerMethodField()
     category_pillar = serializers.SerializerMethodField()
+    display_username = serializers.SerializerMethodField()
+    why_summary = serializers.SerializerMethodField()
 
     class Meta:
         model = Goal
@@ -826,6 +849,10 @@ class GoalListSerializer(serializers.ModelSerializer):
             "title",
             "primary_category",
             "category_pillar",
+            "display_username",
+            "why_summary",
+            "illustration_url",
+            "illustration_status",
             "priority",
             "status",
             "progress_percentage",
@@ -851,6 +878,17 @@ class GoalListSerializer(serializers.ModelSerializer):
 
     def get_category_pillar(self, obj) -> str:
         return canonical_to_pillar(obj.primary_category)
+
+    def get_display_username(self, obj) -> str:
+        full_name = obj.user.get_full_name() if hasattr(obj.user, "get_full_name") else ""
+        if full_name:
+            return full_name
+        return getattr(obj.user, "email", "") or getattr(obj.user, "username", "")
+
+    def get_why_summary(self, obj) -> str:
+        why_it_matters = obj.why_it_matters if isinstance(obj.why_it_matters, list) else []
+        first_reason = why_it_matters[0] if why_it_matters else ""
+        return first_reason if isinstance(first_reason, str) else ""
 
 
 class GoalDetailSerializer(serializers.ModelSerializer):

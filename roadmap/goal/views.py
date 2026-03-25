@@ -25,8 +25,10 @@ from django.shortcuts import render
 from django.core.exceptions import ImproperlyConfigured
 from .serializers import UserCurrentSituationGoalSerializer
 from rest_framework.views import APIView
+from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.shortcuts import get_object_or_404
 from .models import (
     UserCurrentSituationGoal,
@@ -114,12 +116,17 @@ from goal.services.timeline_insight_contract import (
     assert_read_only_timeline_insight_request,
 )
 from goal.services.timeline_insight_service import GoalTimelineInsightService
+from goal.services.timeline_overview_insight_service import TimelineOverviewInsightService
+from goal.services.illustration_service import (
+    ALLOWED_ILLUSTRATION_CONTENT_TYPES,
+    MAX_ILLUSTRATION_SIZE_BYTES,
+    clear_goal_illustration,
+    save_goal_illustration,
+)
 from ai.utils.validators import normalize_task_type
 
 
 logger = logging.getLogger(__name__)
-
-
 # Create your views here.
 
 # Priority sort order used in Python (CharField can't sort high>medium>low in DB)
@@ -132,6 +139,25 @@ def _get_profile_review_state(user):
         "needs_profile_review": bool(profile and profile.needs_review),
         "review_reason": profile.review_reason if profile else "",
     }
+
+
+def _build_illustration_response(goal):
+    message_by_status = {
+        "pending": "No illustration uploaded yet.",
+        "done": "Illustration uploaded.",
+    }
+    payload = {
+        "status": goal.illustration_status,
+        "illustration_url": goal.illustration_url,
+        "message": message_by_status.get(goal.illustration_status, "Illustration status updated."),
+    }
+    if get_ai_debug_enabled():
+        payload["debug"] = {
+            "goal_id": str(goal.id),
+            "has_url": bool(goal.illustration_url),
+            "generated_at": goal.illustration_generated_at.isoformat() if goal.illustration_generated_at else None,
+        }
+    return payload
 
 
 
@@ -1303,14 +1329,22 @@ class GoalListAPIView(APIView):
         for goal in goals:
             days_left = goal.days_remaining  # @property on model
             is_overdue = goal.is_overdue     # @property on model
+            full_name = goal.user.get_full_name() if hasattr(goal.user, "get_full_name") else ""
+            display_username = full_name or getattr(goal.user, "email", "") or getattr(goal.user, "username", "")
+            why_summary = ""
+            if isinstance(goal.why_it_matters, list) and goal.why_it_matters:
+                first_reason = goal.why_it_matters[0]
+                why_summary = first_reason if isinstance(first_reason, str) else ""
 
             goals_data.append({
                 "id":                  str(goal.id),
                 "title":               goal.title,
                 "description":         goal.description,
                 "why_it_matters":      goal.why_it_matters,
+                "why_summary":         why_summary,
                 "primary_category":    goal.primary_category,
                 "category_pillar":     canonical_to_pillar(goal.primary_category),
+                "display_username":    display_username,
                 "priority":            goal.priority,
                 "status":              goal.status,
                 "progress_percentage": goal.progress_percentage,
@@ -1327,6 +1361,8 @@ class GoalListAPIView(APIView):
                 "financial_required_monthly_savings": float(goal.financial_required_monthly_savings) if goal.financial_required_monthly_savings is not None else None,
                 "financial_months_remaining": goal.financial_months_remaining,
                 "financial_gap_amount": float(goal.financial_gap_amount) if goal.financial_gap_amount is not None else None,
+                "illustration_url":    goal.illustration_url,
+                "illustration_status": goal.illustration_status,
                 # Counts for the milestone progress indicator on each card
                 "milestone_count":     goal.milestone_count,
                 "completed_milestones": goal.completed_milestones,
@@ -1552,6 +1588,15 @@ class GoalTimelineInsightAPIView(GoalProductionApiView):
         return Response(insight_payload, status=status.HTTP_200_OK)
 
 
+class TimelineOverviewInsightAPIView(GoalProductionApiView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        service = TimelineOverviewInsightService()
+        insight_payload = service.analyze(user=request.user)
+        return Response(insight_payload, status=status.HTTP_200_OK)
+
+
 class TaskDetailApiView(GoalProductionApiView):
     permission_classes = [IsAuthenticated]
     def _get_task(self, task_id, user):
@@ -1758,6 +1803,39 @@ class CommitmentContractAPIView(APIView):
             )
         contract.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(["POST", "DELETE"])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def illustration_endpoint(request, goal_id):
+    goal = get_object_or_404(Goal, id=goal_id, user=request.user)
+
+    if request.method == "DELETE":
+        clear_goal_illustration(goal)
+        payload = _build_illustration_response(goal)
+        payload["message"] = "Illustration removed."
+        return Response(payload, status=status.HTTP_200_OK)
+
+    uploaded_file = request.FILES.get("image")
+
+    if uploaded_file is None:
+        return Response({"image": ["Please upload an image file."]}, status=status.HTTP_400_BAD_REQUEST)
+
+    if uploaded_file.content_type not in ALLOWED_ILLUSTRATION_CONTENT_TYPES:
+        return Response({"image": ["Please upload a JPG, PNG, or WebP image."]}, status=status.HTTP_400_BAD_REQUEST)
+
+    if uploaded_file.size > MAX_ILLUSTRATION_SIZE_BYTES:
+        return Response({"image": ["Please upload an image smaller than 5 MB."]}, status=status.HTTP_400_BAD_REQUEST)
+
+    illustration_url = save_goal_illustration(goal, uploaded_file)
+    if illustration_url.startswith("/"):
+        goal.illustration_url = request.build_absolute_uri(illustration_url)
+        goal.save(update_fields=["illustration_url", "updated_at"])
+
+    payload = _build_illustration_response(goal)
+    payload["message"] = "Illustration uploaded."
+    return Response(payload, status=status.HTTP_200_OK)
 
 
     

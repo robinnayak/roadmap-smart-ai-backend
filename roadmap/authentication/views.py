@@ -83,7 +83,9 @@ def _enforce_active_session_limit(user, keep_jti=None):
     Keep at most MAX_ACTIVE_DEVICE_SESSIONS active refresh-token sessions per user.
     Older active sessions are blacklisted.
     """
-    max_sessions = max(1, int(getattr(settings, "MAX_ACTIVE_DEVICE_SESSIONS", 4)))
+    max_sessions = int(getattr(settings, "MAX_ACTIVE_DEVICE_SESSIONS", 0))
+    if max_sessions <= 0:
+        return
 
     active_tokens = []
     tokens = (
