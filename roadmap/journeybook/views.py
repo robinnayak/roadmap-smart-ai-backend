@@ -27,7 +27,12 @@ from journeybook.serializers import (
 )
 from journeybook.services.ai_generator import AIGenerator, ChapterFallbacks
 from journeybook.services.data_collector import DataCollector
-from journeybook.services.demo_mode import build_demo_book_payload, build_demo_pdf_bytes
+from journeybook.services.demo_mode import (
+    build_demo_book_payload,
+    build_demo_pdf_bytes,
+    get_or_create_demo_book_payload,
+    get_or_create_demo_pdf_bytes,
+)
 from journeybook.services.image_generator import ImageGenerator
 from journeybook.services.metrics_calculator import MetricsCalculator
 from journeybook.services.pdf_builder import PDFBuilder
@@ -179,15 +184,15 @@ class JourneyBookViewSet(ModelViewSet):
         serializer = BookEligibilitySerializer(instance=eligibility)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["get"], renderer_classes=[PDFBinaryRenderer, JSONRenderer])
     def download(self, request, pk=None):
         book = self.get_object()
         if not book.pdf_file:
-            return Response({"error": "Book not ready"}, status=status.HTTP_404_NOT_FOUND)
+            return JsonResponse({"error": "Book not ready"}, status=status.HTTP_404_NOT_FOUND)
         try:
             response = FileResponse(book.pdf_file.open("rb"), content_type="application/pdf")
         except (FileNotFoundError, OSError, ValueError):
-            return Response(
+            return JsonResponse(
                 self._export_error_payload(
                     error_type=self.ERROR_TYPE_STORAGE_ERROR,
                     fallback_available=book.status == JourneyBook.STATUS_FAILED,
@@ -309,9 +314,13 @@ class JourneyBookViewSet(ModelViewSet):
     @action(detail=True, methods=["get"])
     def preview(self, request, pk=None):
         book = self.get_object()
+        if book.status == JourneyBook.STATUS_READY:
+            payload = self._build_reader_payload(book)
+            return Response(payload, status=status.HTTP_200_OK)
+
         if book.status != JourneyBook.STATUS_FAILED:
             return Response(
-                {"error": "Preview is available only for failed Journey Books."},
+                {"error": "Preview is available only for ready or failed Journey Books."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -754,6 +763,28 @@ class JourneyBookViewSet(ModelViewSet):
                 "stats": self._preview_stats(book),
             }
 
+    def _build_reader_payload(self, book: JourneyBook) -> dict[str, Any]:
+        chapters = [
+            {
+                "chapter_number": chapter.chapter_number,
+                "chapter_title": chapter.chapter_title,
+                "content": chapter.content,
+                "is_projection": bool(chapter.is_projection),
+                "word_count": chapter.word_count,
+            }
+            for chapter in book.chapters.order_by("chapter_number")
+        ]
+
+        return {
+            "book_id": str(book.id),
+            "book_type": book.book_type,
+            "title": self._preview_title(book),
+            "subtitle": self._preview_subtitle(book),
+            "source": "ready_book",
+            "stats": self._preview_stats_best_effort(book),
+            "chapters": chapters,
+        }
+
     def _collect_preview_metrics(self, book: JourneyBook) -> tuple[dict[str, Any], dict[str, Any]]:
         selected_goals = list(book.goals.all())
         if not selected_goals and book.goal_id and book.goal:
@@ -938,7 +969,7 @@ class JourneyBookDemoPreviewAPIView(APIView):
         trim_size = request.query_params.get("trim_size")
         if book_type not in {JourneyBook.BOOK_TYPE_COMPLETE, JourneyBook.BOOK_TYPE_IN_PROGRESS}:
             book_type = JourneyBook.BOOK_TYPE_COMPLETE
-        payload = build_demo_book_payload(book_type=book_type, trim_size=trim_size)
+        payload = get_or_create_demo_book_payload(book_type=book_type, trim_size=trim_size)
         return Response(payload, status=status.HTTP_200_OK)
 
 
@@ -955,7 +986,7 @@ class JourneyBookDemoPreviewPDFAPIView(APIView):
             book_type = JourneyBook.BOOK_TYPE_COMPLETE
 
         try:
-            pdf_bytes, payload = build_demo_pdf_bytes(book_type=book_type, trim_size=trim_size)
+            pdf_bytes, payload = get_or_create_demo_pdf_bytes(book_type=book_type, trim_size=trim_size)
         except RuntimeError as exc:
             logger.error("Journey Book demo PDF export failed due to missing PDF engine: %s", exc)
             return JsonResponse(

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+from io import BytesIO
+from pathlib import Path
 from typing import Any
+
+from django.conf import settings
 
 from journeybook.models import JourneyBook
 from journeybook.services.ai_generator import AIGenerator, ChapterFallbacks, MotivationalFallbacks
@@ -108,6 +113,51 @@ def _summary_source(ai_count: int, fallback_count: int) -> str:
     return "fallback"
 
 
+def _demo_artifact_paths(book_type: str | None, trim_size: str | None) -> tuple[str, str, Path, Path]:
+    normalized_book_type = _normalize_book_type(book_type)
+    normalized_trim = normalize_trim_size(trim_size)
+    filename_trim = normalized_trim.replace(".", "_")
+    demo_dir = Path(settings.MEDIA_ROOT) / "journey_books" / "demo"
+    return (
+        normalized_book_type,
+        normalized_trim,
+        demo_dir / f"journey_book_demo_{normalized_book_type}_{filename_trim}.json",
+        demo_dir / f"journey_book_demo_{normalized_book_type}_{filename_trim}.pdf",
+    )
+
+
+def _read_cached_payload(path: Path) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
+def _build_pdf_bytes_from_payload(payload: dict[str, Any]) -> BytesIO:
+    demo_data = get_demo_journey_data()
+    metrics = _build_demo_metrics(demo_data)
+    chapter_texts = [chapter["content"] for chapter in payload["chapters"]]
+    motivational_texts = [page["content"] for page in payload["motivational_pages"]]
+
+    pdf_builder = PDFBuilder(
+        user_data=demo_data,
+        metrics=metrics,
+        book_type=payload["book_type"],
+        trim_size=payload["print_spec"]["trim_size"],
+    )
+    return pdf_builder.build(chapter_texts, motivational_texts, {})
+
+
 def build_demo_book_payload(book_type: str | None, trim_size: str | None = None) -> dict[str, Any]:
     normalized_book_type = _normalize_book_type(book_type)
     normalized_trim = normalize_trim_size(trim_size)
@@ -196,6 +246,20 @@ def build_demo_book_payload(book_type: str | None, trim_size: str | None = None)
     }
 
 
+def get_or_create_demo_book_payload(book_type: str | None, trim_size: str | None = None) -> dict[str, Any]:
+    normalized_book_type, normalized_trim, payload_path, _pdf_path = _demo_artifact_paths(
+        book_type,
+        trim_size,
+    )
+    cached_payload = _read_cached_payload(payload_path)
+    if cached_payload:
+        return cached_payload
+
+    payload = build_demo_book_payload(book_type=normalized_book_type, trim_size=normalized_trim)
+    _write_json(payload_path, payload)
+    return payload
+
+
 def build_demo_pdf_bytes(
     book_type: str | None,
     trim_size: str | None = None,
@@ -214,4 +278,34 @@ def build_demo_pdf_bytes(
         trim_size=payload["print_spec"]["trim_size"],
     )
     pdf_bytes = pdf_builder.build(chapter_texts, motivational_texts, {})
+    return pdf_bytes, payload
+
+
+def get_or_create_demo_pdf_bytes(
+    book_type: str | None,
+    trim_size: str | None = None,
+):
+    normalized_book_type, normalized_trim, payload_path, pdf_path = _demo_artifact_paths(
+        book_type,
+        trim_size,
+    )
+
+    payload = _read_cached_payload(payload_path)
+    if not payload:
+        payload = build_demo_book_payload(book_type=normalized_book_type, trim_size=normalized_trim)
+        _write_json(payload_path, payload)
+
+    try:
+        cached_pdf = pdf_path.read_bytes()
+    except FileNotFoundError:
+        cached_pdf = None
+    except OSError:
+        cached_pdf = None
+
+    if cached_pdf is not None:
+        return BytesIO(cached_pdf), payload
+
+    pdf_bytes = _build_pdf_bytes_from_payload(payload)
+    _write_bytes(pdf_path, pdf_bytes.getvalue())
+    pdf_bytes.seek(0)
     return pdf_bytes, payload

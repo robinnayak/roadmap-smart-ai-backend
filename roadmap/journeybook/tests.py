@@ -400,6 +400,29 @@ class JourneyBookAPITestCase(TestCase):
         body = response.json()
         self.assertEqual(body["print_spec"]["trim_size"], "6x9")
 
+    @patch("journeybook.services.demo_mode.AIGenerator.generate_motivational_page", return_value="demo motivation")
+    @patch("journeybook.services.demo_mode.AIGenerator.generate_chapter", return_value="demo chapter")
+    def test_public_demo_preview_reuses_stored_payload_after_first_generation(
+        self,
+        mock_generate_chapter,
+        mock_generate_motivational_page,
+    ):
+        anon_client = APIClient()
+        url = reverse("journeybook-demo-preview")
+
+        first = anon_client.get(url, {"book_type": "complete", "trim_size": "6x9"})
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        first_chapter_calls = mock_generate_chapter.call_count
+        first_motivation_calls = mock_generate_motivational_page.call_count
+        self.assertGreater(first_chapter_calls, 0)
+        self.assertGreater(first_motivation_calls, 0)
+
+        second = anon_client.get(url, {"book_type": "complete", "trim_size": "6x9"})
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(mock_generate_chapter.call_count, first_chapter_calls)
+        self.assertEqual(mock_generate_motivational_page.call_count, first_motivation_calls)
+        self.assertEqual(first.json(), second.json())
+
     @patch(
         "journeybook.services.demo_mode.PDFBuilder.build",
         return_value=BytesIO(b"%PDF-1.4\nmock-demo\n%%EOF"),
@@ -441,7 +464,24 @@ class JourneyBookAPITestCase(TestCase):
         self.assertIn("journey_book_demo_complete_6x9.pdf", response.get("Content-Disposition", ""))
 
     @patch(
-        "journeybook.views.build_demo_pdf_bytes",
+        "journeybook.services.demo_mode.PDFBuilder.build",
+        return_value=BytesIO(b"%PDF-1.4\ncached-demo\n%%EOF"),
+    )
+    def test_public_demo_preview_pdf_reuses_stored_file_after_first_generation(self, mock_pdf_build):
+        anon_client = APIClient()
+        url = reverse("journeybook-demo-preview-pdf")
+
+        first = anon_client.get(url, {"book_type": "complete", "trim_size": "6x9"})
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(mock_pdf_build.call_count, 1)
+
+        second = anon_client.get(url, {"book_type": "complete", "trim_size": "6x9"})
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(mock_pdf_build.call_count, 1)
+        self.assertEqual(first.content, second.content)
+
+    @patch(
+        "journeybook.views.get_or_create_demo_pdf_bytes",
         side_effect=RuntimeError("ReportLab is required to build Journey Book PDFs."),
     )
     def test_public_demo_preview_pdf_returns_503_when_pdf_engine_missing(self, _mock_pdf):
@@ -692,6 +732,15 @@ class JourneyBookAPITestCase(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("application/pdf", response.get("Content-Type", ""))
 
+    def test_download_accepting_application_pdf_returns_pdf(self):
+        goal = self._create_goal(status="completed")
+        book = self._create_book(goal=goal, with_pdf=True, status_value=JourneyBook.STATUS_READY)
+
+        url = reverse("journeybook:journeybook-download", args=[str(book.id)])
+        response = self.client.get(url, HTTP_ACCEPT="application/pdf")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("application/pdf", response.get("Content-Type", ""))
+
     def test_download_not_ready_returns_404(self):
         goal = self._create_goal(status="in_progress")
         book = self._create_book(goal=goal, status_value=JourneyBook.STATUS_GENERATING)
@@ -715,6 +764,22 @@ class JourneyBookAPITestCase(TestCase):
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["error_type"], "STORAGE_ERROR")
         self.assertIn("fallback_available", payload)
+
+    @patch(
+        "journeybook.models.JourneyBook.pdf_file.field.storage.open",
+        side_effect=FileNotFoundError("missing file"),
+    )
+    def test_download_missing_storage_file_with_pdf_accept_returns_json_error(self, _mock_open):
+        goal = self._create_goal(status="completed")
+        book = self._create_book(goal=goal, with_pdf=True, status_value=JourneyBook.STATUS_READY)
+
+        url = reverse("journeybook:journeybook-download", args=[str(book.id)])
+        response = self.client.get(url, HTTP_ACCEPT="application/pdf")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn("application/json", response.get("Content-Type", ""))
+        payload = response.json()
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error_type"], "STORAGE_ERROR")
 
     @patch(
         "journeybook.services.pdf_builder.PDFBuilder.build",

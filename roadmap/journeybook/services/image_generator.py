@@ -207,6 +207,8 @@ class ImageGenerator:
     @staticmethod
     def _load_matplotlib():
         try:
+            import matplotlib
+            matplotlib.use("Agg")
             import matplotlib.pyplot as plt
             from matplotlib import patches
 
