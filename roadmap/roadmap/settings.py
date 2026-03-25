@@ -59,10 +59,10 @@ def build_logging_config() -> dict:
 # =============================================================================
 
 SECRET_KEY = config('DJANGO_SECRET_KEY', default='django-insecure-...change-me...')
-HUGGINGFACE_API_KEY = config("HUGGINGFACE_API_KEY", default="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")
+HUGGINGFACE_API_KEY = config("HUGGINGFACE_API_KEY", default="")
 AI_DEBUG = bool_env("AI_DEBUG", default=False)
 
-DEBUG = bool_env('DEBUG', default=True)
+DEBUG = bool_env('DEBUG', default=False)
 
 _env_allowed_hosts = [host.strip() for host in config('ALLOWED_HOSTS', default='').split(',') if host.strip()]
 
@@ -78,11 +78,8 @@ def _normalize_allowed_host(host: str) -> str:
 
 
 _normalized_env_hosts = [_normalize_allowed_host(host) for host in _env_allowed_hosts]
-ALLOWED_HOSTS = list(
-    dict.fromkeys(
-        ['localhost', '127.0.0.1', '::1', '.ngrok-free.app', '.ngrok.app'] + _normalized_env_hosts
-    )
-)
+_local_allowed_hosts = ['localhost', '127.0.0.1', '::1', '.ngrok-free.app', '.ngrok.app']
+ALLOWED_HOSTS = list(dict.fromkeys(_local_allowed_hosts + _normalized_env_hosts))
 
 # =============================================================================
 # INSTALLED_APPS & MIDDLEWARE
@@ -150,16 +147,34 @@ TEMPLATES = [
 WSGI_APPLICATION = 'roadmap.wsgi.application'
 
 # =============================================================================
-# DATABASE (SQLite for dev — easy & fast)
+# DATABASE
 # =============================================================================
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-        'OPTIONS': {'timeout': 20},
+DB_ENGINE = config('DB_ENGINE', default='').strip()
+
+if DB_ENGINE:
+    DATABASES = {
+        'default': {
+            'ENGINE': DB_ENGINE,
+            'NAME': config('DB_NAME', default=''),
+            'USER': config('DB_USER', default=''),
+            'PASSWORD': config('DB_PASSWORD', default=''),
+            'HOST': config('DB_HOST', default='localhost'),
+            'PORT': config('DB_PORT', default=5432, cast=int),
+            'CONN_MAX_AGE': config('DB_CONN_MAX_AGE', default=60, cast=int),
+        }
     }
-}
+    db_sslmode = config('DB_SSLMODE', default='').strip()
+    if db_sslmode:
+        DATABASES['default']['OPTIONS'] = {'sslmode': db_sslmode}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+            'OPTIONS': {'timeout': 20},
+        }
+    }
 
 # =============================================================================
 # PASSWORD VALIDATION
@@ -317,3 +332,12 @@ EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@example.com")
 PASSWORD_RESET_URL = config("PASSWORD_RESET_URL", default="")
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = bool_env("SECURE_SSL_REDIRECT", default=True)
+    SESSION_COOKIE_SECURE = bool_env("SESSION_COOKIE_SECURE", default=True)
+    CSRF_COOKIE_SECURE = bool_env("CSRF_COOKIE_SECURE", default=True)
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_HSTS_SECONDS = config("SECURE_HSTS_SECONDS", default=31536000, cast=int)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = bool_env("SECURE_HSTS_INCLUDE_SUBDOMAINS", default=True)
+    SECURE_HSTS_PRELOAD = bool_env("SECURE_HSTS_PRELOAD", default=True)

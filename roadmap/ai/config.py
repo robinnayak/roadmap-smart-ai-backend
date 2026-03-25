@@ -1,28 +1,41 @@
 import os
 
+from decouple import config as env_config
+
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "gpt-oss:120b-cloud"
 REQUIRED_AI_ENV_VARS = ("OLLAMA_HOST",)
 
 
+def _get_env_value(name: str) -> str:
+    direct_value = (os.getenv(name) or "").strip()
+    if direct_value:
+        return direct_value
+
+    try:
+        return (env_config(name, default="") or "").strip()
+    except Exception:
+        return ""
+
+
 def get_ollama_model() -> str:
-    return (os.getenv("OLLAMA_MODEL") or "").strip() or DEFAULT_OLLAMA_MODEL
+    return _get_env_value("OLLAMA_MODEL") or DEFAULT_OLLAMA_MODEL
 
 
 def get_hierarchy_model() -> str:
-    return (os.getenv("HIERARCHY_MODEL") or "").strip() or get_ollama_model()
+    return _get_env_value("HIERARCHY_MODEL") or get_ollama_model()
 
 
 def get_journeybook_model() -> str:
-    return (os.getenv("JOURNEYBOOK_MODEL") or "").strip() or get_ollama_model()
+    return _get_env_value("JOURNEYBOOK_MODEL") or get_ollama_model()
 
 
 def get_ollama_host() -> str:
-    return (os.getenv("OLLAMA_HOST") or "").strip() or DEFAULT_OLLAMA_HOST
+    return _get_env_value("OLLAMA_HOST") or DEFAULT_OLLAMA_HOST
 
 
 def get_ollama_request_timeout_seconds() -> float:
-    raw = (os.getenv("OLLAMA_REQUEST_TIMEOUT_SECONDS") or "").strip()
+    raw = _get_env_value("OLLAMA_REQUEST_TIMEOUT_SECONDS")
     if not raw:
         return 180.0
     try:
@@ -32,7 +45,7 @@ def get_ollama_request_timeout_seconds() -> float:
 
 
 def get_ollama_max_retries() -> int:
-    raw = (os.getenv("OLLAMA_MAX_RETRIES") or "").strip()
+    raw = _get_env_value("OLLAMA_MAX_RETRIES")
     if not raw:
         return 2
     try:
@@ -42,7 +55,7 @@ def get_ollama_max_retries() -> int:
 
 
 def get_ollama_retry_backoff_seconds() -> float:
-    raw = (os.getenv("OLLAMA_RETRY_BACKOFF_SECONDS") or "").strip()
+    raw = _get_env_value("OLLAMA_RETRY_BACKOFF_SECONDS")
     if not raw:
         return 0.75
     try:
@@ -52,7 +65,7 @@ def get_ollama_retry_backoff_seconds() -> float:
 
 
 def get_ollama_trust_env() -> bool:
-    raw = (os.getenv("OLLAMA_TRUST_ENV") or "").strip().lower()
+    raw = _get_env_value("OLLAMA_TRUST_ENV").lower()
     if raw in {"1", "true", "yes", "on"}:
         return True
     if raw in {"0", "false", "no", "off"}:
@@ -62,16 +75,14 @@ def get_ollama_trust_env() -> bool:
 
 
 def get_ai_debug_enabled() -> bool:
-    raw = (os.getenv("AI_DEBUG") or "").strip().lower()
+    raw = _get_env_value("AI_DEBUG").lower()
     return raw in {"1", "true", "yes", "on"}
 
 
 def get_missing_ai_env_vars() -> list[str]:
     missing: list[str] = []
     for name in REQUIRED_AI_ENV_VARS:
-        if name == "OLLAMA_HOST":
-            continue
-        if not (os.getenv(name) or "").strip():
+        if not _get_env_value(name):
             missing.append(name)
     return missing
 
