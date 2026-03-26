@@ -915,12 +915,14 @@ def _resolve_and_persist_day_mode(user, target_date: date, explicit_day_mode: st
         .first()
     )
     if prior:
-        checkin = RoutineDayModeCheckIn.objects.create(
+        checkin, _ = RoutineDayModeCheckIn.objects.get_or_create(
             user=user,
             date=target_date,
-            day_mode=prior.day_mode,
-            day_mode_note=prior.day_mode_note,
-            source="carry_forward",
+            defaults={
+                "day_mode": prior.day_mode,
+                "day_mode_note": prior.day_mode_note,
+                "source": "carry_forward",
+            },
         )
         return {
             "day_mode": checkin.day_mode,
@@ -929,11 +931,13 @@ def _resolve_and_persist_day_mode(user, target_date: date, explicit_day_mode: st
             "day_mode_note": checkin.day_mode_note,
         }
 
-    checkin = RoutineDayModeCheckIn.objects.create(
+    checkin, _ = RoutineDayModeCheckIn.objects.get_or_create(
         user=user,
         date=target_date,
-        day_mode=DAY_MODE_FOCUSED,
-        source="default",
+        defaults={
+            "day_mode": DAY_MODE_FOCUSED,
+            "source": "default",
+        },
     )
     return {
         "day_mode": checkin.day_mode,

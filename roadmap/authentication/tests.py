@@ -581,11 +581,11 @@ class ForgotPasswordEndpointTests(APITestCase):
             password="Password@123",
         )
 
-    @patch("authentication.views.send_mail")
+    @patch("authentication.views.send_email_via_resend")
     def test_forgot_password_existing_email_returns_generic_success_and_sends_mail(
-        self, send_mail_mock
+        self, send_email_mock
     ):
-        send_mail_mock.return_value = 1
+        send_email_mock.return_value = None
         response = self.client.post(
             self.url,
             data={"email": self.user.email},
@@ -595,15 +595,16 @@ class ForgotPasswordEndpointTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["success"])
         self.assertIn("If an account exists for this email", response.data["message"])
-        send_mail_mock.assert_called_once()
-        _, kwargs = send_mail_mock.call_args
-        self.assertIn("uid=", kwargs["message"])
-        self.assertIn("token=", kwargs["message"])
-        self.assertEqual(kwargs["recipient_list"], [self.user.email])
+        send_email_mock.assert_called_once()
+        kwargs = send_email_mock.call_args.kwargs
+        self.assertEqual(kwargs["to_email"], self.user.email)
+        self.assertIn("uid=", kwargs["text_content"])
+        self.assertIn("token=", kwargs["text_content"])
+        self.assertIn("href=", kwargs["html_content"])
 
-    @patch("authentication.views.send_mail")
+    @patch("authentication.views.send_email_via_resend")
     def test_forgot_password_unknown_email_returns_same_generic_success(
-        self, send_mail_mock
+        self, send_email_mock
     ):
         response = self.client.post(
             self.url,
@@ -614,7 +615,7 @@ class ForgotPasswordEndpointTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["success"])
         self.assertIn("If an account exists for this email", response.data["message"])
-        send_mail_mock.assert_not_called()
+        send_email_mock.assert_not_called()
 
     def test_forgot_password_invalid_payload_returns_validation_error(self):
         response = self.client.post(

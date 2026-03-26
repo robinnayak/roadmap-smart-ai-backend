@@ -33,6 +33,7 @@ from routine.models import (
 from routine.services import (
     _fetch_day_event_constraints,
     _get_event_occurrences_for_day,
+    _resolve_and_persist_day_mode,
     _select_balanced_goal_tasks,
     build_adaptive_roadmap_adjustment,
     get_or_create_today_task_list,
@@ -1107,6 +1108,25 @@ class DailyTaskGenerationTests(APITestCase):
         self.assertEqual(list_day_four.schedule_constraints["day_mode"]["value"], "focused")
         self.assertEqual(
             RoutineDayModeCheckIn.objects.get(user=self.user, date=day_four).source,
+            "carry_forward",
+        )
+
+    def test_day_mode_resolution_keeps_single_checkin_per_date(self):
+        day_one = timezone.localdate()
+        day_two = day_one + timedelta(days=1)
+
+        _resolve_and_persist_day_mode(self.user, day_one, explicit_day_mode="flex")
+        first = _resolve_and_persist_day_mode(self.user, day_two, explicit_day_mode=None)
+        second = _resolve_and_persist_day_mode(self.user, day_two, explicit_day_mode=None)
+
+        self.assertEqual(first["day_mode"], "flex")
+        self.assertEqual(second["day_mode"], "flex")
+        self.assertEqual(
+            RoutineDayModeCheckIn.objects.filter(user=self.user, date=day_two).count(),
+            1,
+        )
+        self.assertEqual(
+            RoutineDayModeCheckIn.objects.get(user=self.user, date=day_two).source,
             "carry_forward",
         )
 

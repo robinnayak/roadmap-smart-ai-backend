@@ -10,7 +10,6 @@ from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.conf import settings
-from django.core.mail import send_mail
 from django.core import signing
 from django.utils.encoding import force_bytes
 from django.utils.encoding import force_str
@@ -52,6 +51,7 @@ from .serializers import (
     ChangePasswordSerializer,
 )
 from .models import Profile, NotificationSettings, UserPersonalDetails
+from common.email import send_email_via_resend
 
 # ApiResponse utility for consistent API responses
 from .core.response import success_response, error_response, created_response
@@ -314,16 +314,24 @@ class ForgotPasswordView(ProductionApiView):
                 separator = "&" if "?" in reset_base_url else "?"
                 reset_link = f"{reset_base_url}{separator}uid={uid}&token={token}"
                 try:
-                    send_mail(
+                    text_content = (
+                        "You requested a password reset.\n\n"
+                        f"Use this link to reset your password:\n{reset_link}\n\n"
+                        "If you did not request this, you can ignore this message."
+                    )
+                    html_content = (
+                        "<div style=\"font-family: Arial, sans-serif; color: #0f172a; max-width: 640px;\">"
+                        "<h2>Reset your password</h2>"
+                        "<p>You requested a password reset.</p>"
+                        f"<p><a href=\"{reset_link}\">Reset your password</a></p>"
+                        "<p>If you did not request this, you can ignore this message.</p>"
+                        "</div>"
+                    )
+                    send_email_via_resend(
+                        to_email=user.email,
                         subject="Reset your password",
-                        message=(
-                            "You requested a password reset.\n\n"
-                            f"Use this link to reset your password:\n{reset_link}\n\n"
-                            "If you did not request this, you can ignore this message."
-                        ),
-                        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
-                        recipient_list=[user.email],
-                        fail_silently=True,
+                        text_content=text_content,
+                        html_content=html_content,
                     )
                 except Exception:
                     logger.exception(

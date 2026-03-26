@@ -1,11 +1,9 @@
-import base64
 from io import BytesIO
 from typing import Any
 
-import httpx
-from django.conf import settings
 from django.utils import timezone
 
+from common.email import build_base64_attachment, send_email_via_resend
 from goal.models import Goal
 
 
@@ -132,41 +130,18 @@ def send_contract_email_via_resend(
     attachment_filename: str,
     attachment_bytes: bytes,
 ) -> None:
-    api_key = getattr(settings, "RESEND_API_KEY", "")
-    from_email = getattr(settings, "RESEND_FROM_EMAIL", "")
-    if not api_key:
-        raise RuntimeError("RESEND_API_KEY is not configured.")
-    if not from_email:
-        raise RuntimeError("RESEND_FROM_EMAIL is not configured.")
-
-    encoded_pdf = base64.b64encode(attachment_bytes).decode("utf-8")
-
-    payload: dict[str, Any] = {
-        "from": from_email,
-        "to": [to_email],
-        "subject": subject,
-        "html": html_content,
-        "attachments": [
-            {
-                "filename": attachment_filename,
-                "content": encoded_pdf,
-            }
+    send_email_via_resend(
+        to_email=to_email,
+        cc_emails=[cc_email] if cc_email else None,
+        subject=subject,
+        html_content=html_content,
+        attachments=[
+            build_base64_attachment(
+                filename=attachment_filename,
+                content_bytes=attachment_bytes,
+            )
         ],
-    }
-
-    if cc_email:
-        payload["cc"] = [cc_email]
-
-    with httpx.Client(timeout=20.0) as client:
-        response = client.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
-        response.raise_for_status()
+    )
 
 
 def build_contract_email_html(user_name: str, signed_at_display: str, goals_snapshot: list[dict[str, Any]]) -> str:

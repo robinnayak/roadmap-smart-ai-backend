@@ -25,6 +25,7 @@ from journeybook.serializers import (
     JourneyBookGenerateSerializer,
     JourneyBookSerializer,
 )
+from journeybook.tasks import generate_journey_book_task
 from journeybook.services.ai_generator import AIGenerator, ChapterFallbacks
 from journeybook.services.data_collector import DataCollector
 from journeybook.services.demo_mode import (
@@ -120,30 +121,16 @@ class JourneyBookViewSet(ModelViewSet):
                 "selection_mode": selection_mode,
                 "goal_ids": [str(goal.id) for goal in selected_goals],
                 "goal_titles": [goal.title for goal in selected_goals],
+                "trim_size": validated.get("trim_size"),
             },
         )
         if selected_goals:
             book.goals.set(selected_goals)
 
-        try:
-            self._generate_sync(book=book, data=collected_data, metrics=metrics)
-        except (ImproperlyConfigured, RuntimeError, ValueError, OSError, ObjectDoesNotExist) as exc:
-            logger.exception("JourneyBook sync generation failed for book %s: %s", book.id, exc)
-            book.refresh_from_db(fields=["status", "error_message"])
-            return Response(
-                {
-                    "success": False,
-                    "code": "journeybook_generation_failed",
-                    "message": "Journey Book generation failed.",
-                    "book_id": str(book.id),
-                    "status": book.status,
-                    "error": book.error_message or str(exc),
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
+        generate_journey_book_task.delay(str(book.id))
+        book.refresh_from_db()
         output = JourneyBookSerializer(book, context={"request": request})
-        return Response(output.data, status=status.HTTP_201_CREATED)
+        return Response(output.data, status=status.HTTP_202_ACCEPTED)
 
     @action(
         detail=False,

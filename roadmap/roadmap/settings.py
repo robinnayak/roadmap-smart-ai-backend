@@ -2,11 +2,14 @@
 Django settings for development - simplified & cleaned version
 """
 
+import sys
 from pathlib import Path
 from datetime import timedelta
 from decouple import config
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+IS_TESTING = any(arg in {"test", "pytest"} for arg in sys.argv)
 JSON_RENDERER_CLASS = 'common.renderers.ContractJSONRenderer'
 BROWSABLE_RENDERER_CLASS = 'rest_framework.renderers.BrowsableAPIRenderer'
 
@@ -162,6 +165,7 @@ if DB_ENGINE:
             'HOST': config('DB_HOST', default='localhost'),
             'PORT': config('DB_PORT', default=5432, cast=int),
             'CONN_MAX_AGE': config('DB_CONN_MAX_AGE', default=60, cast=int),
+            'CONN_HEALTH_CHECKS': bool_env('DB_CONN_HEALTH_CHECKS', default=True),
         }
     }
     db_sslmode = config('DB_SSLMODE', default='').strip()
@@ -333,6 +337,73 @@ EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@example.com")
 PASSWORD_RESET_URL = config("PASSWORD_RESET_URL", default="")
 
+# =============================================================================
+# REDIS / CELERY
+# =============================================================================
+
+REDIS_URL = config("REDIS_URL", default="").strip()
+CELERY_TASK_ALWAYS_EAGER = bool_env(
+    "CELERY_TASK_ALWAYS_EAGER",
+    default=(DEBUG or IS_TESTING or not bool(REDIS_URL)),
+)
+CELERY_TASK_EAGER_PROPAGATES = bool_env(
+    "CELERY_TASK_EAGER_PROPAGATES",
+    default=DEBUG,
+)
+if REDIS_URL:
+    CELERY_BROKER_URL = REDIS_URL
+    CELERY_RESULT_BACKEND = REDIS_URL
+else:
+    CELERY_BROKER_URL = "memory://"
+    CELERY_RESULT_BACKEND = "cache+memory://"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+# =============================================================================
+# OBJECT STORAGE
+# =============================================================================
+
+USE_R2_STORAGE = bool_env("USE_R2_STORAGE", default=False)
+if USE_R2_STORAGE:
+    INSTALLED_APPS.append("storages")
+    R2_ENDPOINT_URL = config("R2_ENDPOINT_URL", default="").strip()
+    R2_BUCKET_NAME = config("R2_BUCKET_NAME", default="").strip()
+    R2_ACCESS_KEY_ID = config("R2_ACCESS_KEY_ID", default="").strip()
+    R2_SECRET_ACCESS_KEY = config("R2_SECRET_ACCESS_KEY", default="").strip()
+    R2_PUBLIC_BASE_URL = config("R2_PUBLIC_BASE_URL", default="").strip()
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+            "OPTIONS": {
+                "access_key": R2_ACCESS_KEY_ID,
+                "secret_key": R2_SECRET_ACCESS_KEY,
+                "bucket_name": R2_BUCKET_NAME,
+                "endpoint_url": R2_ENDPOINT_URL,
+                "region_name": "auto",
+                "default_acl": None,
+                "querystring_auth": False,
+                "file_overwrite": False,
+            },
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+    if R2_PUBLIC_BASE_URL:
+        MEDIA_URL = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/"
+else:
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+
 if not DEBUG:
     SECURE_SSL_REDIRECT = bool_env("SECURE_SSL_REDIRECT", default=True)
     SESSION_COOKIE_SECURE = bool_env("SESSION_COOKIE_SECURE", default=True)
@@ -341,3 +412,27 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = config("SECURE_HSTS_SECONDS", default=31536000, cast=int)
     SECURE_HSTS_INCLUDE_SUBDOMAINS = bool_env("SECURE_HSTS_INCLUDE_SUBDOMAINS", default=True)
     SECURE_HSTS_PRELOAD = bool_env("SECURE_HSTS_PRELOAD", default=True)
+
+
+def _require_non_empty_setting(name: str) -> None:
+    value = globals().get(name)
+    if value is None or not str(value).strip():
+        raise ImproperlyConfigured(f"{name} must be configured when DEBUG=False.")
+
+
+if not DEBUG and not IS_TESTING:
+    for setting_name in ("RESEND_API_KEY", "RESEND_FROM_EMAIL", "PASSWORD_RESET_URL"):
+        _require_non_empty_setting(setting_name)
+    if not REDIS_URL and not CELERY_TASK_ALWAYS_EAGER:
+        raise ImproperlyConfigured(
+            "REDIS_URL must be configured when Celery eager mode is disabled."
+        )
+    if USE_R2_STORAGE:
+        for setting_name in (
+            "R2_ENDPOINT_URL",
+            "R2_BUCKET_NAME",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY",
+            "R2_PUBLIC_BASE_URL",
+        ):
+            _require_non_empty_setting(setting_name)

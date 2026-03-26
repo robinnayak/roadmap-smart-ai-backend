@@ -226,7 +226,7 @@ class JourneyBookAPITestCase(TestCase):
         }
         response = self.client.post(url, payload, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         book = JourneyBook.objects.filter(user=self.user).first()
         self.assertIsNotNone(book)
         self.assertIn(book.status, [JourneyBook.STATUS_QUEUED, JourneyBook.STATUS_GENERATING])
@@ -245,7 +245,7 @@ class JourneyBookAPITestCase(TestCase):
         }
         response = self.client.post(url, payload, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         book = JourneyBook.objects.get(user=self.user)
         self.assertEqual(book.goal_id, first_goal.id)
         self.assertEqual(book.metadata["selection_mode"], "multiple")
@@ -265,7 +265,7 @@ class JourneyBookAPITestCase(TestCase):
         }
         response = self.client.post(url, payload, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         book = JourneyBook.objects.get(user=self.user)
         self.assertEqual(book.metadata["selection_mode"], "all")
         self.assertCountEqual(book.goals.values_list("id", flat=True), [first_goal.id, second_goal.id])
@@ -306,9 +306,10 @@ class JourneyBookAPITestCase(TestCase):
 
         response = self.client.post(url, payload, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
-        self.assertEqual(response.json()["code"], "journeybook_generation_failed")
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(JourneyBook.objects.filter(user=self.user).count(), 1)
+        book = JourneyBook.objects.get(user=self.user)
+        self.assertEqual(book.status, JourneyBook.STATUS_FAILED)
 
     @patch("journeybook.views.JourneyBookViewSet._generate_sync")
     def test_generate_returns_failed_contract_when_sync_generation_marks_failed_and_raises(
@@ -334,12 +335,10 @@ class JourneyBookAPITestCase(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         payload = response.json()
-        self.assertFalse(payload["success"])
-        self.assertEqual(payload["code"], "journeybook_generation_failed")
         book = JourneyBook.objects.get(user=self.user)
-        self.assertEqual(payload["book_id"], str(book.id))
+        self.assertEqual(payload["id"], str(book.id))
         self.assertEqual(payload["status"], JourneyBook.STATUS_FAILED)
         self.assertEqual(book.status, JourneyBook.STATUS_FAILED)
 
@@ -537,7 +536,7 @@ class JourneyBookAPITestCase(TestCase):
         payload = {"goal_id": str(second_goal.id), "book_type": "complete"}
         response = self.client.post(url, payload, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
 
     def test_generate_same_all_goals_selection_is_rate_limited(self):
         first_goal = self._create_goal(status="completed", title="Goal A")
@@ -1147,7 +1146,7 @@ class JourneyBookAPITestCase(TestCase):
             "privacy_settings": {"exclude_journal_ids": []},
         }
         response = self.client.post(url, payload, format="json")
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
 
         book = JourneyBook.objects.filter(user=self.user).order_by("-created_at").first()
         self.assertIsNotNone(book)
@@ -1245,7 +1244,7 @@ class JourneyBookAPITestCase(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         book = JourneyBook.objects.latest("created_at")
         self.assertEqual(book.status, JourneyBook.STATUS_READY)
         self.assertEqual(book.metadata["asset_generation_warnings"][0]["asset_key"], "heatmap")
@@ -1320,7 +1319,7 @@ class JourneyBookAPITestCase(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         milestones = list(DerivedMilestone.objects.filter(user=self.user))
         trigger_types = [milestone.trigger_type for milestone in milestones]
         self.assertEqual(len(trigger_types), len(set(trigger_types)))

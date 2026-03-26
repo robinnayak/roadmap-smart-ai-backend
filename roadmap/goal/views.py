@@ -160,6 +160,12 @@ def _build_illustration_response(goal):
     return payload
 
 
+def _build_public_illustration_url_for_request(request, illustration_url):
+    if not illustration_url or not illustration_url.startswith("/"):
+        return illustration_url
+    return request.build_absolute_uri(illustration_url)
+
+
 
 
 class GoalProductionApiView(APIView):
@@ -1829,9 +1835,7 @@ def illustration_endpoint(request, goal_id):
         return Response({"image": ["Please upload an image smaller than 5 MB."]}, status=status.HTTP_400_BAD_REQUEST)
 
     illustration_url = save_goal_illustration(goal, uploaded_file)
-    if illustration_url.startswith("/"):
-        goal.illustration_url = request.build_absolute_uri(illustration_url)
-        goal.save(update_fields=["illustration_url", "updated_at"])
+    goal.illustration_url = _build_public_illustration_url_for_request(request, illustration_url)
 
     payload = _build_illustration_response(goal)
     payload["message"] = "Illustration uploaded."
