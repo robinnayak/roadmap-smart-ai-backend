@@ -6,6 +6,19 @@ The Roadmap Smart Planner API is a scalable SaaS platform that leverages AI (Cla
 
 The platform assists users in achieving goals across career, financial, health, and personal development domains, focusing on building discipline and motivation through structured, AI-generated hierarchies: Goals → Milestones → SubGoals → Daily Tasks.
 
+## Configuration Guide
+
+For environment switching, production configuration, and service-switching guidance, see:
+
+- [`project_docs/apis/production/ENVIRONMENT_AND_SERVICE_SWITCHING_GUIDE.md`](../project_docs/apis/production/ENVIRONMENT_AND_SERVICE_SWITCHING_GUIDE.md)
+
+This guide covers:
+- LLM provider and model switching
+- database switching between SQLite and PostgreSQL
+- storage switching between local files and Cloudflare R2
+- Celery eager versus Redis-backed async execution
+- frontend URL and auth-related environment configuration
+
 ### Key Features
 - **AI-Powered Roadmap Generation**: Uses Ollama local models for precise, requirement-specific AI/ML engine.
 - **Hierarchical Goal Management**: Goals broken into milestones (monthly), subgoals (weekly), and tasks (daily).
