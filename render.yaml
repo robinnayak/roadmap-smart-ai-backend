@@ -12,6 +12,8 @@
         value: 3.12.8
       - key: DJANGO_SETTINGS_MODULE
         value: roadmap.settings
+      - key: DJANGO_ENV
+        value: production
       - key: DEBUG
         value: "false"
       - key: DJANGO_SECRET_KEY
@@ -29,15 +31,47 @@
         sync: false
       - key: DB_PORT
         value: "5432"
+      - key: DB_CONN_MAX_AGE
+        value: "60"
       - key: DB_SSLMODE
         value: require
 
       - key: LLM_PRIMARY_PROVIDER
         value: groq
+      - key: LLM_FALLBACKS
+        value: ""
+      - key: LLM_REQUEST_TIMEOUT_SECONDS
+        value: "90"
+      - key: LLM_MAX_RETRIES
+        value: "2"
+      - key: LLM_RETRY_BACKOFF_SECONDS
+        value: "1.5"
+      - key: AI_DEBUG
+        value: "false"
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL
         value: LLAMA_3_3_70B
+      - key: HIERARCHY_MODEL
+        value: LLAMA_3_3_70B
+      - key: JOURNEYBOOK_MODEL
+        value: LLAMA_3_3_70B
+      - key: TIMELINE_MODEL
+        value: LLAMA_3_3_70B
+      - key: CURRENT_SITUATION_MODEL
+        value: LLAMA_3_3_70B
+      - key: GIE_LANGUAGE_MODEL
+        value: LLAMA_3_3_70B
+      - key: JOURNAL_MODEL
+        value: GPT_OSS_120B
+      - key: HABIT_RECOMMENDATION_MODEL
+        value: LLAMA_3_3_70B
+      - key: GOAL_ATTRIBUTE_MODEL
+        value: LLAMA_3_3_70B
+      - key: GOAL_CATEGORY_MODEL
+        value: LLAMA_3_3_70B
+      - key: HIERARCHY_TASK_WORKERS
+        value: "1"
 
       - key: CELERY_TASK_ALWAYS_EAGER
         value: "true"
@@ -60,6 +94,16 @@
       - key: RESEND_FROM_EMAIL
         sync: false
       - key: PASSWORD_RESET_URL
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_TRACES_SAMPLE_RATE
+        value: "0.1"
+      - key: SENTRY_PROFILES_SAMPLE_RATE
+        value: "0"
+      - key: SENTRY_SEND_DEFAULT_PII
+        value: "false"
+      - key: HUGGINGFACE_API_KEY
         sync: false
 
       - key: ALLOWED_HOSTS
