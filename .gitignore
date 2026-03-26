@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+roadmap/.env
+!roadmap/.env.example
+
+roadmap/logs/
+roadmap/media/
+roadmap/journey_books/
+journey_books/
+
+*.sqlite3

@@ -1,3 +1,0 @@
-ERROR 2026-02-12 08:11:17,854 log 9240 10584 Internal Server Error: /auth/register/
-ERROR 2026-02-12 08:13:01,195 log 18340 5868 Internal Server Error: /auth/register/
-ERROR 2026-02-12 08:13:38,014 log 10020 4712 Internal Server Error: /auth/register/
