@@ -30,6 +30,13 @@ def bool_env(name: str, default: bool = False) -> bool:
     raise ValueError(f"Invalid boolean value for {name}: {raw!r}")
 
 
+def csv_env(name: str, default: str = "") -> list[str]:
+    """Return a de-duplicated list from a comma-separated env var."""
+    raw = config(name, default=default)
+    values = [item.strip() for item in str(raw).split(",") if item.strip()]
+    return list(dict.fromkeys(values))
+
+
 def build_default_renderer_classes(*, debug: bool) -> list[str]:
     classes = [JSON_RENDERER_CLASS]
     if debug:
@@ -110,7 +117,7 @@ HAS_WHITENOISE = importlib.util.find_spec("whitenoise") is not None
 
 DEBUG = bool_env('DEBUG', default=False)
 
-_env_allowed_hosts = [host.strip() for host in config('ALLOWED_HOSTS', default='').split(',') if host.strip()]
+_env_allowed_hosts = csv_env("ALLOWED_HOSTS")
 
 
 def _normalize_allowed_host(host: str) -> str:
@@ -124,7 +131,14 @@ def _normalize_allowed_host(host: str) -> str:
 
 
 _normalized_env_hosts = [_normalize_allowed_host(host) for host in _env_allowed_hosts]
-_local_allowed_hosts = ['localhost', '127.0.0.1', '::1', '.ngrok-free.app', '.ngrok.app']
+_local_allowed_hosts = [
+    'localhost',
+    '127.0.0.1',
+    '::1',
+    '.ngrok-free.app',
+    '.ngrok.app',
+    '.vercel.app',
+]
 ALLOWED_HOSTS = list(dict.fromkeys(_local_allowed_hosts + _normalized_env_hosts))
 
 # =============================================================================
@@ -265,19 +279,28 @@ AUTH_USER_MODEL = 'authentication.CustomUser'
 # CORS (frontend communication)
 # =============================================================================
 
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-] + [
-    origin.strip()
-    for origin in config('CORS_ALLOWED_ORIGINS', default='').split(',')
-    if origin.strip()
-]
+CORS_ALLOWED_ORIGINS = list(
+    dict.fromkeys(
+        [
+            'http://localhost:3000',
+            'http://127.0.0.1:3000',
+        ] + csv_env("CORS_ALLOWED_ORIGINS")
+    )
+)
 
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://[a-z0-9-]+\.ngrok-free\.app$",
     r"^https://[a-z0-9-]+\.ngrok\.app$",
-]
+] + csv_env("CORS_ALLOWED_ORIGIN_REGEXES", default=r"^https://[a-z0-9-]+\.vercel\.app$")
+
+CSRF_TRUSTED_ORIGINS = list(
+    dict.fromkeys(
+        [
+            'http://localhost:3000',
+            'http://127.0.0.1:3000',
+        ] + CORS_ALLOWED_ORIGINS + csv_env("CSRF_TRUSTED_ORIGINS")
+    )
+)
 
 CORS_ALLOW_CREDENTIALS = True
 
