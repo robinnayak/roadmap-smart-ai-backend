@@ -1,0 +1,46 @@
+﻿services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sh -c "python roadmap/manage.py migrate && gunicorn roadmap.wsgi:application --chdir roadmap --bind 0.0.0.0:8000 --log-file - --reload"
+    env_file:
+      - roadmap/.env
+    environment:
+      DJANGO_SETTINGS_MODULE: roadmap.settings
+      DEBUG: "true"
+      ALLOWED_HOSTS: localhost,127.0.0.1,0.0.0.0
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: roadmap
+      DB_USER: roadmap
+      DB_PASSWORD: roadmap
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_SSLMODE: ""
+      CELERY_TASK_ALWAYS_EAGER: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: roadmap
+      POSTGRES_USER: roadmap
+      POSTGRES_PASSWORD: roadmap
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U roadmap -d roadmap"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

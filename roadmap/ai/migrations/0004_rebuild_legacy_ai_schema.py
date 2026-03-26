@@ -12,26 +12,37 @@ def reconcile_ai_schema(apps, schema_editor):
     AIReengagementAction = apps.get_model("ai", "AIReengagementAction")
 
     current_processing_table = AIProcessingJob._meta.db_table
-    processing_columns = {}
+    processing_columns = set()
 
     if current_processing_table in existing_tables:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                select column_name, udt_name
-                from information_schema.columns
-                where table_schema = current_schema()
-                  and table_name = %s
-                """
-                ,
-                [current_processing_table],
+        if connection.vendor == "postgresql":
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select column_name, udt_name
+                    from information_schema.columns
+                    where table_schema = current_schema()
+                      and table_name = %s
+                    """,
+                    [current_processing_table],
+                )
+                postgres_columns = dict(cursor.fetchall())
+            processing_columns = set(postgres_columns)
+            is_legacy_processing_schema = (
+                postgres_columns.get("id") != "uuid"
+                or "row_data" in processing_columns
             )
-            processing_columns = dict(cursor.fetchall())
+        else:
+            with connection.cursor() as cursor:
+                processing_columns = {
+                    column.name
+                    for column in connection.introspection.get_table_description(
+                        cursor,
+                        current_processing_table,
+                    )
+                }
+            is_legacy_processing_schema = "row_data" in processing_columns
 
-        is_legacy_processing_schema = (
-            processing_columns.get("id") != "uuid"
-            or "row_data" in processing_columns
-        )
         if is_legacy_processing_schema:
             with connection.cursor() as cursor:
                 cursor.execute(f'SELECT COUNT(*) FROM "{current_processing_table}"')

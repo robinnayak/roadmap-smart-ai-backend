@@ -31,6 +31,22 @@ DROP COLUMN IF EXISTS date_of_birth;
 """
 
 
+def align_user_personal_details_schema(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute(FORWARDS_SQL)
+
+
+def reverse_align_user_personal_details_schema(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute(REVERSE_SQL)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -38,13 +54,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.SeparateDatabaseAndState(
-            database_operations=[
-                migrations.RunSQL(
-                    sql=FORWARDS_SQL,
-                    reverse_sql=REVERSE_SQL,
-                )
-            ],
-            state_operations=[],
+        migrations.RunPython(
+            align_user_personal_details_schema,
+            reverse_align_user_personal_details_schema,
         )
     ]

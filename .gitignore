@@ -1,3 +1,4 @@
+﻿.env
 .venv/
 __pycache__/
 *.py[cod]
@@ -11,3 +12,4 @@ roadmap/journey_books/
 journey_books/
 
 *.sqlite3
+

@@ -37,7 +37,11 @@ def build_default_renderer_classes(*, debug: bool) -> list[str]:
     return classes
 
 
-def build_logging_config(*, debug: bool, django_env: str) -> dict:
+def build_logging_config(*, debug: bool | None = None, django_env: str | None = None) -> dict:
+    if debug is None:
+        debug = DEBUG
+    if django_env is None:
+        django_env = DJANGO_ENV
     return {
         'version': 1,
         'disable_existing_loggers': False,
@@ -95,8 +99,10 @@ def build_logging_config(*, debug: bool, django_env: str) -> dict:
 SECRET_KEY = config('DJANGO_SECRET_KEY', default='django-insecure-...change-me...')
 HUGGINGFACE_API_KEY = config("HUGGINGFACE_API_KEY", default="")
 AI_DEBUG = bool_env("AI_DEBUG", default=False)
+CI_USE_SQLITE = bool_env("CI_USE_SQLITE", default=False)
 DJANGO_ENV = config("DJANGO_ENV", default="development").strip() or "development"
 SENTRY_DSN = config("SENTRY_DSN", default="").strip()
+DISABLE_SENTRY = bool_env("DISABLE_SENTRY", default=CI_USE_SQLITE)
 SENTRY_TRACES_SAMPLE_RATE = config("SENTRY_TRACES_SAMPLE_RATE", default=0.0, cast=float)
 SENTRY_PROFILES_SAMPLE_RATE = config("SENTRY_PROFILES_SAMPLE_RATE", default=0.0, cast=float)
 SENTRY_SEND_DEFAULT_PII = bool_env("SENTRY_SEND_DEFAULT_PII", default=False)
@@ -193,7 +199,7 @@ WSGI_APPLICATION = 'roadmap.wsgi.application'
 # DATABASE
 # =============================================================================
 
-DB_ENGINE = config('DB_ENGINE', default='').strip()
+DB_ENGINE = '' if CI_USE_SQLITE else config('DB_ENGINE', default='').strip()
 
 if DB_ENGINE:
     DATABASES = {
@@ -486,7 +492,7 @@ if not DEBUG and not IS_TESTING:
         ):
             _require_non_empty_setting(setting_name)
 
-if SENTRY_DSN:
+if SENTRY_DSN and not DISABLE_SENTRY:
     try:
         import sentry_sdk
         from sentry_sdk.integrations.django import DjangoIntegration
