@@ -1,0 +1,15 @@
+﻿.git
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+node_modules
+roadmap/.env
+roadmap/logs
+roadmap/media
+roadmap/staticfiles
+journey_books
+*.sqlite3
