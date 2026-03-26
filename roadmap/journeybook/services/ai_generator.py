@@ -4,7 +4,8 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Any
 
-from ai.config import get_journeybook_model, get_ollama_host
+from ai.config import get_journeybook_model
+from ai.providers.router import create_routed_provider
 
 
 @dataclass
@@ -33,17 +34,15 @@ class AIGenerator:
         self.provider_name = None
         self.model_name = get_journeybook_model()
         try:
-            from ai.providers.ollama_provider import OllamaProvider
-
-            self.provider = OllamaProvider(
-                host=get_ollama_host(),
+            self.provider = create_routed_provider(
+                task_name="journeybook",
                 model=self.model_name,
                 temperature=0.45,
             )
-            self.provider_name = "ollama"
+            self.provider_name = self.provider.last_provider_name
         except Exception:
             self.provider = None
-            self.provider_name = "ollama"
+            self.provider_name = None
 
     def generate_chapter(self, chapter_config: dict[str, Any], metrics: dict[str, Any], book_type: str) -> str:
         return self.generate_chapter_result(chapter_config, metrics, book_type).content
@@ -58,7 +57,7 @@ class AIGenerator:
         chapter_title = chapter_config.get("title", "Journey Chapter")
 
         prompt = self._build_chapter_prompt(chapter_id, chapter_title, metrics, book_type)
-        text, error_summary = self._generate_with_ollama(prompt, self.SYSTEM_PROMPT)
+        text, error_summary = self._generate_with_provider(prompt, self.SYSTEM_PROMPT)
         if text:
             return GenerationResult(
                 content=text,
@@ -87,7 +86,7 @@ class AIGenerator:
             "Write a compassionate motivational page for a personal journey book. "
             "Use concrete facts from the provided data. Keep it 300-500 words."
         )
-        text, error_summary = self._generate_with_ollama(prompt, system_prompt)
+        text, error_summary = self._generate_with_provider(prompt, system_prompt)
         if text:
             return GenerationResult(
                 content=text,
@@ -103,11 +102,13 @@ class AIGenerator:
             error_summary=error_summary,
         )
 
-    def _generate_with_ollama(self, prompt: str, system_prompt: str) -> tuple[str | None, str | None]:
+    def _generate_with_provider(self, prompt: str, system_prompt: str) -> tuple[str | None, str | None]:
         if not self.provider:
             return None, "provider_not_configured"
         try:
             response = self.provider.generate_response(prompt=prompt, system_prompt=system_prompt)
+            self.provider_name = getattr(self.provider, "last_provider_name", self.provider_name)
+            self.model_name = getattr(self.provider, "last_model_name", response.model or self.model_name)
             content = (response.content or "").strip()
             if content:
                 return content, None

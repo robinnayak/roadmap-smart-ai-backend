@@ -8,8 +8,8 @@ Converts user text into structured JSON format with clean, consistent output.
 from typing import Dict, Any
 from .base_service import BaseAIService
 from ai.prompts.system_prompts import SystemPrompts
-from ai.config import get_ollama_model
-from ai.providers.ollama_provider import OllamaProvider
+from ai.config import get_model_for_task
+from ai.providers.router import create_routed_provider
 from ai.utils.parsers import ResponseParser
 from ai.utils.formatters import ResponseFormatter
 import logging
@@ -49,8 +49,9 @@ class GoalAttributeExtractor(BaseAIService):
     """
 
     def __init__(self):
-        provider = OllamaProvider(
-            model=get_ollama_model(),
+        provider = create_routed_provider(
+            task_name="goal_attribute_extraction",
+            model=get_model_for_task("goal_attribute_extraction"),
             temperature=0.3,   # Low temperature → consistent structured JSON
             max_tokens=2000,
         )

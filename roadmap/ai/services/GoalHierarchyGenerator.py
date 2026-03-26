@@ -1,6 +1,6 @@
 from ai.services.base_service import BaseAIService
 from ai.config import get_hierarchy_model
-from ai.providers.ollama_provider import OllamaProvider
+from ai.providers.router import create_routed_provider
 from ai.utils.parsers import ResponseParser, MilestoneParser
 from ai.utils.formatters import MileStoneFormatter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -70,7 +70,8 @@ class GoalHierarchyGenerator(BaseAIService):
     """
 
     def __init__(self):
-        provider = OllamaProvider(
+        provider = create_routed_provider(
+            task_name="goal_hierarchy",
             model=get_hierarchy_model(),
             temperature=0.15,
             max_tokens=int(os.getenv("HIERARCHY_MAX_TOKENS", "2400")),

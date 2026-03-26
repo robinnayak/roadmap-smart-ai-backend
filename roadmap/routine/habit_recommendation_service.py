@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime
 
-from ai.config import get_ollama_model
-from ai.providers.ollama_provider import OllamaProvider
+from ai.config import get_model_for_task
+from ai.providers.router import create_routed_provider
 from ai.utils.parsers import ResponseParser
 from goal.models import Goal
 from routine.models import HabitRecommendation
@@ -145,8 +145,9 @@ def generate_habit_recommendations_for_user(
         for name in HabitRecommendation.objects.filter(user=user, status="pending").values_list("name", flat=True)
     }
 
-    provider = OllamaProvider(
-        model=get_ollama_model(),
+    provider = create_routed_provider(
+        task_name="habit_recommendation",
+        model=get_model_for_task("habit_recommendation"),
         temperature=0.4,
         max_tokens=1200,
     )

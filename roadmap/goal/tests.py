@@ -2724,16 +2724,16 @@ class TimelineInsightBoundaryContractTests(APITestCase):
 
 
 class TimelineInsightProviderAdapterTests(APITestCase):
-    @patch("goal.services.timeline_ai_provider.OllamaProvider")
-    def test_default_provider_resolves_to_ollama_adapter(self, mock_ollama_provider):
+    @patch("goal.services.timeline_ai_provider.create_routed_provider")
+    def test_default_provider_resolves_to_router_adapter(self, mock_provider_factory):
         adapter = get_timeline_ai_provider_adapter()
         self.assertIsInstance(adapter, OllamaTimelineAIProviderAdapter)
-        mock_ollama_provider.assert_called_once()
+        mock_provider_factory.assert_called_once()
 
     def test_unknown_provider_raises_deterministic_error(self):
         with self.assertRaises(ValueError) as exc:
             get_timeline_ai_provider_adapter(provider_name="openai")
-        self.assertIn("Unsupported timeline insight AI provider", str(exc.exception))
+        self.assertIn("Unsupported LLM provider", str(exc.exception))
 
     def test_adapter_uses_base_provider_contract(self):
         class FakeProvider(BaseAIProvider):

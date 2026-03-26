@@ -2,6 +2,7 @@
 Django settings for development - simplified & cleaned version
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 from datetime import timedelta
@@ -36,23 +37,53 @@ def build_default_renderer_classes(*, debug: bool) -> list[str]:
     return classes
 
 
-def build_logging_config() -> dict:
+def build_logging_config(*, debug: bool, django_env: str) -> dict:
     return {
         'version': 1,
         'disable_existing_loggers': False,
+        'formatters': {
+            'standard': {
+                'format': '%(asctime)s %(levelname)s %(name)s %(message)s',
+            },
+            'verbose': {
+                'format': '%(asctime)s %(levelname)s %(name)s env=%(processName)s %(message)s',
+            },
+        },
         'handlers': {
             'console': {
                 'class': 'logging.StreamHandler',
+                'formatter': 'standard' if debug else 'verbose',
             },
+        },
+        'root': {
+            'handlers': ['console'],
+            'level': 'DEBUG' if debug else 'INFO',
         },
         'loggers': {
             'django': {
                 'handlers': ['console'],
                 'level': 'INFO',
+                'propagate': False,
             },
             'authentication': {
                 'handlers': ['console'],
-                'level': 'DEBUG',
+                'level': 'DEBUG' if debug else 'INFO',
+                'propagate': False,
+            },
+            'ai': {
+                'handlers': ['console'],
+                'level': 'DEBUG' if debug else 'INFO',
+                'propagate': False,
+            },
+            'goal': {
+                'handlers': ['console'],
+                'level': 'DEBUG' if debug else 'INFO',
+                'propagate': False,
+            },
+            'journeybook': {
+                'handlers': ['console'],
+                'level': 'DEBUG' if debug else 'INFO',
+                'propagate': False,
             },
         },
     }
@@ -64,6 +95,12 @@ def build_logging_config() -> dict:
 SECRET_KEY = config('DJANGO_SECRET_KEY', default='django-insecure-...change-me...')
 HUGGINGFACE_API_KEY = config("HUGGINGFACE_API_KEY", default="")
 AI_DEBUG = bool_env("AI_DEBUG", default=False)
+DJANGO_ENV = config("DJANGO_ENV", default="development").strip() or "development"
+SENTRY_DSN = config("SENTRY_DSN", default="").strip()
+SENTRY_TRACES_SAMPLE_RATE = config("SENTRY_TRACES_SAMPLE_RATE", default=0.0, cast=float)
+SENTRY_PROFILES_SAMPLE_RATE = config("SENTRY_PROFILES_SAMPLE_RATE", default=0.0, cast=float)
+SENTRY_SEND_DEFAULT_PII = bool_env("SENTRY_SEND_DEFAULT_PII", default=False)
+HAS_WHITENOISE = importlib.util.find_spec("whitenoise") is not None
 
 DEBUG = bool_env('DEBUG', default=False)
 
@@ -125,6 +162,9 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+if HAS_WHITENOISE:
+    MIDDLEWARE.insert(1, 'whitenoise.middleware.WhiteNoiseMiddleware')
 
 # =============================================================================
 # URLS & TEMPLATES
@@ -204,7 +244,8 @@ USE_TZ = True
 # STATIC FILES
 # =============================================================================
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
@@ -296,7 +337,7 @@ GIE_DEGRADED_MODE = bool_env("GIE_DEGRADED_MODE", default=False)
 # separate logging subsystem unless explicit handlers are added here later.
 # =============================================================================
 
-LOGGING = build_logging_config()
+LOGGING = build_logging_config(debug=DEBUG, django_env=DJANGO_ENV)
 
 # =============================================================================
 # DEVELOPMENT CONVENIENCE
@@ -389,7 +430,9 @@ if USE_R2_STORAGE:
             },
         },
         "staticfiles": {
-            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+            "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
+            if HAS_WHITENOISE
+            else "django.contrib.staticfiles.storage.StaticFilesStorage",
         },
     }
     if R2_PUBLIC_BASE_URL:
@@ -400,9 +443,15 @@ else:
             "BACKEND": "django.core.files.storage.FileSystemStorage",
         },
         "staticfiles": {
-            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+            "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
+            if HAS_WHITENOISE
+            else "django.contrib.staticfiles.storage.StaticFilesStorage",
         },
     }
+
+WHITENOISE_AUTOREFRESH = DEBUG
+WHITENOISE_USE_FINDERS = DEBUG
+WHITENOISE_MAX_AGE = config("WHITENOISE_MAX_AGE", default=31536000, cast=int)
 
 if not DEBUG:
     SECURE_SSL_REDIRECT = bool_env("SECURE_SSL_REDIRECT", default=True)
@@ -436,3 +485,25 @@ if not DEBUG and not IS_TESTING:
             "R2_PUBLIC_BASE_URL",
         ):
             _require_non_empty_setting(setting_name)
+
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.django import DjangoIntegration
+
+        sentry_integrations = [DjangoIntegration()]
+        if importlib.util.find_spec("celery") is not None:
+            from sentry_sdk.integrations.celery import CeleryIntegration
+
+            sentry_integrations.append(CeleryIntegration())
+
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            environment=DJANGO_ENV,
+            integrations=sentry_integrations,
+            traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+            profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
+            send_default_pii=SENTRY_SEND_DEFAULT_PII,
+        )
+    except ImportError:
+        pass

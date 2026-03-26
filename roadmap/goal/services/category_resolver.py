@@ -3,8 +3,8 @@ import re
 
 from django.core.exceptions import ImproperlyConfigured
 
-from ai.config import get_missing_ai_env_vars, get_ollama_model
-from ai.providers.ollama_provider import OllamaProvider
+from ai.config import get_missing_ai_env_vars, get_model_for_task
+from ai.providers.router import create_routed_provider
 from ai.utils.parsers import ResponseParser
 
 
@@ -202,7 +202,7 @@ def resolve_category(frontend_category: str, goal_title: str, goal_description: 
 
 
 def _classify_with_llm(*, goal_title: str, goal_description: str) -> str | None:
-    if get_missing_ai_env_vars():
+    if get_missing_ai_env_vars(task_name="goal_category_resolution"):
         return None
 
     prompt = (
@@ -213,7 +213,12 @@ def _classify_with_llm(*, goal_title: str, goal_description: str) -> str | None:
         f"Description: {goal_description}\n"
     )
     try:
-        provider = OllamaProvider(model=get_ollama_model(), temperature=0.0, max_tokens=80)
+        provider = create_routed_provider(
+            task_name="goal_category_resolution",
+            model=get_model_for_task("goal_category_resolution"),
+            temperature=0.0,
+            max_tokens=80,
+        )
         response = provider.generate_response(
             prompt=prompt,
             system_prompt=(

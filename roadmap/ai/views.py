@@ -21,6 +21,7 @@ from django.db import DatabaseError
 import logging
 from common.ownership import get_owned_object_or_404
 from goal.serializers import _goal_attributes_defaults
+from ai.providers.router import get_default_router
 from ai.services.text_extraction import resolve_goal_attributes_field
 
 # from django.contrib.auth import get_user_model
@@ -30,7 +31,6 @@ from ai.services.text_extraction import resolve_goal_attributes_field
 
 from .services.current_situation_generator import CurrentSituationGenerator
 from .services.current_situation_generator import CurrentSituationGenerationError
-from .providers.ollama_provider import OllamaProvider
 
 logger = logging.getLogger(__name__)
 
@@ -155,13 +155,12 @@ class AIProcessTextDataCurrentSituation(APIView):
 class AIHealthCheckView(APIView):
     def get(self, request):
         try:
-            provider = OllamaProvider()
-            health_status = provider.health_check()
+            health_status = get_default_router().health_check(task_name="current_situation")
             is_healthy = health_status.get("status") == "healthy"
             payload = {
                 "status": "healthy" if is_healthy else "unhealthy",
-                "service": "ollama",
-                "host": health_status.get("host"),
+                "service": health_status.get("service") or health_status.get("provider"),
+                "host": health_status.get("host") or health_status.get("base_url"),
                 "model": health_status.get("model"),
                 "error": health_status.get("error"),
             }
@@ -176,7 +175,7 @@ class AIHealthCheckView(APIView):
             return Response(
                 {
                     "status": "unhealthy",
-                    "service": "ollama",
+                    "service": "router",
                     "host": None,
                     "model": None,
                     "error": str(e),

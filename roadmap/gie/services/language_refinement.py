@@ -4,8 +4,8 @@ import json
 import re
 from typing import Any
 
-from ai.config import get_missing_ai_env_vars, get_ollama_model
-from ai.providers.ollama_provider import OllamaProvider
+from ai.config import get_missing_ai_env_vars, get_model_for_task
+from ai.providers.router import create_routed_provider
 
 
 class GIEGoalLanguageRefinementService:
@@ -19,11 +19,16 @@ class GIEGoalLanguageRefinementService:
     @classmethod
     def refine_autofill_payload(cls, *, payload: dict[str, Any], raw_goal: str) -> dict[str, Any]:
         refined = cls._basic_refine(payload=payload)
-        if get_missing_ai_env_vars():
+        if get_missing_ai_env_vars(task_name="gie_language_refinement"):
             return refined
 
         try:
-            provider = OllamaProvider(model=get_ollama_model(), temperature=0.2, max_tokens=600)
+            provider = create_routed_provider(
+                task_name="gie_language_refinement",
+                model=get_model_for_task("gie_language_refinement"),
+                temperature=0.2,
+                max_tokens=600,
+            )
             prompt = cls._build_prompt(payload=refined, raw_goal=raw_goal)
             response = provider.generate_response(
                 prompt=prompt,

@@ -7,8 +7,8 @@ from django.core.exceptions import ImproperlyConfigured
 from ai.services.base_service import BaseAIService
 from ai.prompts.personalization.user_context_prompts import UserContextPrompt
 from ai.prompts.system_prompts import SystemPrompts
-from ai.config import get_ollama_model
-from ai.providers.ollama_provider import OllamaProvider
+from ai.config import get_model_for_task
+from ai.providers.router import create_routed_provider
 from ai.utils.parsers import ResponseParser
 from ai.utils.formatters import ResponseFormatter
 
@@ -36,8 +36,9 @@ class CurrentSituationGenerator(BaseAIService):
     """Generates a structured situation analysis from free-form user text."""
 
     def __init__(self):
-        provider = OllamaProvider(
-            model=get_ollama_model(),
+        provider = create_routed_provider(
+            task_name="current_situation",
+            model=get_model_for_task("current_situation"),
             temperature=0.3,
             max_tokens=2000,
         )

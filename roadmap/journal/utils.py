@@ -9,6 +9,7 @@ from django.db.models import Q
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
+from ai.providers.router import create_routed_provider
 from authentication.models import Profile
 from journal.models import AutoPhraseUsage, JournalEntry, WordCloudAggregate
 
@@ -206,34 +207,37 @@ def heuristic_sentiment_and_tags(entry: JournalEntry) -> SentimentResult:
     return SentimentResult(label=label, score=score, tags=tags)
 
 
-def _ollama_enabled() -> bool:
+def _llm_enabled() -> bool:
     import os
 
-    return os.getenv("JOURNAL_AI_PROVIDER", "").lower() == "ollama"
+    provider_name = os.getenv("JOURNAL_AI_PROVIDER", "").strip().lower()
+    return provider_name not in {"off", "disabled", "none"}
 
 
-def _generate_with_ollama(prompt: str, system_prompt: str) -> str:
-    from ai.providers.ollama_provider import OllamaProvider
+def _generate_with_llm(prompt: str, system_prompt: str) -> str:
+    import os
 
-    provider = OllamaProvider(
+    provider = create_routed_provider(
+        task_name="journal",
+        provider_name=os.getenv("JOURNAL_AI_PROVIDER", "").strip().lower() or None,
         temperature=0.2,
     )
     health = provider.health_check()
-    if health.get("status") != "healthy":
-        raise RuntimeError(health.get("error", "Ollama unavailable"))
+    if isinstance(health, dict) and health.get("status") != "healthy":
+        raise RuntimeError(health.get("error", "LLM provider unavailable"))
     result = provider.generate_response(prompt=prompt, system_prompt=system_prompt)
     return result.content.strip()
 
 
 def ai_or_heuristic_sentiment(entry: JournalEntry) -> SentimentResult:
-    if _ollama_enabled():
+    if _llm_enabled():
         try:
             prompt = (
                 "Analyze journal text sentiment and tags. Return strict JSON with keys: "
                 "label (positive|neutral|negative|mixed), score (-1 to 1 float), tags (array of up to 6 short words).\n\n"
                 f"Text:\n{entry.reflection_raw}\n{entry.struggle_raw}\n{entry.tomorrow_priority_raw}\n{entry.gratitude_raw}"
             )
-            content = _generate_with_ollama(prompt, "You are a concise sentiment analyzer.")
+            content = _generate_with_llm(prompt, "You are a concise sentiment analyzer.")
             import json
 
             data = json.loads(content)
@@ -272,14 +276,14 @@ def fallback_auto_phrase(text: str) -> PhraseResult:
 
 
 def ai_or_fallback_autophrase(field: str, text: str) -> PhraseResult:
-    if _ollama_enabled():
+    if _llm_enabled():
         try:
             prompt = (
                 f"Rewrite the following {field} journal text to be clear, concise, and natural. "
                 "Keep the original meaning and tone. Return plain text only.\n\n"
                 f"Input:\n{text}"
             )
-            output = _generate_with_ollama(prompt, "You are a helpful journaling writing assistant.")
+            output = _generate_with_llm(prompt, "You are a helpful journaling writing assistant.")
             if output:
                 return PhraseResult(polished=output, confidence=0.85)
         except Exception:
@@ -317,14 +321,14 @@ def fallback_refine_summary(text: str) -> str:
 
 
 def ai_or_fallback_summary_refine(text: str) -> str:
-    if _ollama_enabled():
+    if _llm_enabled():
         try:
             prompt = (
                 "Refine the grammar, spelling, and punctuation of this daily summary while preserving meaning and tone. "
                 "Do not remove details and do not add new information. Return plain text only.\n\n"
                 f"Input:\n{text}"
             )
-            output = _generate_with_ollama(prompt, "You are a concise writing editor.")
+            output = _generate_with_llm(prompt, "You are a concise writing editor.")
             if output:
                 return output
         except Exception:

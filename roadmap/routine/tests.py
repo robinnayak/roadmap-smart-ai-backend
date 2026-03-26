@@ -3003,8 +3003,8 @@ class HabitRecommendationServiceTests(APITestCase):
         )
 
     @patch("routine.habit_recommendation_service.ResponseParser")
-    @patch("routine.habit_recommendation_service.OllamaProvider")
-    def test_generation_skips_pending_duplicates(self, mock_provider_cls, mock_parser_cls):
+    @patch("routine.habit_recommendation_service.create_routed_provider")
+    def test_generation_skips_pending_duplicates(self, mock_provider_factory, mock_parser_cls):
         from routine.models import HabitRecommendation
 
         HabitRecommendation.objects.create(
@@ -3017,7 +3017,7 @@ class HabitRecommendationServiceTests(APITestCase):
             status="pending",
         )
 
-        mock_provider = mock_provider_cls.return_value
+        mock_provider = mock_provider_factory.return_value
         mock_provider.generate_response.return_value = SimpleNamespace(content="{}")
 
         mock_parser = mock_parser_cls.return_value
@@ -3047,8 +3047,8 @@ class HabitRecommendationServiceTests(APITestCase):
         )
 
     @patch("routine.habit_recommendation_service.ResponseParser")
-    @patch("routine.habit_recommendation_service.OllamaProvider")
-    def test_generation_uses_active_profile_when_profile_id_is_omitted(self, mock_provider_cls, mock_parser_cls):
+    @patch("routine.habit_recommendation_service.create_routed_provider")
+    def test_generation_uses_active_profile_when_profile_id_is_omitted(self, mock_provider_factory, mock_parser_cls):
         active_profile = HealthProfile.objects.create(
             user=self.user,
             bad_habits=["junk_food"],
@@ -3058,7 +3058,7 @@ class HabitRecommendationServiceTests(APITestCase):
         old_profile.is_active = False
         old_profile.save(update_fields=["is_active", "updated_at"])
 
-        mock_provider = mock_provider_cls.return_value
+        mock_provider = mock_provider_factory.return_value
         mock_provider.generate_response.return_value = SimpleNamespace(content="{}")
         mock_parser = mock_parser_cls.return_value
         mock_parser.parse_json.return_value = {

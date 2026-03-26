@@ -15,9 +15,17 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from authentication.models import NotificationSettings
+from ai.config import (
+    get_fallback_routes,
+    get_missing_ai_env_vars,
+    get_model_for_task,
+    get_model_id,
+    get_provider_routes,
+)
 from ai.models import AIModelUsageStats, AIProcessingJob, AIReengagementAction, AIUserChurnState
-from ai.providers.ollama_provider import OllamaProvider
 from ai.providers.base import AIResponse
+from ai.providers.ollama_provider import OllamaProvider
+from ai.providers.router import RoutedAIProvider
 from ai.prompts.GoalHierarchyGeneratorPrompts import GoalHierarchyGeneratorPrompts, _load
 from ai.services.GoalHierarchyGenerator import GoalHierarchyGenerator
 from ai.services.churn_reengagement import ChurnReengagementService
@@ -131,6 +139,216 @@ class PromptAssetTests(TestCase):
         self.assertIn("VALIDATION RULES", output_schema)
         self.assertIn('"tasks": [', output_schema)
         self.assertIn("Ensure titles are unique within this array.", output_schema)
+
+
+class LLMRoutingConfigTests(TestCase):
+    def test_get_model_id_resolves_generic_keys_per_provider(self):
+        self.assertEqual(get_model_id("GPT_OSS_120B", "ollama"), "gpt-oss:120b-cloud")
+        self.assertEqual(get_model_id("GPT_OSS_120B", "groq"), "openai/gpt-oss-120b")
+        self.assertEqual(get_model_id("GPT_OSS_120B", "openrouter"), "openai/gpt-oss-120b")
+        self.assertEqual(get_model_id("LLAMA_3_3_70B", "groq"), "llama-3.3-70b-versatile")
+        self.assertEqual(
+            get_model_id("LLAMA_3_3_70B", "openrouter"),
+            "meta-llama/llama-3.3-70b-instruct",
+        )
+
+    def test_get_model_id_passthrough_for_unknown_key(self):
+        self.assertEqual(get_model_id("custom/provider-model", "groq"), "custom/provider-model")
+
+    def test_get_model_id_retargets_known_provider_specific_ids(self):
+        self.assertEqual(get_model_id("gpt-oss:120b-cloud", "groq"), "openai/gpt-oss-120b")
+        self.assertEqual(
+            get_model_id("meta-llama/llama-3.3-70b-instruct", "ollama"),
+            "llama3.3:70b",
+        )
+
+    def test_get_model_for_task_resolves_generic_key_for_provider(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DEBUG": "false",
+                "LLM_PRIMARY_PROVIDER": "groq",
+                "HIERARCHY_MODEL": "GPT_OSS_120B",
+            },
+            clear=False,
+        ):
+            groq_model = get_model_for_task("goal_hierarchy", "groq")
+            ollama_model = get_model_for_task("goal_hierarchy", "ollama")
+
+        self.assertEqual(groq_model, "openai/gpt-oss-120b")
+        self.assertEqual(ollama_model, "gpt-oss:120b-cloud")
+
+    def test_provider_routes_use_env_primary_and_fallbacks(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DEBUG": "false",
+                "LLM_PRIMARY_PROVIDER": "groq",
+                "HIERARCHY_MODEL": "hierarchy-model",
+                "LLM_FALLBACKS": "openrouter:router-model,ollama:local-model",
+            },
+            clear=False,
+        ):
+            routes = get_provider_routes(task_name="goal_hierarchy")
+
+        self.assertEqual(routes[0].provider_name, "groq")
+        self.assertEqual(routes[0].model, "hierarchy-model")
+        self.assertEqual(routes[1].provider_name, "openrouter")
+        self.assertEqual(routes[1].model, "router-model")
+        self.assertEqual(routes[2].provider_name, "ollama")
+        self.assertEqual(routes[2].model, "local-model")
+
+    def test_provider_routes_retarget_known_provider_specific_primary_override(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DEBUG": "false",
+                "LLM_PRIMARY_PROVIDER": "groq",
+                "HIERARCHY_MODEL": "gpt-oss:120b-cloud",
+            },
+            clear=False,
+        ):
+            routes = get_provider_routes(task_name="goal_hierarchy")
+
+        self.assertEqual(routes[0].provider_name, "groq")
+        self.assertEqual(routes[0].model, "openai/gpt-oss-120b")
+
+    def test_fallback_routes_support_generic_model_keys(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DEBUG": "false",
+                "LLM_PRIMARY_PROVIDER": "groq",
+                "LLM_FALLBACKS": "openrouter:LLAMA_3_3_70B,ollama:GPT_OSS_120B",
+            },
+            clear=False,
+        ):
+            routes = get_fallback_routes("goal_hierarchy")
+
+        self.assertEqual(routes[0].provider_name, "openrouter")
+        self.assertEqual(routes[0].model, "meta-llama/llama-3.3-70b-instruct")
+        self.assertEqual(routes[1].provider_name, "ollama")
+        self.assertEqual(routes[1].model, "gpt-oss:120b-cloud")
+
+    def test_provider_routes_resolve_generic_primary_and_fallback_models(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DEBUG": "false",
+                "LLM_PRIMARY_PROVIDER": "groq",
+                "HIERARCHY_MODEL": "GPT_OSS_120B",
+                "LLM_FALLBACKS": "openrouter:LLAMA_3_3_70B,ollama:GPT_OSS_120B",
+            },
+            clear=False,
+        ):
+            routes = get_provider_routes(task_name="goal_hierarchy")
+
+        self.assertEqual(routes[0].provider_name, "groq")
+        self.assertEqual(routes[0].model, "openai/gpt-oss-120b")
+        self.assertEqual(routes[1].provider_name, "openrouter")
+        self.assertEqual(routes[1].model, "meta-llama/llama-3.3-70b-instruct")
+        self.assertEqual(routes[2].provider_name, "ollama")
+        self.assertEqual(routes[2].model, "gpt-oss:120b-cloud")
+
+    def test_routed_provider_passes_provider_specific_model_to_provider_instance(self):
+        constructed_models = []
+
+        class RecordingProvider:
+            def __init__(self, model=None, temperature=0.7, max_tokens=None, stream=False):
+                self.model = model
+                constructed_models.append(model)
+
+            def generate_response(self, prompt, system_prompt=None, context=None):
+                return AIResponse(content="ok", model=self.model)
+
+            def health_check(self):
+                return {"status": "healthy", "model": self.model}
+
+        with patch.dict(
+            os.environ,
+            {
+                "DEBUG": "false",
+                "LLM_PRIMARY_PROVIDER": "groq",
+                "HIERARCHY_MODEL": "GPT_OSS_120B",
+            },
+            clear=False,
+        ), patch.dict(
+            "ai.providers.router.PROVIDER_CLASS_MAP",
+            {"groq": RecordingProvider, "openrouter": RecordingProvider, "ollama": RecordingProvider},
+            clear=True,
+        ):
+            provider = RoutedAIProvider(task_name="goal_hierarchy")
+            response = provider.generate_response(prompt="hello")
+
+        self.assertEqual(constructed_models, ["openai/gpt-oss-120b"])
+        self.assertEqual(response.model, "openai/gpt-oss-120b")
+
+    def test_routed_provider_retries_next_route_when_response_content_is_empty(self):
+        attempts = []
+
+        class EmptyProvider:
+            def __init__(self, model=None, temperature=0.7, max_tokens=None, stream=False):
+                self.model = model
+
+            def generate_response(self, prompt, system_prompt=None, context=None):
+                attempts.append(("groq", self.model))
+                return AIResponse(content="", model=self.model)
+
+            def health_check(self):
+                return {"status": "healthy", "model": self.model}
+
+        class SuccessProvider:
+            def __init__(self, model=None, temperature=0.7, max_tokens=None, stream=False):
+                self.model = model
+
+            def generate_response(self, prompt, system_prompt=None, context=None):
+                attempts.append(("openrouter", self.model))
+                return AIResponse(content='{"tasks":[]}', model=self.model)
+
+            def health_check(self):
+                return {"status": "healthy", "model": self.model}
+
+        with patch.dict(
+            os.environ,
+            {
+                "DEBUG": "false",
+                "LLM_PRIMARY_PROVIDER": "groq",
+                "HIERARCHY_MODEL": "GPT_OSS_120B",
+                "LLM_FALLBACKS": "openrouter:LLAMA_3_3_70B",
+            },
+            clear=False,
+        ), patch.dict(
+            "ai.providers.router.PROVIDER_CLASS_MAP",
+            {"groq": EmptyProvider, "openrouter": SuccessProvider, "ollama": SuccessProvider},
+            clear=True,
+        ):
+            provider = RoutedAIProvider(task_name="goal_hierarchy")
+            response = provider.generate_response(prompt="hello")
+
+        self.assertEqual(
+            attempts,
+            [
+                ("groq", "openai/gpt-oss-120b"),
+                ("openrouter", "meta-llama/llama-3.3-70b-instruct"),
+            ],
+        )
+        self.assertEqual(response.content, '{"tasks":[]}')
+
+    def test_missing_ai_env_vars_accepts_fallback_provider(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DEBUG": "false",
+                "LLM_PRIMARY_PROVIDER": "groq",
+                "GROQ_API_KEY": "",
+                "OPENROUTER_API_KEY": "router-key",
+                "LLM_FALLBACKS": "openrouter:router-model",
+            },
+            clear=False,
+        ):
+            missing = get_missing_ai_env_vars(task_name="journeybook")
+
+        self.assertEqual(missing, [])
 
     def test_all_category_prompt_assets_exist(self):
         prompts_dir = Path(__file__).resolve().parent / "prompts" / "categories"
@@ -571,18 +789,18 @@ class AIExplicitExceptionHandlingTests(APITestCase):
     @patch("ai.services.current_situation_generator.ResponseParser")
     @patch("ai.services.current_situation_generator.SystemPrompts")
     @patch("ai.services.current_situation_generator.UserContextPrompt")
-    @patch("ai.services.current_situation_generator.OllamaProvider")
-    @patch("ai.services.current_situation_generator.get_ollama_model", return_value="test-situation-model")
+    @patch("ai.services.current_situation_generator.create_routed_provider")
+    @patch("ai.services.current_situation_generator.get_model_for_task", return_value="test-situation-model")
     def test_current_situation_generator_uses_job_helpers_for_lifecycle_fields(
         self,
         _mock_model,
-        mock_provider_cls,
+        mock_provider_factory,
         mock_user_prompt_cls,
         mock_system_prompts_cls,
         mock_parser_cls,
         mock_formatter_cls,
     ):
-        provider = mock_provider_cls.return_value
+        provider = mock_provider_factory.return_value
         provider.model = "test-situation-model"
         provider.generate_response.return_value = AIResponse(
             content='{"current_role": "Designer", "age": 29}',
@@ -637,13 +855,14 @@ class AIExplicitExceptionHandlingTests(APITestCase):
         self.assertEqual(stats.model_usage["test-model"]["tokens"], 144)
         self.assertEqual(stats.job_type_usage["goal_attributes"]["count"], 1)
 
-    @patch("ai.views.OllamaProvider.health_check", side_effect=OSError("provider unavailable"))
-    def test_health_check_handles_provider_os_error(self, _mock_health):
+    @patch("ai.views.get_default_router")
+    def test_health_check_handles_provider_os_error(self, mock_get_router):
+        mock_get_router.return_value.health_check.side_effect = OSError("provider unavailable")
         response = self.client.get(reverse("ai-health-check"))
 
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertEqual(response.data["status"], "unhealthy")
-        self.assertEqual(response.data["service"], "ollama")
+        self.assertEqual(response.data["service"], "router")
 
 
 class OllamaProviderEnvConfigTests(TestCase):
@@ -757,19 +976,15 @@ class AIHealthCheckConfigTests(APITestCase):
         )
         self.client.force_authenticate(user=self.user)
 
-    @patch("ai.views.OllamaProvider.health_check", autospec=True)
-    def test_health_check_uses_default_host_when_env_is_missing(self, mock_health_check):
-        def _healthy(provider_instance):
-            return {
-                "status": "healthy",
-                "service": "ollama",
-                "host": provider_instance.host,
-                "model": provider_instance.model,
-                "error": None,
-            }
-
-        mock_health_check.side_effect = _healthy
-
+    @patch("ai.views.get_default_router")
+    def test_health_check_uses_default_host_when_env_is_missing(self, mock_get_router):
+        mock_get_router.return_value.health_check.return_value = {
+            "status": "healthy",
+            "service": "ollama",
+            "host": "http://localhost:11434",
+            "model": "gpt-oss:120b-cloud",
+            "error": None,
+        }
         with patch.dict(os.environ, {"OLLAMA_HOST": "", "OLLAMA_MODEL": ""}, clear=False):
             response = self.client.get(reverse("ai-health-check"))
 
@@ -779,19 +994,15 @@ class AIHealthCheckConfigTests(APITestCase):
         self.assertEqual(response.data["host"], "http://localhost:11434")
         self.assertEqual(response.data["model"], "gpt-oss:120b-cloud")
 
-    @patch("ai.views.OllamaProvider.health_check", autospec=True)
-    def test_health_check_uses_default_model_when_ollama_model_is_missing(self, mock_health_check):
-        def _healthy(provider_instance):
-            return {
-                "status": "healthy",
-                "service": "ollama",
-                "host": provider_instance.host,
-                "model": provider_instance.model,
-                "error": None,
-            }
-
-        mock_health_check.side_effect = _healthy
-
+    @patch("ai.views.get_default_router")
+    def test_health_check_uses_default_model_when_ollama_model_is_missing(self, mock_get_router):
+        mock_get_router.return_value.health_check.return_value = {
+            "status": "healthy",
+            "service": "ollama",
+            "host": "http://localhost:11434",
+            "model": "gpt-oss:120b-cloud",
+            "error": None,
+        }
         with patch.dict(
             os.environ,
             {"OLLAMA_HOST": "http://localhost:11434", "OLLAMA_MODEL": ""},
@@ -812,14 +1023,14 @@ class DeadModuleCleanupTests(TestCase):
 
 
 class HierarchyPartialFailureTests(TestCase):
-    @patch("ai.services.GoalHierarchyGenerator.OllamaProvider")
+    @patch("ai.services.GoalHierarchyGenerator.create_routed_provider")
     @patch("ai.services.GoalHierarchyGenerator.get_hierarchy_model", return_value="test-hierarchy-model")
-    def test_generate_complete_hierarchy_surfaces_partial_failures(self, _mock_model, mock_provider_cls):
+    def test_generate_complete_hierarchy_surfaces_partial_failures(self, _mock_model, mock_provider_factory):
         user = get_user_model().objects.create_user(
             email="hierarchy-partial@test.com",
             password="testpass123",
         )
-        mock_provider_cls.return_value.model = "test-hierarchy-model"
+        mock_provider_factory.return_value.model = "test-hierarchy-model"
         generator = GoalHierarchyGenerator()
 
         with patch.object(

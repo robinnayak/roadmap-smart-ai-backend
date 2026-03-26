@@ -3,10 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ai.providers.base import AIResponse, BaseAIProvider
-from ai.providers.ollama_provider import OllamaProvider
-
-
-TIMELINE_INSIGHT_PROVIDER_OLLAMA = "ollama"
+from ai.providers.router import create_routed_provider
 
 
 @dataclass
@@ -33,15 +30,10 @@ def get_timeline_ai_provider_adapter(
     temperature: float = 0.1,
     max_tokens: int | None = 700,
 ) -> TimelineAIProviderAdapter:
-    selected_provider = (provider_name or TIMELINE_INSIGHT_PROVIDER_OLLAMA).strip().lower()
-    if selected_provider != TIMELINE_INSIGHT_PROVIDER_OLLAMA:
-        raise ValueError(
-            f"Unsupported timeline insight AI provider '{selected_provider}'. "
-            f"Allowed providers: [{TIMELINE_INSIGHT_PROVIDER_OLLAMA}]."
-        )
-
     return OllamaTimelineAIProviderAdapter(
-        provider=OllamaProvider(
+        provider=create_routed_provider(
+            task_name="timeline_insight",
+            provider_name=provider_name,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,

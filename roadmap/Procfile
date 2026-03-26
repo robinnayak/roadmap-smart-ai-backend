@@ -1,0 +1,2 @@
+web: cd roadmap-smart-planner-backend/roadmap && python manage.py collectstatic --noinput && gunicorn roadmap.wsgi:application --bind 0.0.0.0:${PORT:-8000} --log-file -
+worker: cd roadmap-smart-planner-backend/roadmap && celery -A roadmap worker --loglevel=INFO
