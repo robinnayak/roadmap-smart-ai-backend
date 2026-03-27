@@ -250,6 +250,42 @@ class LLMRoutingConfigTests(TestCase):
         self.assertEqual(routes[2].provider_name, "ollama")
         self.assertEqual(routes[2].model, "gpt-oss:120b-cloud")
 
+    def test_default_remote_models_use_gpt_oss(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DEBUG": "false",
+                "LLM_PRIMARY_PROVIDER": "groq",
+                "GROQ_MODEL": "",
+                "OPENROUTER_MODEL": "",
+                "HIERARCHY_MODEL": "",
+            },
+            clear=False,
+        ):
+            groq_model = get_model_for_task("goal_hierarchy", "groq")
+            openrouter_model = get_model_for_task("goal_hierarchy", "openrouter")
+
+        self.assertEqual(groq_model, "openai/gpt-oss-120b")
+        self.assertEqual(openrouter_model, "openai/gpt-oss-120b")
+
+    def test_default_fallbacks_skip_implicit_ollama_in_production(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DEBUG": "false",
+                "LLM_PRIMARY_PROVIDER": "groq",
+                "LLM_FALLBACKS": "",
+                "OLLAMA_HOST": "",
+                "OPENROUTER_MODEL": "",
+            },
+            clear=False,
+        ):
+            routes = get_fallback_routes("goal_hierarchy")
+
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0].provider_name, "openrouter")
+        self.assertEqual(routes[0].model, "openai/gpt-oss-120b")
+
     def test_routed_provider_passes_provider_specific_model_to_provider_instance(self):
         constructed_models = []
 
@@ -1063,6 +1099,92 @@ class HierarchyPartialFailureTests(TestCase):
         self.assertEqual(result["data"]["partial_failures"][0]["stage"], "task_generation")
         subgoal_entry = result["data"]["milestones"][0]["subgoals"][0]
         self.assertEqual(subgoal_entry["generation_error"]["message"], "Task provider timeout")
+
+    @patch("ai.services.GoalHierarchyGenerator.create_routed_provider")
+    @patch("ai.services.GoalHierarchyGenerator.get_hierarchy_model", return_value="test-hierarchy-model")
+    def test_generate_milestones_uses_fallback_milestones_when_all_llm_routes_fail(self, _mock_model, mock_provider_factory):
+        mock_provider = MagicMock()
+        mock_provider.model = "test-hierarchy-model"
+        mock_provider.generate_response.side_effect = RuntimeError("All LLM routes failed")
+        mock_provider_factory.return_value = mock_provider
+        generator = GoalHierarchyGenerator()
+
+        result = generator._generate_milestones(
+            goal_data={
+                "title": "Build martial arts consistency",
+                "start_date": "2026-03-01",
+                "target_date": "2026-05-31",
+            },
+            user_context={"constraints": ["limited evening time"]},
+        )
+
+        self.assertEqual(result["status"], "success")
+        milestones = result["data"]["milestones"]
+        self.assertGreaterEqual(len(milestones), 1)
+        self.assertIn("Fallback milestone", milestones[0]["ai_reasoning"])
+        self.assertEqual(milestones[0]["start_date"], "2026-03-01")
+
+    @patch("ai.services.GoalHierarchyGenerator.create_routed_provider")
+    @patch("ai.services.GoalHierarchyGenerator.get_hierarchy_model", return_value="test-hierarchy-model")
+    def test_generate_subgoals_uses_fallback_subgoals_when_all_llm_routes_fail(self, _mock_model, mock_provider_factory):
+        mock_provider = MagicMock()
+        mock_provider.model = "test-hierarchy-model"
+        mock_provider.generate_response.side_effect = RuntimeError("All LLM routes failed")
+        mock_provider_factory.return_value = mock_provider
+        generator = GoalHierarchyGenerator()
+
+        result = generator._generate_subgoals(
+            milestone_data={
+                "title": "Month 1: Build momentum",
+                "start_date": "2026-03-01",
+                "target_date": "2026-03-31",
+            },
+            goal_data={
+                "title": "Build martial arts consistency",
+                "primary_category": "fitness",
+            },
+        )
+
+        self.assertEqual(result["status"], "success")
+        subgoals = result["data"]["subgoals"]
+        self.assertEqual(len(subgoals), 3)
+        self.assertIn("Fallback subgoal", subgoals[0]["ai_reasoning"])
+        self.assertEqual(subgoals[0]["start_date"], "2026-03-01")
+
+    @patch("ai.services.GoalHierarchyGenerator.create_routed_provider")
+    @patch("ai.services.GoalHierarchyGenerator.get_hierarchy_model", return_value="test-hierarchy-model")
+    def test_generate_tasks_uses_fallback_tasks_when_all_llm_routes_fail(self, _mock_model, mock_provider_factory):
+        mock_provider = MagicMock()
+        mock_provider.model = "test-hierarchy-model"
+        mock_provider.generate_response.side_effect = RuntimeError("All LLM routes failed")
+        mock_provider_factory.return_value = mock_provider
+        generator = GoalHierarchyGenerator()
+
+        result = generator._generate_tasks(
+            subgoal_data={"title": "Week 1: Build consistency"},
+            milestone_data={"title": "Month 1"},
+            goal_data={
+                "title": "Build martial arts consistency",
+                "primary_category": "creative",
+                "resolved_category": "fitness",
+            },
+        )
+
+        self.assertEqual(result["status"], "success")
+        tasks = result["data"]["tasks"]
+        self.assertEqual(len(tasks), 3)
+        self.assertEqual(tasks[0]["item_type"], "physical")
+        self.assertEqual(tasks[0]["sequence_position"], 1)
+
+    def test_calculate_months_is_hard_capped_to_two_months(self):
+        months = GoalHierarchyGenerator._calculate_months(
+            {
+                "start_date": "2026-03-01",
+                "target_date": "2026-12-31",
+            }
+        )
+
+        self.assertEqual(months, 2)
 
 
 class ChurnReengagementServiceTests(TestCase):

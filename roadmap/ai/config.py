@@ -5,8 +5,8 @@ from decouple import config as env_config
 
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "GPT_OSS_120B"
-DEFAULT_GROQ_MODEL = "LLAMA_3_3_70B"
-DEFAULT_OPENROUTER_MODEL = "LLAMA_3_3_70B"
+DEFAULT_GROQ_MODEL = "GPT_OSS_120B"
+DEFAULT_OPENROUTER_MODEL = "GPT_OSS_120B"
 
 PROVIDER_OLLAMA = "ollama"
 PROVIDER_GROQ = "groq"
@@ -305,10 +305,10 @@ def get_fallback_routes(task_name: str) -> list[ProviderRoute]:
     primary = get_llm_primary_provider()
     if primary == PROVIDER_OLLAMA:
         return []
-    return [
-        ProviderRoute(provider_name=PROVIDER_OPENROUTER, model=get_openrouter_model()),
-        ProviderRoute(provider_name=PROVIDER_OLLAMA, model=get_ollama_model()),
-    ]
+    routes = [ProviderRoute(provider_name=PROVIDER_OPENROUTER, model=get_openrouter_model())]
+    if get_debug_enabled() or _get_env_value("OLLAMA_HOST"):
+        routes.append(ProviderRoute(provider_name=PROVIDER_OLLAMA, model=get_ollama_model()))
+    return routes
 
 
 def get_provider_routes(

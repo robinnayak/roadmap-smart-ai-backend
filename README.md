@@ -1,856 +1,347 @@
-# Roadmap Smart Planner API
+# Roadmap Smart Planner Backend
 
 ## Overview
 
-The Roadmap Smart Planner API is a scalable SaaS platform that leverages AI (Claude/Ollama) to generate personalized 20,000-word life roadmaps with daily action plans. It bridges the gap between expensive personal coaching and generic self-help content by creating deeply customized transformation plans in minutes, then tracking user progress through daily check-ins, analytics, and gamified accountability features.
-
-The platform assists users in achieving goals across career, financial, health, and personal development domains, focusing on building discipline and motivation through structured, AI-generated hierarchies: Goals → Milestones → SubGoals → Daily Tasks.
-
-## Configuration Guide
-
-For environment switching, production configuration, and service-switching guidance, see:
-
-- [`project_docs/apis/production/ENVIRONMENT_AND_SERVICE_SWITCHING_GUIDE.md`](../project_docs/apis/production/ENVIRONMENT_AND_SERVICE_SWITCHING_GUIDE.md)
-
-This guide covers:
-- LLM provider and model switching
-- database switching between SQLite and PostgreSQL
-- storage switching between local files and Cloudflare R2
-- Celery eager versus Redis-backed async execution
-- frontend URL and auth-related environment configuration
-
-### Key Features
-- **AI-Powered Roadmap Generation**: Uses Ollama local models for precise, requirement-specific AI/ML engine.
-- **Hierarchical Goal Management**: Goals broken into milestones (monthly), subgoals (weekly), and tasks (daily).
-- **Daily Routine Tracking**: Gamified daily task lists with habit tracking and discipline streaks.
-- **User Personalization**: Profiles, personal details, and context-aware AI generation.
-- **Progress Analytics**: Real-time tracking, completion rates, and motivational insights.
-- **Scalable Architecture**: Django REST Framework with JWT authentication, suitable for production deployment.
+This repository contains the Django and Django REST Framework backend for DayOneGoal / Roadmap Smart Planner. It powers authentication, goal planning, AI-assisted goal generation, routines, journals, Journey Book generation, events, community read models, and the Goal Intelligence Engine (GIE).
 
 ## Tech Stack
-- **Backend**: Django 6.0, Django REST Framework 3.16
-- **Database**: SQLite (development), PostgreSQL/MySQL (production)
-- **Authentication**: JWT (djangorestframework-simplejwt)
-- **AI Integration**: Ollama for local AI models
-- **Other**: Django CORS headers, Python Decouple for config
 
-## Setup
+- Python 3.12
+- Django 6.0
+- Django REST Framework 3.16.1
+- Simple JWT
+- PostgreSQL or SQLite, depending on environment configuration
+- Docker and Docker Compose
 
-### Prerequisites
-- Python 3.8+
-- Ollama installed and running locally
-- Git
+## Project Layout
 
-### Local Development Setup
+- Entry point: `roadmap/manage.py`
+- Django settings: `roadmap/roadmap/settings.py`
+- Environment template: `roadmap/.env.example`
+- Docker assets:
+  - `Dockerfile`
+  - `docker-compose.yml`
+  - `start_backend.sh`
+  - `start_backend.ps1`
+- Deployment assets:
+  - `render.yaml`
+  - `.github/workflows/django-ci.yml`
 
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd roadmap-smart-planner-backend
-   ```
+## Installed Apps
 
-2. **Create virtual environment**:
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
+Verified Django business apps in `INSTALLED_APPS`:
 
-3. **Install dependencies**:
-   ```bash
-   python -m pip install -r roadmap/requirements.txt
-   python -c "import reportlab,sys; print('reportlab', reportlab.__version__, 'from', sys.executable)"
-   ```
+- `authentication`
+- `goal`
+- `ai`
+- `routine`
+- `base`
+- `journeybook`
+- `journal`
+- `community`
+- `events`
+- `gie`
 
-4. **Environment variables**:
-   Create a `.env` file in the project root:
-   ```
-   DJANGO_SECRET_KEY=your-secret-key-here
-   DEBUG=True
-   ALLOWED_HOSTS=localhost,127.0.0.1
-   CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
-   ACCESS_TOKEN_LIFETIME_MINUTES=60
-   REFRESH_TOKEN_LIFETIME_DAYS=7
-   ```
+## Key Features
 
-5. **Database setup**:
-   ```bash
-   python manage.py migrate
-   ```
+- `Authentication` - email-first JWT authentication with register, login, logout, password reset/change, deactivate/reactivate, profile, personal details, and notification settings APIs.
+- `Goal Management` - goal CRUD, create-with-hierarchy flows, financial goal feasibility, commitment contracts, timeline insight, and hierarchy progress rollups.
+- `AI Processing Jobs` - current-situation analysis, goal-attribute extraction, milestone/subgoal/task hierarchy generation, and AI job-status polling.
+- `Goal Intelligence Engine (GIE)` - slot-driven guided intake sessions, turn-by-turn Q&A, autofill payload generation, finalize bridge into goal creation, and adaptation proposals.
+- `Routine Engine` - daily routine generation, manual task management, habit tracking, health profiles, progress dashboards, streaks, adaptive load scaling, wake-baseline support, and Daily Brief generation.
+- `Journal` - per-day journal entries, search, stats, word cloud aggregation, auto-phrase polish, and summary refinement.
+- `Journey Book` - eligibility checks, synchronous book generation, chapter and PDF export, demo preview/demo PDF, and derived milestone persistence.
+- `Events` - calendar event CRUD, recurring and multi-day event support, range expansion, overlap metadata, and routine-constraint payloads.
+- `Community` - overview feed, trending topics, community events, leaderboard snapshots, search/filtering, and discussion likes.
+- `Base Platform` - root API payload, health endpoint, shared response contract, JSON renderer, and common middleware hooks.
 
-6. **Create superuser** (optional):
-   ```bash
-   python manage.py createsuperuser
-   ```
+## Architecture Overview
 
-7. **Run the server**:
-   ```bash
-   python roadmap/manage.py runserver
-   ```
-   The API will be available at `http://localhost:8000/`
+| Django App | Responsibility |
+|---|---|
+| `authentication` | Email-first user identity, JWT session lifecycle, profile settings, personal details, and notification preferences. |
+| `goal` | Goal CRUD, hierarchy persistence, financial planning, commitment contracts, and timeline insight generation. |
+| `ai` | AI job execution, current-situation analysis, goal-attribute extraction, hierarchy generation, and AI job-status polling. |
+| `routine` | Daily routine orchestration, habits, health profiles, progress dashboards, streaks, adaptive routines, and Daily Brief. |
+| `base` | Root API surface, health endpoint, and lightweight platform readiness responses. |
+| `journeybook` | Journey Book generation, preview/export flows, chapter persistence, PDF output, and derived milestone data. |
+| `journal` | Structured daily journaling, enrichment, search, stats, word cloud caching, and refinement helpers. |
+| `community` | Read-only community overview data, trending topics, event highlights, leaderboard data, and discussion likes. |
+| `events` | User-owned calendar events, recurring occurrence expansion, overlap metadata, and routine scheduling constraints. |
+| `gie` | Guided goal-intake sessions, slot state, plan snapshots, finalize bridge, and adaptation proposal generation. |
 
-8. **Interpreter-safe startup scripts** (recommended):
-   ```bash
-   # Windows
-   ./start_backend.ps1
+## Prerequisites
 
-   # Linux/macOS
-   ./start_backend.sh
-   ```
+- Python 3.12
+- `pip`
+- PostgreSQL if you want production-like local development
+- Redis if you disable eager task execution
 
-### Production Deployment
-- Use a production-grade database (PostgreSQL/MySQL)
-- Set `DEBUG=False`
-- Configure ALLOWED_HOSTS and CORS settings
-- Use a WSGI server like Gunicorn
-- Set up environment variables securely
-- Enable HTTPS
+## Environment Variables
 
-## Authentication
+### Django Core
 
-The API uses JWT (JSON Web Tokens) for authentication. Include the token in the `Authorization` header as `Bearer <token>`.
+| Variable | Required | Description | Example / Default |
+|---|---|---|---|
+| `DEBUG` | Yes | Enables Django debug behavior and the browsable API renderer in development. | `False` |
+| `DJANGO_ENV` | No | Environment label used by logging and deployment behavior. | `production` |
+| `DJANGO_SECRET_KEY` | Yes | Django secret key for signing sessions, tokens, and cryptographic values. | `replace-production-secret` |
+| `ALLOWED_HOSTS` | Yes | Comma-separated hostnames the backend will serve. | `localhost,127.0.0.1,api.example.com` |
+| `CORS_ALLOWED_ORIGINS` | Yes | Comma-separated frontend origins allowed to call the API. | `http://localhost:3000,https://app.example.com` |
+| `ACCESS_TOKEN_LIFETIME_MINUTES` | No | JWT access token lifetime in minutes. | `60` |
+| `REFRESH_TOKEN_LIFETIME_DAYS` | No | JWT refresh token lifetime in days. | `7` |
+| `MAX_ACTIVE_DEVICE_SESSIONS` | No | Maximum refresh-token sessions kept active per user; `0` disables the cap. | `0` |
+| `GIE_ROLLOUT_ENABLED` | No | Enables or disables all public GIE endpoints. | `True` |
+| `GIE_DEGRADED_MODE` | No | Forces GIE to return rollout-policy degraded responses. | `False` |
+| `AI_DEBUG` | No | Enables extra AI/provider debug logging. | `false` |
+| `SENTRY_DSN` | No | Sentry DSN for production error monitoring. | empty |
+| `DISABLE_SENTRY` | No | Disables Sentry even if `SENTRY_DSN` is set. | `false` |
+| `SENTRY_TRACES_SAMPLE_RATE` | No | Sentry traces sampling rate. | `0` |
+| `SENTRY_PROFILES_SAMPLE_RATE` | No | Sentry profiles sampling rate. | `0` |
+| `SENTRY_SEND_DEFAULT_PII` | No | Sends default user context to Sentry when enabled. | `False` |
 
-Launch auth posture:
-- JWT under `/auth/` is the only supported application auth contract.
-- `/api-auth/` is a debug-only DRF browsable-API/session tool and is not part of the product surface.
-- Notification settings endpoints store preference flags only; they do not imply a general push/email delivery subsystem.
+### Database
 
-### Obtaining Tokens
-- Register a new user via `POST /auth/register/`
-- Login via `POST /auth/login/` to receive access and refresh tokens
-- Use the access token for authenticated requests
-- Refresh tokens via `POST /auth/token/refresh/` when expired
+| Variable | Required | Description | Example / Default |
+|---|---|---|---|
+| `DB_ENGINE` | No | Database engine. Leave empty to fall back to SQLite; set PostgreSQL in staging/production. | `django.db.backends.postgresql` |
+| `DB_NAME` | Conditionally | Database name when `DB_ENGINE` is set. | `roadmap` |
+| `DB_USER` | Conditionally | Database username when `DB_ENGINE` is set. | `roadmap` |
+| `DB_PASSWORD` | Conditionally | Database password when `DB_ENGINE` is set. | `replace-with-db-password` |
+| `DB_HOST` | Conditionally | Database host when `DB_ENGINE` is set. | `postgres` |
+| `DB_PORT` | Conditionally | Database port when `DB_ENGINE` is set. | `5432` |
+| `DB_CONN_MAX_AGE` | No | Persistent DB connection lifetime in seconds. | `60` |
+| `DB_CONN_HEALTH_CHECKS` | No | Enables Django DB connection health checks. | `True` |
+| `DB_SSLMODE` | No | PostgreSQL SSL mode for network databases. | `require` |
 
-### Token Expiration
-- Access tokens: 1 hour (configurable)
-- Refresh tokens: 7 days (configurable)
+### AI & LLM
 
-## API Endpoints
-
-### Base
-- `GET /` - Welcome message and API info
+| Variable | Required | Description | Example / Default |
+|---|---|---|---|
+| `LLM_PRIMARY_PROVIDER` | No | Primary provider router used by `roadmap/ai/config.py`. | `groq` |
+| `LLM_FALLBACKS` | No | Ordered provider/model fallbacks in `provider:model` format. | `openrouter:LLAMA_3_3_70B,ollama:GPT_OSS_120B` |
+| `HIERARCHY_MODEL` | No | Task-specific model key for goal hierarchy generation. | `GPT_OSS_120B` |
+| `JOURNEYBOOK_MODEL` | No | Task-specific model key for Journey Book generation. | `GPT_OSS_120B` |
+| `TIMELINE_MODEL` | No | Task-specific model key for timeline insight generation. | `GPT_OSS_120B` |
+| `CURRENT_SITUATION_MODEL` | No | Task-specific model key for current-situation analysis. | `GPT_OSS_120B` |
+| `GIE_LANGUAGE_MODEL` | No | Task-specific model key for GIE language refinement. | `GPT_OSS_120B` |
+| `JOURNAL_MODEL` | No | Task-specific model key for journal AI helpers. | `GPT_OSS_120B` |
+| `HABIT_RECOMMENDATION_MODEL` | No | Task-specific model key for habit recommendation generation. | `GPT_OSS_120B` |
+| `GOAL_ATTRIBUTE_MODEL` | No | Task-specific model key for goal-attribute extraction. | `GPT_OSS_120B` |
+| `GOAL_CATEGORY_MODEL` | No | Task-specific model key for goal category resolution. | `GPT_OSS_120B` |
+| `GROQ_API_KEY` | Conditionally | Groq API key when Groq is used as a primary or fallback provider. | `your-groq-key` |
+| `GROQ_BASE_URL` | No | Base URL for Groq-compatible API calls. | `https://api.groq.com/openai/v1` |
+| `GROQ_MODEL` | No | Default Groq model key. | `LLAMA_3_3_70B` |
+| `OPENROUTER_API_KEY` | Conditionally | OpenRouter API key when OpenRouter is used as a provider or fallback. | `your-openrouter-key` |
+| `OPENROUTER_BASE_URL` | No | Base URL for OpenRouter API calls. | `https://openrouter.ai/api/v1` |
+| `OPENROUTER_MODEL` | No | Default OpenRouter model key. | `LLAMA_3_3_70B` |
+| `OPENROUTER_APP_NAME` | No | App name sent to OpenRouter. | `Roadmap Smart Planner` |
+| `OPENROUTER_SITE_URL` | No | Site URL sent to OpenRouter for attribution. | `https://your-frontend-domain.com` |
+| `OLLAMA_HOST` | Conditionally | Ollama host URL for local or fallback provider calls. | `http://localhost:11434` |
+| `OLLAMA_MODEL` | No | Default Ollama model key. | `GPT_OSS_120B` |
+| `OLLAMA_REQUEST_TIMEOUT_SECONDS` | No | Request timeout for Ollama calls. | `180` |
+| `OLLAMA_MAX_RETRIES` | No | Retry count for Ollama requests. | `2` |
+| `OLLAMA_RETRY_BACKOFF_SECONDS` | No | Backoff interval between Ollama retries. | `0.75` |
+| `OLLAMA_TRUST_ENV` | No | Allows the Ollama HTTP client to inherit proxy environment variables. | `false` |
+| `HIERARCHY_MAX_MONTHS` | No | Upper bound for generated goal hierarchy duration. | `12` |
+| `HIERARCHY_MAX_SUBGOALS_PER_MILESTONE` | No | Upper bound for subgoals per milestone. | `3` |
+| `HIERARCHY_MAX_TASKS_PER_SUBGOAL` | No | Upper bound for tasks per subgoal. | `5` |
+| `HIERARCHY_MAX_TOKENS` | No | Token budget used by hierarchy generation. | `2400` |
+| `HIERARCHY_TASK_WORKERS` | No | Parallel task-generation worker count. | `2` |
 
 ### Authentication
 
-#### User Registration
-- **Endpoint**: `POST /auth/register/`
-- **Description**: Register a new user account
-- **Request Body**:
-  ```json
-  {
-    "email": "user@example.com",
-    "username": "optional_username",
-    "password": "securepassword",
-    "password2": "securepassword"
-  }
-  ```
-- **Response (201)**:
-  ```json
-  {
-    "tokens": {
-      "access": "eyJ0eXAi...",
-      "refresh": "eyJ0eXAi..."
-    },
-    "user": {
-      "id": 1,
-      "email": "user@example.com",
-      "username": "user",
-      "is_active": true,
-      "date_joined": "2024-01-01T00:00:00Z",
-      "last_login": null
-    }
-  }
-  ```
-- **Status Codes**: 201 (Created), 400 (Validation Error)
+| Variable | Required | Description | Example / Default |
+|---|---|---|---|
+| `EMAIL_BACKEND` | No | Django email backend used for password reset delivery. | `django.core.mail.backends.smtp.EmailBackend` |
+| `EMAIL_HOST` | Conditionally | SMTP host for password reset email. | `smtp.example.com` |
+| `EMAIL_PORT` | Conditionally | SMTP port for password reset email. | `587` |
+| `EMAIL_USE_TLS` | No | Enables TLS for SMTP. | `True` |
+| `EMAIL_HOST_USER` | Conditionally | SMTP username. | `your-smtp-username` |
+| `EMAIL_HOST_PASSWORD` | Conditionally | SMTP password. | `replace-with-your-smtp-password` |
+| `DEFAULT_FROM_EMAIL` | Conditionally | Default sender address for Django email. | `noreply@example.com` |
+| `PASSWORD_RESET_URL` | Conditionally | Frontend password-reset route used in reset emails; required when `DEBUG=False`. | `https://app.example.com/reset-password` |
 
-#### User Login
-- **Endpoint**: `POST /auth/login/`
-- **Request Body**:
-  ```json
-  {
-    "email": "user@example.com",
-    "password": "securepassword"
-  }
-  ```
-- **Response (200)**:
-  ```json
-  {
-    "message": "Login successful",
-    "tokens": {
-      "access": "eyJ0eXAi...",
-      "refresh": "eyJ0eXAi..."
-    },
-    "user": {...}
-  }
-  ```
+### External Services
 
-#### User Logout
-- **Endpoint**: `POST /auth/logout/`
-- **Headers**: `Authorization: Bearer <access_token>`
-- **Request Body**:
-  ```json
-  {
-    "refresh_token": "eyJ0eXAi..."
-  }
-  ```
+| Variable | Required | Description | Example / Default |
+|---|---|---|---|
+| `RESEND_API_KEY` | Conditionally | Resend API key for commitment-contract delivery; required when `DEBUG=False`. | `replace-with-your-resend-api-key` |
+| `RESEND_FROM_EMAIL` | Conditionally | Sender address for Resend commitment-contract emails; required when `DEBUG=False`. | `Roadmap Planner <onboarding@example.com>` |
+| `REDIS_URL` | Conditionally | Redis broker/result backend URL used when Celery eager mode is disabled. | `redis://localhost:6379/0` |
+| `CELERY_TASK_ALWAYS_EAGER` | No | Runs tasks inline instead of through Redis-backed workers. | `False` |
+| `CELERY_TASK_EAGER_PROPAGATES` | No | Propagates task exceptions immediately in eager mode. | `False` |
 
-#### Token Refresh
-- **Endpoint**: `POST /auth/token/refresh/`
-- **Request Body**:
-  ```json
-  {
-    "refresh": "eyJ0eXAi..."
-  }
-  ```
+### Deployment
 
-#### User Profile
-- **Endpoint**: `GET /auth/profile/`, `PUT /auth/profile/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Response**:
-  ```json
-  {
-    "id": 1,
-    "username": "user",
-    "email": "user@example.com",
-    "bio": "About me",
-    "avatar": null,
-    "timezone": "UTC",
-    "subscription_tier": "free",
-    "total_points": 0,
-    "current_level": 1,
-    "preferred_language": "en",
-    "theme": "light"
-  }
-  ```
+| Variable | Required | Description | Example / Default |
+|---|---|---|---|
+| `USE_R2_STORAGE` | No | Switches media storage from local filesystem to Cloudflare R2. | `False` |
+| `R2_ENDPOINT_URL` | Conditionally | R2/S3-compatible endpoint URL when `USE_R2_STORAGE=True`. | `https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com` |
+| `R2_BUCKET_NAME` | Conditionally | Bucket name for uploaded media and PDFs. | `your-bucket-name` |
+| `R2_ACCESS_KEY_ID` | Conditionally | R2 access key ID. | `replace-with-your-r2-access-key-id` |
+| `R2_SECRET_ACCESS_KEY` | Conditionally | R2 secret access key. | `replace-with-your-r2-secret-access-key` |
+| `R2_PUBLIC_BASE_URL` | Conditionally | Public base URL used to construct media URLs from R2. | `https://pub-YOUR_HASH.r2.dev` |
 
-#### Personal Details
-- **Endpoint**: `GET /auth/personal-details/`, `POST /auth/personal-details/`, `PUT /auth/personal-details/`, `DELETE /auth/personal-details/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body (POST/PUT)**:
-  ```json
-  {
-    "date_of_birth": "1990-01-01",
-    "current_situation": "Detailed description of current life situation",
-    "roadmap_start_date": "2024-01-01"
-  }
-  ```
+## Local Development
 
-#### Notification Settings
-- **Endpoint**: `GET /auth/notification/`, `PUT /auth/notification/`
-- **Headers**: `Authorization: Bearer <token>`
-
-#### User Info
-- **Endpoint**: `GET /auth/user/`
-- **Headers**: `Authorization: Bearer <token>`
-
-#### Deactivate Account
-- **Endpoint**: `POST /auth/user-deactivate/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body**:
-  ```json
-  {
-    "deactivate": true
-  }
-  ```
-
-### AI Services
-
-#### AI Health Check
-- **Endpoint**: `GET /ai/health-check/`
-- **Description**: Check if AI service (Ollama) is running
-- **Response (200)**:
-  ```json
-  {
-    "status": "AI service is healthy",
-    "service": "ollama",
-    "host": "localhost:11434",
-    "model": "gpt-oss:120b-cloud"
-  }
-  ```
-
-#### Process Current Situation
-- **Endpoint**: `POST /ai/process-text-data-current-situation/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body**:
-  ```json
-  {
-    "raw_data": "Current situation description",
-    "user_age": 30
-  }
-  ```
-- **Response (200)**: Processed situation data with job ID
-
-#### Goal Attribute Extractor
-- **Endpoint**: `GET /ai/goal-attribute-extractor/`, `POST /ai/goal-attribute-extractor/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body (POST)**:
-  ```json
-  {
-    "user_input": "I want to become a software engineer"
-  }
-  ```
-
-#### Generate Milestones
-- **Endpoint**: `GET /ai/generate-milestones/{goal_id}/`, `POST /ai/generate-milestones/{goal_id}/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Response (200)**: Generated milestones for the goal
-
-### Goal Management
-
-#### Current Situation Goal
-- **Endpoint**: `GET /goal/current-situation/`, `PUT /goal/current-situation/`, `DELETE /goal/current-situation/`
-- **Headers**: `Authorization: Bearer <token>`
-
-#### Goals
-- **Endpoint**: `GET /goal/`, `POST /goal/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body (POST)**:
-  ```json
-  {
-    "title": "Learn Python",
-    "description": "Master Python programming",
-    "why_it_matters": "Career advancement",
-    "primary_category": "career",
-    "impact_dimensions": {"skill": 8, "income": 7},
-    "priority": "high",
-    "target_date": "2024-12-31",
-    "goal_attributes_input": "I need to learn Python for data science"
-  }
-  ```
-
-#### Create Goal with Hierarchy
-- **Endpoint**: `POST /goal/create-with-hierarchy/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Description**: Creates goal and generates full AI hierarchy (milestones, subgoals, tasks)
-
-#### Goal Detail
-- **Endpoint**: `GET /goal/goals/{goal_id}/`, `PUT /goal/goals/{goal_id}/`, `DELETE /goal/goals/{goal_id}/`
-- **Headers**: `Authorization: Bearer <token>`
-
-#### Goal Hierarchy
-- **Endpoint**: `GET /goal/goals/{goal_id}/hierarchy/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Response**: Goal with milestones and subgoals (no tasks)
-
-### Routine Management
-
-#### Today's Task List
-- **Endpoint**: `GET /routines/today/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Response**: Today's generated task list
-
-#### Generate Task List
-- **Endpoint**: `POST /routines/generate/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body**:
-  ```json
-  {
-    "date": "2024-01-15"
-  }
-  ```
-
-#### Complete Task
-- **Endpoint**: `POST /routines/tasks/{task_id}/complete/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body**:
-  ```json
-  {
-    "notes": "Completed successfully",
-    "actual_minutes": 45
-  }
-  ```
-
-#### Skip Task
-- **Endpoint**: `POST /routines/tasks/{task_id}/skip/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body**:
-  ```json
-  {
-    "reason": "Not enough time today"
-  }
-  ```
-
-#### Week Overview
-- **Endpoint**: `GET /routines/week/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Response**: Task completion summary for the current week
-
-#### Discipline Streak
-- **Endpoint**: `GET /routines/streak/`
-- **Headers**: `Authorization: Bearer <token>`
-
-#### Habits
-- **Endpoint**: `GET /routines/habits/`, `POST /routines/habits/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body (POST)**:
-  ```json
-  {
-    "name": "Morning Exercise",
-    "description": "30 minutes of cardio",
-    "frequency": "daily",
-    "estimated_minutes": 30,
-    "priority": "high"
-  }
-  ```
-
-#### Habit Detail
-- **Endpoint**: `GET /routines/habits/{habit_id}/`, `PUT /routines/habits/{habit_id}/`, `DELETE /routines/habits/{habit_id}/`
-- **Headers**: `Authorization: Bearer <token>`
-
-## Usage Examples
-
-### Python (requests library)
-```python
-import requests
-
-# Login
-response = requests.post('http://localhost:8000/auth/login/', json={
-    'email': 'user@example.com',
-    'password': 'password'
-})
-token = response.json()['tokens']['access']
-
-# Create a goal
-headers = {'Authorization': f'Bearer {token}'}
-response = requests.post('http://localhost:8000/goal/', json={
-    'title': 'Learn Django',
-    'description': 'Build web apps with Django',
-    'primary_category': 'career',
-    'target_date': '2024-06-01'
-}, headers=headers)
-
-print(response.json())
-```
-
-### cURL
 ```bash
-# Register
-curl -X POST http://localhost:8000/auth/register/ \
-  -H "Content-Type: application/json" \
-  -d '{"email":"user@example.com","password":"pass","password2":"pass"}'
-
-# Login
-TOKEN=$(curl -X POST http://localhost:8000/auth/login/ \
-  -H "Content-Type: application/json" \
-  -d '{"email":"user@example.com","password":"pass"}' | jq -r '.tokens.access')
-
-# Get goals
-curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/goal/
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp roadmap/.env.example roadmap/.env
+python roadmap/manage.py migrate
+python roadmap/manage.py runserver
 ```
 
-## Error Handling
+On Windows PowerShell:
 
-The API uses consistent error response formats:
-
-```json
-{
-  "error": "Error message",
-  "code": "error_code",
-  "details": {...},  // Optional validation details
-  "status": 400
-}
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item roadmap\.env.example roadmap\.env
+python roadmap\manage.py migrate
+python roadmap\manage.py runserver
 ```
 
-### Common Error Codes
-- `invalid_data`: Validation failed
-- `token_not_valid`: JWT expired or invalid
-- `not_found`: Resource not found
-- `permission_denied`: Access denied
-- `throttled`: Rate limit exceeded
+## Local vs Production Configuration
 
-### HTTP Status Codes
-- `200`: Success
-- `201`: Created
-- `400`: Bad Request
-- `401`: Unauthorized
-- `403`: Forbidden
-- `404`: Not Found
-- `429`: Too Many Requests
-- `500`: Internal Server Error
+| Setting | Local Development | Production |
+|---|---|---|
+| `DEBUG` | Usually `True` during manual local runs; Docker compose sets `DEBUG="true"`. | `False`. Production-only validation in settings requires critical env vars to be present. |
+| API host/CORS | `ALLOWED_HOSTS=localhost,127.0.0.1`; `CORS_ALLOWED_ORIGINS` points at local frontend URLs. | Restrict to deployed API domains and frontend origins only. |
+| Database | SQLite when `DB_ENGINE` is empty, or local PostgreSQL through Docker Compose. | PostgreSQL via `DB_ENGINE=django.db.backends.postgresql` plus `DB_*` credentials. |
+| LLM provider | Typically `ollama` for local development, with `OLLAMA_HOST` on localhost. | `groq` is the documented primary provider, with optional `openrouter` and `ollama` fallbacks. |
+| Static files | WhiteNoise serves collected static files; local media can stay on filesystem. | WhiteNoise serves static assets; media should use R2 when `USE_R2_STORAGE=True`. |
+| Docker usage | `docker-compose.yml` runs `web` plus `postgres` for a production-like local stack. | Build the image and inject production env vars from your host or deployment platform. |
+| Background work | Eager execution is acceptable with `CELERY_TASK_ALWAYS_EAGER=True`. | Use `REDIS_URL` and disable eager mode for worker-backed execution. |
 
-## Troubleshooting
+## Docker Setup
 
-### AI Service Issues
-- Ensure Ollama is running: `ollama serve`
-- Check model availability: `ollama list`
-- Verify model name in health check response
+### What the checked-in files do
 
-### Database Issues
-- Run migrations: `python manage.py migrate`
-- Check database file permissions
+- `Dockerfile`
+  - Base image: `python:3.12-slim`
+  - Installs `build-essential` and `libpq-dev`
+  - Copies `requirements.txt`, `journey_book/`, `roadmap/`, and start scripts
+  - Exposes `8000`
+  - Starts Gunicorn on `0.0.0.0:8000`
+- `docker-compose.yml`
+  - Services:
+    - `web` - Django app + Gunicorn
+    - `postgres` - `postgres:16-alpine`
+  - Ports:
+    - `8000:8000` for `web`
+    - `5432:5432` for `postgres`
+  - Volumes:
+    - `.:/app` mounted into `web`
+    - `postgres_data:/var/lib/postgresql/data` for the database
+  - Env file:
+    - `roadmap/.env`
 
-### Authentication Issues
-- Verify token format: `Bearer <token>`
-- Check token expiration
-- Ensure user is active
+### Commands
 
-### Performance Issues
-- Use pagination for large lists
-- Implement caching for frequent queries
-- Monitor database query performance
+Build the images:
 
-## Bug Tracking and Reporting
-
-### Reporting Bugs
-When encountering issues, follow these steps to report bugs effectively:
-
-1. **Gather Information**:
-   - Django version and Python version
-   - Operating system and environment (dev/prod)
-   - Steps to reproduce the issue
-   - Expected vs. actual behavior
-   - Error messages and stack traces
-   - Relevant log entries
-
-2. **Check Existing Issues**:
-   - Search the issue tracker for similar problems
-   - Review closed issues for known fixes
-
-3. **Create a Bug Report**:
-   - Use a clear, descriptive title
-   - Provide detailed steps to reproduce
-   - Include error logs and screenshots if applicable
-   - Specify the environment where the issue occurs
-
-4. **Debugging Tips**:
-   - Enable DEBUG=True in development
-   - Check Django logs in `roadmap/logs/`
-   - Use Django Debug Toolbar for detailed request info
-   - Test with minimal data to isolate issues
-
-### Common Issue Categories
-- **Authentication**: Token expiration, permission errors
-- **AI Services**: Ollama connectivity, model loading
-- **Database**: Migration issues, data integrity
-- **API**: Request validation, serialization errors
-- **Performance**: Slow queries, memory usage
-
-## Coding Standards and Best Practices
-
-### Code Quality Guidelines
-1. **Remove Debug Code**: Eliminate all `print()` statements before production deployment
-2. **Error Handling**: Use proper exception handling with logging
-3. **Validation**: Implement comprehensive input validation
-4. **Security**: Follow Django security best practices
-5. **Performance**: Optimize database queries, use select_related/prefetch_related
-6. **Documentation**: Document complex logic and API changes
-
-### Development Workflow
-1. **Branching**: Use feature branches for development
-2. **Commits**: Write clear, descriptive commit messages
-3. **Code Review**: All changes require review before merging
-4. **Testing**: Write tests for new features and bug fixes
-5. **Linting**: Use tools like flake8, black for code formatting
-
-### Preventing Logical Errors
-- **Duplicate Code**: Refactor duplicate classes and functions
-- **Commented Code**: Remove unused commented code
-- **Magic Numbers**: Use constants for configurable values
-- **Hardcoded Values**: Use environment variables for configuration
-- **Race Conditions**: Implement proper locking for concurrent operations
-
-## Production Setup and Deployment
-
-### Prerequisites
-- **Server**: Ubuntu 20.04+ or similar Linux distribution
-- **Python**: 3.8 or higher
-- **Database**: PostgreSQL 12+ or MySQL 8+
-- **Web Server**: Nginx
-- **WSGI Server**: Gunicorn
-- **AI Service**: Ollama server accessible
-- **SSL Certificate**: For HTTPS (Let's Encrypt recommended)
-
-### Step-by-Step Production Setup
-
-1. **Server Preparation**:
-   ```bash
-   # Update system
-   sudo apt update && sudo apt upgrade -y
-
-   # Install required packages
-   sudo apt install python3 python3-pip postgresql postgresql-contrib nginx curl
-   ```
-
-2. **Database Setup**:
-   ```bash
-   # Create database and user
-   sudo -u postgres psql
-   CREATE DATABASE roadmap_db;
-   CREATE USER roadmap_user WITH PASSWORD 'secure_password';
-   GRANT ALL PRIVILEGES ON DATABASE roadmap_db TO roadmap_user;
-   \q
-   ```
-
-3. **Application Deployment**:
-   ```bash
-   # Clone repository
-   git clone <repository-url>
-   cd roadmap-smart-planner-backend
-
-   # Create virtual environment
-   python3 -m venv venv
-   source venv/bin/activate
-
-   # Install dependencies
-   pip install -r requirements.txt
-   pip install gunicorn psycopg2-binary
-   ```
-
-4. **Environment Configuration**:
-   Create `.env` file:
-   ```
-   DJANGO_SECRET_KEY=your-very-secure-secret-key-here
-   DEBUG=False
-   ALLOWED_HOSTS=yourdomain.com,www.yourdomain.com
-   CORS_ALLOWED_ORIGINS=https://yourfrontend.com
-   DATABASE_URL=postgresql://roadmap_user:secure_password@localhost:5432/roadmap_db
-   ACCESS_TOKEN_LIFETIME_MINUTES=60
-   REFRESH_TOKEN_LIFETIME_DAYS=7
-   OLLAMA_HOST=http://localhost:11434
-   ```
-
-5. **Database Migration**:
-   ```bash
-   python manage.py migrate
-   python manage.py collectstatic --noinput
-   ```
-
-6. **Gunicorn Configuration**:
-   Create `gunicorn.conf.py`:
-   ```python
-   bind = "127.0.0.1:8000"
-   workers = 3
-   user = "www-data"
-   group = "www-data"
-   tmp_upload_dir = None
-   ```
-
-7. **Nginx Configuration**:
-   Create `/etc/nginx/sites-available/roadmap`:
-   ```
-   server {
-       listen 80;
-       server_name yourdomain.com www.yourdomain.com;
-
-       location = /favicon.ico { access_log off; log_not_found off; }
-
-       location / {
-           include proxy_params;
-           proxy_pass http://127.0.0.1:8000;
-           proxy_set_header X-Forwarded-Proto $scheme;
-       }
-
-       location /static/ {
-           alias /path/to/your/project/static/;
-       }
-   }
-   ```
-
-8. **Systemd Service**:
-   Create `/etc/systemd/system/gunicorn.service`:
-   ```
-   [Unit]
-   Description=Gunicorn daemon for Roadmap Planner
-   After=network.target
-
-   [Service]
-   User=www-data
-   Group=www-data
-   WorkingDirectory=/path/to/your/project
-   Environment="PATH=/path/to/your/project/venv/bin"
-   ExecStart=/path/to/your/project/venv/bin/gunicorn roadmap.wsgi:application
-   Restart=always
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-9. **SSL Setup** (using Certbot):
-   ```bash
-   sudo apt install certbot python3-certbot-nginx
-   sudo certbot --nginx -d yourdomain.com -d www.yourdomain.com
-   ```
-
-10. **Start Services**:
-    ```bash
-    sudo systemctl enable gunicorn
-    sudo systemctl start gunicorn
-    sudo systemctl enable nginx
-    sudo systemctl restart nginx
-    ```
-
-### Monitoring and Maintenance
-- **Logs**: Monitor `/var/log/nginx/` and application logs
-- **Backups**: Regular database backups using pg_dump
-- **Updates**: Test updates in staging environment first
-- **Security**: Regular security updates and dependency checks
-
-## Testing Protocols
-
-### Testing Strategy
-1. **Unit Tests**: Test individual functions and methods
-2. **Integration Tests**: Test API endpoints and database interactions
-3. **End-to-End Tests**: Test complete user workflows
-4. **Performance Tests**: Load testing for production readiness
-
-### Running Tests
 ```bash
-# Run all tests
-python manage.py test
-
-# Run specific app tests
-python manage.py test authentication
-python manage.py test goal
-python manage.py test ai
-python manage.py test routine
-
-# Run with coverage
-pip install coverage
-coverage run manage.py test
-coverage report
+docker compose build
 ```
 
-## Backend Environment Contracts
+Start the stack:
 
-- Logging is console-only in the active launch configuration unless explicit file handlers are added in [`roadmap/roadmap/settings.py`](./roadmap/roadmap/settings.py).
-- The checked-in `roadmap/logs/` files are repository artifacts, not the active logging subsystem.
-- Production rendering uses the shared JSON contract renderer only.
-- The DRF browsable API renderer is enabled only when `DEBUG=True`.
-
-### API Testing with cURL
 ```bash
-# Health check
-curl -X GET http://localhost:8000/ai/health-check/
-
-# Register user
-curl -X POST http://localhost:8000/auth/register/ \
-  -H "Content-Type: application/json" \
-  -d '{"email":"test@example.com","password":"testpass","password2":"testpass"}'
-
-# Test authentication flow
-TOKEN=$(curl -X POST http://localhost:8000/auth/login/ \
-  -H "Content-Type: application/json" \
-  -d '{"email":"test@example.com","password":"testpass"}' | jq -r '.tokens.access')
-
-# Test protected endpoint
-curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/goal/
+docker compose up
 ```
 
-### Load Testing
-Use tools like Apache Bench or Locust for performance testing:
+Start in detached mode:
+
 ```bash
-# Simple load test
-ab -n 1000 -c 10 http://localhost:8000/
-
-# With authentication
-ab -n 100 -c 5 -H "Authorization: Bearer $TOKEN" http://localhost:8000/goal/
+docker compose up -d
 ```
 
-### Continuous Integration
-- Set up CI/CD pipeline with GitHub Actions
-- Run tests on every push
-- Deploy to staging on successful tests
-- Manual approval for production deployment
+Stop and remove containers:
 
-## User Workflow Analysis
+```bash
+docker compose down
+```
 
-### Current User Journey
-The application follows a logical, progressive user workflow designed to build comprehensive life transformation plans:
+Run migrations inside the app container:
 
-1. **Onboarding & Assessment**
-   - User registration with profile creation
-   - Personal details collection (age, current situation)
-   - AI-powered current situation analysis
+```bash
+docker compose run --rm web python roadmap/manage.py migrate
+```
 
-2. **Goal Setting & Planning**
-   - Goal creation with AI attribute extraction
-   - Automatic hierarchy generation (milestones → subgoals → tasks)
-   - Flexible goal categorization (career, financial, health, personal)
+Open a Django shell inside the container:
 
-3. **Daily Execution & Tracking**
-   - AI-generated daily task lists from active goals
-   - Task completion with progress tracking
-   - Habit formation with streak counters
-   - Real-time analytics and motivation
+```bash
+docker compose run --rm web python roadmap/manage.py shell
+```
 
-4. **Progress Monitoring**
-   - Goal progress visualization
-   - Weekly overview and reporting
-   - Achievement tracking and gamification
+## CI/CD Pipeline
 
-### Workflow Logic Validation
-✅ **Strengths**:
-- Progressive complexity: Starts simple, builds depth
-- AI integration reduces manual planning effort
-- Daily habits reinforce long-term goals
-- Comprehensive tracking prevents goal abandonment
+- Workflow file: `.github/workflows/django-ci.yml`
+- Trigger:
+  - any `push`
+  - any `pull_request`
+- Job:
+  - `django`
+- Pipeline steps:
+  - checkout repository
+  - set up Python 3.12 with pip cache
+  - install dependencies from `requirements.txt`
+  - run `python roadmap/manage.py check`
+  - run `python roadmap/manage.py migrate --noinput`
+  - run `python roadmap/manage.py test`
+- GitHub secrets required by the current workflow:
+  - none; the workflow defines CI-safe env vars inline and uses SQLite (`CI_USE_SQLITE=true`)
 
-✅ **User Experience Flow**:
-- Intuitive progression from assessment to execution
-- Clear feedback loops with progress indicators
-- Flexible goal management (create, modify, track)
-- Motivation through streaks and achievements
+## API Overview
 
-### Potential Workflow Improvements
-- **Onboarding Enhancement**: Add goal discovery quiz before AI analysis
-- **Progress Milestones**: Celebrate intermediate achievements
-- **Adaptive Planning**: AI suggestions based on completion patterns
-- **Social Accountability**: Optional goal sharing features
+| Endpoint Group | Base Path | Description |
+|---|---|---|
+| Base | `/` and `/health` | Welcome payload and lightweight health checks. |
+| Authentication | `/auth/` | Registration, login, logout, token refresh, password flows, profile, personal details, and notification settings. |
+| Goals | `/goal/` | Goal CRUD, hierarchy creation, commitment contracts, current situation, financial profile/progress, and timeline insight. |
+| Routine | `/routines/` | Daily routine generation, task lifecycle, habits, health profiles, progress dashboards, streaks, and Daily Brief. |
+| Journal | `/journal/` | Journal entries, auto-phrase, summary refinement, search, stats, dates, and word cloud APIs. |
+| Events | `/events/` | Event CRUD plus recurring-range expansion and overlap metadata. |
+| Goal Intelligence Engine | `/gie/` | Guided intake sessions, turn processing, autofill, finalize bridge, plan retrieval, and adaptation proposals. |
+| AI Utilities | `/ai/` | AI health check, current-situation processing, goal-attribute extraction, milestone generation, and job-status polling. |
+| Community | `/community/` | Community overview feed and discussion-like interactions. |
+| Journey Book | `/api/journeybook/` | Journey Book CRUD, eligibility, export, download, preview, and generation flows. |
+| Journey Book Demo | `/journey-books/` | Public demo preview JSON and PDF endpoints. |
 
-## Future Features Roadmap
+## Common Issues & Troubleshooting
 
-### Phase 1: Enhanced Personalization (Q1 2025)
-- **AI Coach Conversations**: Chat interface for personalized advice and motivation
-- **Smart Reminders**: Intelligent notification system based on user patterns
-- **Goal Templates**: Pre-built goal frameworks for common objectives
-- **Progress Predictions**: AI forecasting of goal completion timelines
+**Problem:** Journey Book generation can still fail after the record is created.  
+**Cause:** The real generation path is synchronous and can fail on AI, PDF, or storage work during `POST /api/journeybook/`.  
+**Fix:** Check the saved book status first, then retry with the export/preview flows after inspecting logs: `python roadmap/manage.py test journeybook`.
 
-### Phase 2: Social & Community Features (Q2 2025)
-- **Goal Sharing**: Private sharing with accountability partners
-- **Community Challenges**: Group goal-setting and competitions
-- **Mentorship Matching**: Connect users with similar goals
-- **Success Stories**: User-generated content and testimonials
+**Problem:** Current-situation analysis fails because the AI provider is unavailable.  
+**Cause:** Ollama/Groq/OpenRouter configuration is missing or unreachable for the selected provider route.  
+**Fix:** Verify the active AI env vars and provider health, for example set `LLM_PRIMARY_PROVIDER=ollama` with `OLLAMA_HOST=http://localhost:11434`, then run `python roadmap/manage.py check`.
 
-### Phase 3: Advanced Analytics & Insights (Q3 2025)
-- **Life Pattern Analysis**: Identify habits and routines affecting goals
-- **Predictive Insights**: AI recommendations based on user data
-- **Custom Dashboards**: Personalized analytics views
-- **Export Capabilities**: Data export for external analysis
+**Problem:** Repeated AI current-situation analysis appears stale.  
+**Cause:** The feature historically froze the stored result; the fix tracker calls out refresh behavior as a required regression area.  
+**Fix:** Re-run the API after updating personal details and validate with tests: `python roadmap/manage.py test ai goal`.
 
-### Phase 4: Integration & Expansion (Q4 2025)
-- **Calendar Integration**: Sync with Google Calendar, Outlook
-- **Wearable Integration**: Connect with fitness trackers, smart devices
-- **Mobile App**: Native iOS/Android applications
-- **API Expansions**: Third-party integrations (fitness apps, learning platforms)
+**Problem:** Manual routine tasks do not fit around schedule constraints as expected.  
+**Cause:** The issue registry calls out schedule-fit enforcement for manual task create/update paths as a routine risk area.  
+**Fix:** Regenerate the routine after changing events or task load: `POST /routines/generate/` with `force=true`, or rerun regression coverage with `python roadmap/manage.py test routine events`.
 
-### Phase 5: Enterprise & Advanced Features (2026)
-- **Team Goal Management**: Organizational goal setting and tracking
-- **Advanced Reporting**: Custom reports and analytics
-- **White-label Solutions**: Custom branding for organizations
-- **API Marketplace**: Third-party integrations and plugins
+**Problem:** Daily Brief does not reflect recurring or multi-day events correctly.  
+**Cause:** The routine issue tracker documents event-loading gaps on the brief path versus the full event-expansion path.  
+**Fix:** Validate event expansion through `/events/range/`, then rerun routine/event regression tests: `python roadmap/manage.py test routine events`.
 
-### Technical Enhancements
-- **Real-time Collaboration**: Live goal editing and progress sharing
-- **Offline Mode**: Core functionality without internet connection
-- **Voice Commands**: Integration with voice assistants
-- **AR/VR Elements**: Immersive goal visualization experiences
+**Problem:** Password reset appears to succeed but no email arrives.  
+**Cause:** `PASSWORD_RESET_URL` or SMTP configuration is missing; the forgot-password flow depends on those settings.  
+**Fix:** Set `PASSWORD_RESET_URL`, `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, and `EMAIL_HOST_PASSWORD` in `roadmap/.env`, then test with `python roadmap/manage.py test authentication`.
 
-### Monetization Features
-- **Premium Tiers**: Advanced AI features, unlimited goals
-- **Corporate Plans**: Team management and reporting
-- **Consultation Booking**: Direct connection with life coaches
-- **Custom AI Models**: Personalized AI training on user data
+## References
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with tests
-4. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License.
-
-**Licensed By**: ONEDAYGOAL  
-**Author**: Robin Nayak
-
+- Backend environment template: `roadmap/.env.example`
+- Backend settings: `roadmap/roadmap/settings.py`
+- Feature map summary: `../project_docs/backend-feature-map/00_SUMMARY.md`
+- Environment guide: `../project_docs/apis/production/ENVIRONMENT_AND_SERVICE_SWITCHING_GUIDE_BACKEND.md`
+- Backend production audit: `../project_docs/apis/production/backend_production_audit.md`

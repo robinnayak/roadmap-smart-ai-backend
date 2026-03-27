@@ -35,8 +35,9 @@ HIERARCHY_JOB_TYPE = "milestone_generation"
 
 # ---------- MONTH SETTINGS (Controls timeline) ----------
 MIN_MONTHS = 1        # Minimum months allowed
-MAX_MONTHS = int(os.getenv("HIERARCHY_MAX_MONTHS", "12"))
-DEFAULT_MONTHS = 1    # Fallback if dates missing
+HARD_MAX_MONTHS = 2   # Temporary production guardrail while LLM capacity is constrained
+MAX_MONTHS = min(int(os.getenv("HIERARCHY_MAX_MONTHS", "2")), HARD_MAX_MONTHS)
+DEFAULT_MONTHS = 2    # Fallback if dates missing
 
 # ---------- MILESTONE SETTINGS (1 per month) ----------
 MAX_MILESTONES = 6    # Safety cap - keeps first X milestones
@@ -52,6 +53,15 @@ MAX_TASKS_PER_SUBGOAL = int(os.getenv("HIERARCHY_MAX_TASKS_PER_SUBGOAL", "5"))
 # ================================================
 TESTING_MODE = True     # True = mock data (fast), False = real AI (slow)
 TESTING_DELAY = 0.2     # Simulated delay in seconds
+
+FALLBACK_TASK_ITEM_TYPE_BY_CATEGORY = {
+    "fitness": "physical",
+    "health": "physical",
+    "nutrition": "habit",
+    "wellness": "habit",
+    "spiritual": "ritual",
+    "digital_habits": "habit",
+}
 
 class GoalHierarchyGenerator(BaseAIService):
     """
@@ -77,7 +87,7 @@ class GoalHierarchyGenerator(BaseAIService):
             max_tokens=int(os.getenv("HIERARCHY_MAX_TOKENS", "2400")),
         )
         super().__init__(provider)
-        self.max_task_workers = max(1, int(os.getenv("HIERARCHY_TASK_WORKERS", "2")))
+        self.max_task_workers = max(1, int(os.getenv("HIERARCHY_TASK_WORKERS", "1")))
         self.milestone_parser = MilestoneParser()
         self.parser = ResponseParser()
         self.formatter = MileStoneFormatter()
@@ -385,8 +395,8 @@ class GoalHierarchyGenerator(BaseAIService):
         self, goal_data: dict, user_context: dict | None
     ) -> dict:
         """Generate monthly milestones from a goal_data dict."""
+        months = self._calculate_months(goal_data)
         try:
-            months = self._calculate_months(goal_data)
             logger.info("Generating milestones for %d months", months)
 
             response = self.provider.generate_response(
@@ -414,6 +424,22 @@ class GoalHierarchyGenerator(BaseAIService):
             )
 
         except Exception as exc:
+            fallback_milestones = self._build_fallback_milestones(
+                goal_data=goal_data,
+                user_context=user_context,
+                months=months,
+            )
+            if fallback_milestones:
+                logger.warning(
+                    "Milestone generation failed; using deterministic fallback milestones for goal '%s': %s",
+                    goal_data.get("title", ""),
+                    exc,
+                )
+                return self.formatter.format_success(
+                    data={"milestones": fallback_milestones},
+                    message="Generated fallback milestones after LLM routing failure",
+                )
+
             logger.exception("Milestone generation failed: %s", exc)
             return self.formatter.format_error(
                 error_message=str(exc),
@@ -451,6 +477,21 @@ class GoalHierarchyGenerator(BaseAIService):
             )
 
         except Exception as exc:
+            fallback_subgoals = self._build_fallback_subgoals(
+                milestone_data=milestone_data,
+                goal_data=goal_data,
+            )
+            if fallback_subgoals:
+                logger.warning(
+                    "Subgoal generation failed; using deterministic fallback subgoals for milestone '%s': %s",
+                    milestone_data.get("title", ""),
+                    exc,
+                )
+                return self.formatter.format_success(
+                    data={"subgoals": fallback_subgoals},
+                    message="Generated fallback subgoals after LLM routing failure",
+                )
+
             logger.exception("Subgoal generation failed: %s", exc)
             return self.formatter.format_error(
                 error_message=str(exc),
@@ -488,11 +529,199 @@ class GoalHierarchyGenerator(BaseAIService):
             )
 
         except Exception as exc:
+            fallback_tasks = self._build_fallback_tasks(
+                subgoal_data=subgoal_data,
+                milestone_data=milestone_data,
+                goal_data=goal_data,
+            )
+            if fallback_tasks:
+                logger.warning(
+                    "Task generation failed; using deterministic fallback tasks for subgoal '%s': %s",
+                    subgoal_data.get("title", ""),
+                    exc,
+                )
+                return self.formatter.format_success(
+                    data={"tasks": fallback_tasks},
+                    message="Generated fallback tasks after LLM routing failure",
+                )
+
             logger.exception("Task generation failed: %s", exc)
             return self.formatter.format_error(
                 error_message=str(exc),
                 error_code="TASK_GENERATION_FAILED",
             )
+
+    def _build_fallback_tasks(
+        self,
+        *,
+        subgoal_data: dict,
+        milestone_data: dict,
+        goal_data: dict,
+    ) -> list[dict[str, Any]]:
+        subgoal_title = (subgoal_data.get("title") or "this subgoal").strip()
+        milestone_title = (milestone_data.get("title") or "this milestone").strip()
+        goal_title = (goal_data.get("title") or "this goal").strip()
+        category = (
+            goal_data.get("resolved_category")
+            or goal_data.get("primary_category")
+            or "productivity"
+        )
+        item_type = FALLBACK_TASK_ITEM_TYPE_BY_CATEGORY.get(category, "task")
+
+        return [
+            {
+                "title": f"Write a 15-minute session plan for {subgoal_title}",
+                "description": (
+                    f"Open your notes app or notebook and list the exact steps for {subgoal_title}. "
+                    f"Include one concrete action you can complete today for {milestone_title}."
+                ),
+                "item_type": item_type,
+                "duration_minutes": 15,
+                "frequency": "once",
+                "difficulty_level": 1,
+                "sequence_position": 1,
+                "is_prerequisite": True,
+                "trigger_after_days": 0,
+                "rationale": f"A clear plan keeps progress moving on {goal_title} even when AI task generation is unavailable.",
+            },
+            {
+                "title": f"Complete one focused 30-minute work session for {subgoal_title}",
+                "description": (
+                    f"Set a 30-minute timer and do the single highest-value action for {subgoal_title}. "
+                    "Work without switching tasks until the timer ends."
+                ),
+                "item_type": item_type,
+                "duration_minutes": 30,
+                "frequency": "once",
+                "difficulty_level": 2,
+                "sequence_position": 2,
+                "is_prerequisite": False,
+                "trigger_after_days": 0,
+                "rationale": "A short focused session converts planning into visible execution.",
+            },
+            {
+                "title": f"Log results and choose the next step for {subgoal_title}",
+                "description": (
+                    "Write down what you completed, what blocked you, and the next action to continue tomorrow. "
+                    "Keep the note brief and specific."
+                ),
+                "item_type": "cognitive" if item_type == "task" else item_type,
+                "duration_minutes": 10,
+                "frequency": "once",
+                "difficulty_level": 1,
+                "sequence_position": 3,
+                "is_prerequisite": False,
+                "trigger_after_days": 0,
+                "rationale": "A short review loop protects momentum and makes the next session easier to start.",
+            },
+        ]
+
+    def _build_fallback_milestones(
+        self,
+        *,
+        goal_data: dict,
+        user_context: dict | None,
+        months: int,
+    ) -> list[dict[str, Any]]:
+        goal_title = (goal_data.get("title") or "this goal").strip()
+        start_date, target_date = self._resolve_goal_dates(goal_data)
+        month_count = max(1, min(MAX_MILESTONES, months))
+        if not start_date:
+            start_date = datetime.utcnow().date()
+        total_days = ((target_date - start_date).days + 1) if target_date else month_count * 30
+        days_per_month = max(1, math.ceil(total_days / month_count))
+        constraints = (user_context or {}).get("constraints") or []
+        constraint_note = f" while working around {constraints[0]}" if constraints else ""
+
+        milestones: list[dict[str, Any]] = []
+        for index in range(month_count):
+            month_start = start_date + timedelta(days=index * days_per_month)
+            month_end = month_start + timedelta(days=days_per_month - 1)
+            if target_date:
+                month_end = min(month_end, target_date)
+            milestones.append(
+                {
+                    "title": f"Month {index + 1}: Build momentum for {goal_title}",
+                    "description": (
+                        f"Focus this month on creating steady progress toward {goal_title}{constraint_note}."
+                    ),
+                    "success_criteria": [
+                        f"Complete at least 3 focused work sessions for {goal_title}",
+                        "Document weekly progress and blockers",
+                        "Finish the month's highest-priority action before moving on",
+                    ],
+                    "priority": "high" if index == 0 else "medium",
+                    "start_date": month_start.isoformat(),
+                    "target_date": month_end.isoformat(),
+                    "ai_reasoning": "Fallback milestone generated because AI routing was unavailable.",
+                }
+            )
+        return milestones
+
+    def _build_fallback_subgoals(
+        self,
+        *,
+        milestone_data: dict,
+        goal_data: dict,
+    ) -> list[dict[str, Any]]:
+        milestone_title = (milestone_data.get("title") or "this milestone").strip()
+        goal_title = (goal_data.get("title") or "this goal").strip()
+        milestone_start, milestone_target = self._resolve_range_dates(
+            milestone_data.get("start_date"),
+            milestone_data.get("target_date"),
+        )
+        subgoal_count = max(1, MAX_SUBGOALS_PER_MILESTONE)
+        total_days = ((milestone_target - milestone_start).days + 1) if (milestone_start and milestone_target) else subgoal_count * 7
+        days_per_subgoal = max(1, math.ceil(total_days / subgoal_count))
+
+        subgoals: list[dict[str, Any]] = []
+        for index in range(subgoal_count):
+            subgoal_start = milestone_start + timedelta(days=index * days_per_subgoal) if milestone_start else None
+            subgoal_end = subgoal_start + timedelta(days=days_per_subgoal - 1) if subgoal_start else None
+            if subgoal_end and milestone_target:
+                subgoal_end = min(subgoal_end, milestone_target)
+            subgoals.append(
+                {
+                    "title": f"Week {index + 1}: Advance {goal_title}",
+                    "description": (
+                        f"Push one concrete part of {milestone_title} forward and leave a clear next step."
+                    ),
+                    "priority": "medium",
+                    "start_date": subgoal_start.isoformat() if subgoal_start else None,
+                    "target_date": subgoal_end.isoformat() if subgoal_end else None,
+                    "ai_reasoning": "Fallback subgoal generated because AI routing was unavailable.",
+                }
+            )
+        return subgoals
+
+    @staticmethod
+    def _parse_iso_date(value):
+        if not value:
+            return None
+        if hasattr(value, "isoformat") and not isinstance(value, str):
+            return value
+        try:
+            return datetime.strptime(str(value), "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    def _resolve_goal_dates(self, goal_data: dict):
+        start_date = self._parse_iso_date(goal_data.get("start_date"))
+        target_date = self._parse_iso_date(goal_data.get("target_date"))
+        if start_date and target_date and target_date < start_date:
+            target_date = start_date
+        return start_date, target_date
+
+    def _resolve_range_dates(self, start_value, target_value):
+        start_date = self._parse_iso_date(start_value)
+        target_date = self._parse_iso_date(target_value)
+        if start_date and target_date and target_date < start_date:
+            target_date = start_date
+        if not start_date and target_date:
+            start_date = target_date
+        if start_date and not target_date:
+            target_date = start_date + timedelta(days=20)
+        return start_date, target_date
 
     # -------------------------------------------------------------------------
     # Utility
