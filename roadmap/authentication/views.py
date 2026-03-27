@@ -6,6 +6,11 @@ Views for user registration, authentication, profile management, and token opera
 """
 
 import logging
+import hashlib
+from datetime import timedelta
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+import certifi
+import requests
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
@@ -14,8 +19,11 @@ from django.core import signing
 from django.utils.encoding import force_bytes
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
-from django.shortcuts import get_object_or_404
+from django.db import transaction
 
+from google.auth.transport import requests as google_requests
+from google.auth.exceptions import TransportError
+from google.oauth2 import id_token
 
 # Django REST Framework imports
 from rest_framework.views import APIView
@@ -49,8 +57,12 @@ from .serializers import (
     ForgotPasswordSerializer,
     ResetPasswordSerializer,
     ChangePasswordSerializer,
+    GoogleAuthSerializer,
+    MagicLinkRequestSerializer,
+    MagicLinkVerifySerializer,
+    validate_non_email_username,
 )
-from .models import Profile, NotificationSettings, UserPersonalDetails
+from .models import Profile, NotificationSettings, UserPersonalDetails, MagicLinkToken
 from common.email import send_email_via_resend
 
 # ApiResponse utility for consistent API responses
@@ -62,6 +74,93 @@ REACTIVATION_TOKEN_SALT = "authentication.reactivation"
 REACTIVATION_TOKEN_MAX_AGE_SECONDS = getattr(
     settings, "REACTIVATION_TOKEN_MAX_AGE_SECONDS", 900
 )
+MAGIC_LINK_TOKEN_MAX_AGE_SECONDS = getattr(
+    settings, "MAGIC_LINK_TOKEN_MAX_AGE_SECONDS", 900
+)
+
+
+def _build_google_request():
+    session = requests.Session()
+    verify_ssl = getattr(settings, "GOOGLE_VERIFY_SSL", True)
+    session.verify = certifi.where() if verify_ssl else False
+    return google_requests.Request(session=session)
+
+
+def _hash_magic_link_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _generate_unique_username(base_value: str) -> str:
+    base = validate_non_email_username(base_value or "").lower()
+    base = "".join(char for char in base if char.isalnum() or char in "_-")
+    if not base:
+        base = "user"
+
+    username = base[:30]
+    counter = 1
+    while User.objects.filter(username=username).exists():
+        suffix = str(counter)
+        username = f"{base[: max(1, 30 - len(suffix))]}{suffix}"
+        counter += 1
+    return username
+
+
+def _split_full_name(name: str) -> tuple[str, str]:
+    normalized = (name or "").strip()
+    if not normalized:
+        return "", ""
+    parts = normalized.split()
+    first_name = parts[0][:150]
+    last_name = " ".join(parts[1:])[:150]
+    return first_name, last_name
+
+
+def _build_auth_payload(user):
+    refresh = RefreshToken.for_user(user)
+    _enforce_active_session_limit(user=user, keep_jti=str(refresh["jti"]))
+    return {
+        "access": str(refresh.access_token),
+        "refresh": str(refresh),
+        "user": UserProfileSerializer(user).data,
+    }
+
+
+def _get_or_create_social_user(*, email: str, name: str = ""):
+    user = User.objects.filter(email__iexact=email).first()
+    if user:
+        updated_fields = []
+        first_name, last_name = _split_full_name(name)
+        if first_name and user.first_name != first_name:
+            user.first_name = first_name
+            updated_fields.append("first_name")
+        if last_name and user.last_name != last_name:
+            user.last_name = last_name
+            updated_fields.append("last_name")
+        if updated_fields:
+            user.save(update_fields=updated_fields)
+        return user, False
+
+    first_name, last_name = _split_full_name(name)
+    username_source = name or email.split("@")[0]
+    user = User.objects.create_user(
+        email=email,
+        username=_generate_unique_username(username_source),
+        first_name=first_name,
+        last_name=last_name,
+    )
+    user.set_unusable_password()
+    user.save(update_fields=["password"])
+    return user, True
+
+
+def _deactivated_account_response(user):
+    reactivation_token = _build_reactivation_token(user)
+    return error_response(
+        message="This account is deactivated. Reactivate your account to continue.",
+        code="account_deactivated",
+        status=status.HTTP_403_FORBIDDEN,
+        extra={"reactivation": _build_reactivation_path_payload(reactivation_token)},
+    )
 
 
 def _build_reactivation_token(user):
@@ -76,6 +175,61 @@ def _build_reactivation_path_payload(reactivation_token):
         "expires_in_seconds": REACTIVATION_TOKEN_MAX_AGE_SECONDS,
         "reactivate_endpoint": "/auth/user-reactivate/",
     }
+
+
+def _build_frontend_url_from_magic_link(*, path: str, params: dict[str, str]) -> str:
+    magic_link_base_url = getattr(settings, "MAGIC_LINK_URL", "").strip()
+    if not magic_link_base_url:
+        return ""
+
+    parsed = urlsplit(magic_link_base_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.update(params)
+    next_path = path if path.startswith("/") else f"/{path}"
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            next_path,
+            urlencode(query),
+            "",
+        )
+    )
+
+
+def _build_reactivation_email_link(reactivation_token: str) -> str:
+    return _build_frontend_url_from_magic_link(
+        path="/auth/reactivate",
+        params={"token": reactivation_token},
+    )
+
+
+def _send_reactivation_email(*, user) -> None:
+    reactivation_token = _build_reactivation_token(user)
+    reactivation_link = _build_reactivation_email_link(reactivation_token)
+    if not reactivation_link:
+        return
+
+    text_content = (
+        "Your DayOneGoal account is currently deactivated.\n\n"
+        "Use the link below to reactivate your account:\n"
+        f"{reactivation_link}\n\n"
+        f"This link expires in {REACTIVATION_TOKEN_MAX_AGE_SECONDS // 60} minutes."
+    )
+    html_content = (
+        "<div style=\"font-family: Arial, sans-serif; color: #0f172a; max-width: 640px;\">"
+        "<h2>Reactivate your account</h2>"
+        "<p>Your DayOneGoal account is currently deactivated.</p>"
+        f"<p><a href=\"{reactivation_link}\">Reactivate your DayOneGoal account</a></p>"
+        f"<p>This link expires in {REACTIVATION_TOKEN_MAX_AGE_SECONDS // 60} minutes.</p>"
+        "</div>"
+    )
+    send_email_via_resend(
+        to_email=user.email,
+        subject="Reactivate your DayOneGoal account",
+        text_content=text_content,
+        html_content=html_content,
+    )
 
 
 def _enforce_active_session_limit(user, keep_jti=None):
@@ -266,27 +420,242 @@ class UserLoginView(ProductionApiView):
 
         user = serializer.validated_data["user"]
         if not user.is_active:
-            reactivation_token = _build_reactivation_token(user)
-            return error_response(
-                message=(
-                    "This account is deactivated. Reactivate your account to continue."
-                ),
-                code="account_deactivated",
-                status=status.HTTP_403_FORBIDDEN,
-                extra={"reactivation": _build_reactivation_path_payload(reactivation_token)},
-            )
+            return _deactivated_account_response(user)
 
-        refresh = RefreshToken.for_user(user)
-        _enforce_active_session_limit(user=user, keep_jti=str(refresh["jti"]))
+        auth_payload = _build_auth_payload(user)
         response_data = {
             "message": "Login successful",
             "tokens": {
-                "access": str(refresh.access_token),
-                "refresh": str(refresh),
+                "access": auth_payload["access"],
+                "refresh": auth_payload["refresh"],
             },
-            "user": UserProfileSerializer(user).data,
+            "user": auth_payload["user"],
         }
         return Response(response_data, status=status.HTTP_200_OK)
+
+
+class GoogleAuthView(ProductionApiView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [AnonRateThrottle]
+
+    def post(self, request):
+        serializer = GoogleAuthSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid Google auth payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        google_client_id = getattr(settings, "GOOGLE_CLIENT_ID", "").strip()
+        if not google_client_id:
+            return error_response(
+                message="Google authentication is not configured.",
+                code="google_auth_not_configured",
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        try:
+            payload = id_token.verify_oauth2_token(
+                serializer.validated_data["token"],
+                _build_google_request(),
+                google_client_id,
+            )
+        except ValueError:
+            return error_response(
+                message="Google token is invalid or expired.",
+                code="invalid_or_expired_token",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except TransportError:
+            logger.exception("Google token verification failed due to transport/certificate issue.")
+            return error_response(
+                message="Google verification is temporarily unavailable. Please try again shortly.",
+                code="google_verification_unavailable",
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        if payload.get("iss") not in {"accounts.google.com", "https://accounts.google.com"}:
+            return error_response(
+                message="Google token issuer is invalid.",
+                code="invalid_token",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        email = (payload.get("email") or "").strip().lower()
+        if not email:
+            return error_response(
+                message="Google account email is missing.",
+                code="invalid_token",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if payload.get("email_verified") is False:
+            return error_response(
+                message="Google account email is not verified.",
+                code="invalid_token",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user, _created = _get_or_create_social_user(
+            email=email,
+            name=(payload.get("name") or "").strip(),
+        )
+        if not user.is_active:
+            return _deactivated_account_response(user)
+
+        auth_payload = _build_auth_payload(user)
+        return Response(
+            {
+                "message": "Google login successful",
+                "tokens": {
+                    "access": auth_payload["access"],
+                    "refresh": auth_payload["refresh"],
+                },
+                "user": auth_payload["user"],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MagicLinkRequestView(ProductionApiView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [AnonRateThrottle]
+
+    def post(self, request):
+        serializer = MagicLinkRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid magic-link request payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        email = serializer.validated_data["email"].strip().lower()
+        user = User.objects.filter(email__iexact=email).first()
+
+        if user and not user.is_active:
+            try:
+                _send_reactivation_email(user=user)
+            except Exception:
+                logger.exception(
+                    "Reactivation email dispatch failed for deactivated user %s",
+                    user.id,
+                )
+
+            return success_response(
+                message="If an account can use this email, a sign-in link has been sent.",
+                data={"expires_in_seconds": REACTIVATION_TOKEN_MAX_AGE_SECONDS},
+                status=status.HTTP_200_OK,
+            )
+
+        plain_token = MagicLinkToken.generate_plaintext_token()
+        token_hash = _hash_magic_link_token(plain_token)
+        expires_at = timezone.now() + timedelta(seconds=MAGIC_LINK_TOKEN_MAX_AGE_SECONDS)
+
+        MagicLinkToken.objects.filter(
+            email__iexact=email,
+            used_at__isnull=True,
+        ).update(used_at=timezone.now())
+        MagicLinkToken.objects.create(
+            email=email,
+            token_hash=token_hash,
+            expires_at=expires_at,
+        )
+
+        magic_link_base_url = getattr(settings, "MAGIC_LINK_URL", "").strip()
+        if magic_link_base_url:
+            separator = "&" if "?" in magic_link_base_url else "?"
+            magic_link = f"{magic_link_base_url}{separator}token={plain_token}"
+            try:
+                text_content = (
+                    "Use the link below to sign in to DayOneGoal.\n\n"
+                    f"{magic_link}\n\n"
+                    f"This link expires in {MAGIC_LINK_TOKEN_MAX_AGE_SECONDS // 60} minutes."
+                )
+                html_content = (
+                    "<div style=\"font-family: Arial, sans-serif; color: #0f172a; max-width: 640px;\">"
+                    "<h2>Your sign-in link</h2>"
+                    "<p>Use the link below to sign in to DayOneGoal.</p>"
+                    f"<p><a href=\"{magic_link}\">Sign in to DayOneGoal</a></p>"
+                    f"<p>This link expires in {MAGIC_LINK_TOKEN_MAX_AGE_SECONDS // 60} minutes.</p>"
+                    "</div>"
+                )
+                send_email_via_resend(
+                    to_email=email,
+                    subject="Your DayOneGoal magic link",
+                    text_content=text_content,
+                    html_content=html_content,
+                )
+            except Exception:
+                logger.exception("Magic-link email dispatch failed for email %s", email)
+
+        return success_response(
+            message="If an account can use this email, a sign-in link has been sent.",
+            data={"expires_in_seconds": MAGIC_LINK_TOKEN_MAX_AGE_SECONDS},
+            status=status.HTTP_200_OK,
+        )
+
+
+class MagicLinkVerifyView(ProductionApiView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [AnonRateThrottle]
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = MagicLinkVerifySerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                message="Invalid magic-link verification payload.",
+                errors=serializer.errors,
+                code="invalid_data",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token_hash = _hash_magic_link_token(serializer.validated_data["token"])
+        magic_token = MagicLinkToken.objects.select_for_update().filter(
+            token_hash=token_hash
+        ).first()
+
+        if not magic_token:
+            return error_response(
+                message="Magic link is invalid or expired.",
+                code="invalid_or_expired_token",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if magic_token.is_used or magic_token.is_expired:
+            if not magic_token.is_used:
+                magic_token.used_at = timezone.now()
+                magic_token.save(update_fields=["used_at"])
+            return error_response(
+                message="Magic link is invalid or expired.",
+                code="invalid_or_expired_token",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user, _created = _get_or_create_social_user(email=magic_token.email)
+        if not user.is_active:
+            return _deactivated_account_response(user)
+        magic_token.used_at = timezone.now()
+        magic_token.save(update_fields=["used_at"])
+
+        auth_payload = _build_auth_payload(user)
+        return Response(
+            {
+                "message": "Magic link verified successfully",
+                "tokens": {
+                    "access": auth_payload["access"],
+                    "refresh": auth_payload["refresh"],
+                },
+                "user": auth_payload["user"],
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class ForgotPasswordView(ProductionApiView):

@@ -13,6 +13,18 @@ from django.utils import timezone
 User = get_user_model()
 
 
+def validate_non_email_username(value: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        return normalized
+    if "@" in normalized:
+        raise serializers.ValidationError(
+            "Username cannot be an email address.",
+            code="invalid_username",
+        )
+    return normalized
+
+
 class UserRegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(
         write_only=True,
@@ -40,6 +52,15 @@ class UserRegisterSerializer(serializers.ModelSerializer):
                 "A user with this email already exists.", code="email_taken"
             )
         return value
+
+    def validate_username(self, value):
+        normalized = validate_non_email_username(value)
+        if normalized and User.objects.filter(username__iexact=normalized).exists():
+            raise serializers.ValidationError(
+                "A user with this username already exists.",
+                code="username_taken",
+            )
+        return normalized
 
     def validate(self, attrs):
         if attrs.get("password") != attrs.get("password2"):
@@ -194,6 +215,18 @@ class ChangePasswordSerializer(serializers.Serializer):
 
         validate_password(new_password, user=user)
         return attrs
+
+
+class GoogleAuthSerializer(serializers.Serializer):
+    token = serializers.CharField(required=True, trim_whitespace=True)
+
+
+class MagicLinkRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+
+
+class MagicLinkVerifySerializer(serializers.Serializer):
+    token = serializers.CharField(required=True, trim_whitespace=True)
 
 
 # Profile Prefer Email and Username as read-only fields since they are tied to the user model and should not be changed through the profile endpoint. If you want to allow updates, you can remove the read_only=True and handle the updates in the view.
