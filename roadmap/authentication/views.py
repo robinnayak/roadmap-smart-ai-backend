@@ -8,6 +8,7 @@ Views for user registration, authentication, profile management, and token opera
 import logging
 import hashlib
 from datetime import timedelta
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import certifi
 import requests
 from django.utils import timezone
@@ -174,6 +175,61 @@ def _build_reactivation_path_payload(reactivation_token):
         "expires_in_seconds": REACTIVATION_TOKEN_MAX_AGE_SECONDS,
         "reactivate_endpoint": "/auth/user-reactivate/",
     }
+
+
+def _build_frontend_url_from_magic_link(*, path: str, params: dict[str, str]) -> str:
+    magic_link_base_url = getattr(settings, "MAGIC_LINK_URL", "").strip()
+    if not magic_link_base_url:
+        return ""
+
+    parsed = urlsplit(magic_link_base_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.update(params)
+    next_path = path if path.startswith("/") else f"/{path}"
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            next_path,
+            urlencode(query),
+            "",
+        )
+    )
+
+
+def _build_reactivation_email_link(reactivation_token: str) -> str:
+    return _build_frontend_url_from_magic_link(
+        path="/auth/reactivate",
+        params={"token": reactivation_token},
+    )
+
+
+def _send_reactivation_email(*, user) -> None:
+    reactivation_token = _build_reactivation_token(user)
+    reactivation_link = _build_reactivation_email_link(reactivation_token)
+    if not reactivation_link:
+        return
+
+    text_content = (
+        "Your DayOneGoal account is currently deactivated.\n\n"
+        "Use the link below to reactivate your account:\n"
+        f"{reactivation_link}\n\n"
+        f"This link expires in {REACTIVATION_TOKEN_MAX_AGE_SECONDS // 60} minutes."
+    )
+    html_content = (
+        "<div style=\"font-family: Arial, sans-serif; color: #0f172a; max-width: 640px;\">"
+        "<h2>Reactivate your account</h2>"
+        "<p>Your DayOneGoal account is currently deactivated.</p>"
+        f"<p><a href=\"{reactivation_link}\">Reactivate your DayOneGoal account</a></p>"
+        f"<p>This link expires in {REACTIVATION_TOKEN_MAX_AGE_SECONDS // 60} minutes.</p>"
+        "</div>"
+    )
+    send_email_via_resend(
+        to_email=user.email,
+        subject="Reactivate your DayOneGoal account",
+        text_content=text_content,
+        html_content=html_content,
+    )
 
 
 def _enforce_active_session_limit(user, keep_jti=None):
@@ -479,6 +535,23 @@ class MagicLinkRequestView(ProductionApiView):
             )
 
         email = serializer.validated_data["email"].strip().lower()
+        user = User.objects.filter(email__iexact=email).first()
+
+        if user and not user.is_active:
+            try:
+                _send_reactivation_email(user=user)
+            except Exception:
+                logger.exception(
+                    "Reactivation email dispatch failed for deactivated user %s",
+                    user.id,
+                )
+
+            return success_response(
+                message="If an account can use this email, a sign-in link has been sent.",
+                data={"expires_in_seconds": REACTIVATION_TOKEN_MAX_AGE_SECONDS},
+                status=status.HTTP_200_OK,
+            )
+
         plain_token = MagicLinkToken.generate_plaintext_token()
         token_hash = _hash_magic_link_token(plain_token)
         expires_at = timezone.now() + timedelta(seconds=MAGIC_LINK_TOKEN_MAX_AGE_SECONDS)

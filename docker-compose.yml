@@ -1,30 +1,72 @@
-﻿services:
+﻿# ==============================================================================
+# DAYONEGOAL — BACKEND DOCKER COMPOSE (local development)
+# roadmap-smart-planner-backend/docker-compose.yml
+# ==============================================================================
+#
+# PURPOSE
+#   Runs a production-like local stack: Django + Gunicorn on port 8000,
+#   backed by a real PostgreSQL 16 container instead of SQLite.
+#
+# USAGE
+#   docker compose up           # start both services
+#   docker compose up -d        # start in background
+#   docker compose down         # stop and remove containers
+#   docker compose run --rm web python roadmap/manage.py shell
+#
+# HOW IT RELATES TO OTHER CONFIGS
+#   - roadmap/.env is loaded via env_file for all non-overridden variables.
+#   - The `environment:` block below takes precedence over roadmap/.env for
+#     the keys it defines — this is intentional. Docker uses its own local
+#     postgres service, so DB_* values here override anything in .env.
+#   - render.yaml is the production config. Values there are separate.
+#
+# AI / LLM NOTE
+#   LLM_PRIMARY_PROVIDER is inherited from roadmap/.env (defaults to ollama).
+#   Ollama is NOT a Docker service here — it must be running on your host machine.
+#   If Ollama is not running, AI features will fail silently or return fallback responses.
+#   To disable AI calls entirely during Docker runs, add to environment:
+#     LLM_PRIMARY_PROVIDER: ""
+#     CELERY_TASK_ALWAYS_EAGER: "true"
+#
+# ==============================================================================
+
+services:
   web:
     build:
       context: .
       dockerfile: Dockerfile
+    # Runs migrations then starts Gunicorn with --reload for live code reloading.
+    # collectstatic is intentionally skipped here — WhiteNoise handles static files
+    # in dev mode. Run it manually if testing static file serving:
+    #   docker compose run --rm web python roadmap/manage.py collectstatic --noinput
     command: sh -c "python roadmap/manage.py migrate && gunicorn roadmap.wsgi:application --chdir roadmap --bind 0.0.0.0:8000 --log-file - --reload"
     env_file:
       - roadmap/.env
     environment:
+      # These override roadmap/.env for Docker-specific values.
       DJANGO_SETTINGS_MODULE: roadmap.settings
       DEBUG: "true"
+      # Allows connections from the host browser and within the Docker network.
       ALLOWED_HOSTS: localhost,127.0.0.1,0.0.0.0
+      # Uses the local postgres container below — not Supabase.
       DB_ENGINE: django.db.backends.postgresql
       DB_NAME: roadmap
       DB_USER: roadmap
       DB_PASSWORD: roadmap
-      DB_HOST: postgres
+      DB_HOST: postgres       # matches the service name below
       DB_PORT: "5432"
-      DB_SSLMODE: ""
+      DB_SSLMODE: ""          # SSL disabled — local container, not Supabase
+      # Tasks run inline on the web process — no Redis or Celery worker needed.
       CELERY_TASK_ALWAYS_EAGER: "true"
+      CELERY_TASK_EAGER_PROPAGATES: "true"
     ports:
       - "8000:8000"
     volumes:
-      - .:/app
+      - .:/app               # mounts source code for live reload
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
@@ -33,7 +75,7 @@
       POSTGRES_USER: roadmap
       POSTGRES_PASSWORD: roadmap
     ports:
-      - "5432:5432"
+      - "5432:5432"          # also exposed to host for GUI tools (TablePlus, DBeaver, etc.)
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -41,6 +83,7 @@
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
 volumes:
   postgres_data:

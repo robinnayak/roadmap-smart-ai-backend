@@ -781,6 +781,7 @@ class GoogleAuthTests(APITestCase):
         self.assertEqual(response.data["code"], "invalid_or_expired_token")
 
 
+@override_settings(SECURE_SSL_REDIRECT=False)
 class MagicLinkAuthTests(APITestCase):
     def setUp(self):
         self.client = Client()
@@ -809,6 +810,36 @@ class MagicLinkAuthTests(APITestCase):
         send_email_mock.assert_called_once()
         kwargs = send_email_mock.call_args.kwargs
         self.assertIn("plaintext-token", kwargs["text_content"])
+
+    @override_settings(MAGIC_LINK_URL="http://localhost:3000/auth/magic")
+    @patch("authentication.views.send_email_via_resend")
+    def test_magic_link_request_for_deactivated_user_sends_reactivation_email(
+        self,
+        send_email_mock,
+    ):
+        user = User.objects.create_user(
+            email="inactive-magic@example.com",
+            password="StrongPass123!",
+            username="inactive-magic",
+        )
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+
+        response = self.client.post(
+            self.request_url,
+            data={"email": user.email},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertFalse(MagicLinkToken.objects.filter(email=user.email).exists())
+        send_email_mock.assert_called_once()
+        kwargs = send_email_mock.call_args.kwargs
+        self.assertEqual(kwargs["to_email"], user.email)
+        self.assertEqual(kwargs["subject"], "Reactivate your DayOneGoal account")
+        self.assertIn("/auth/reactivate?token=", kwargs["text_content"])
+        self.assertIn("Reactivate your DayOneGoal account", kwargs["html_content"])
 
     def test_magic_link_verify_creates_user_and_marks_token_used(self):
         token = "verify-me"
