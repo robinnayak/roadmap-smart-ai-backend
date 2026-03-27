@@ -1,4 +1,5 @@
 import json
+import hashlib
 from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
@@ -17,7 +18,7 @@ from django.test import override_settings
 from django.core.cache import cache
 from rest_framework import status 
 
-from authentication.models import NotificationSettings, UserPersonalDetails
+from authentication.models import MagicLinkToken, NotificationSettings, UserPersonalDetails
 
 User = get_user_model()
 
@@ -150,6 +151,22 @@ class UserRegistrationTestCase(APITestCase):
         self.assertFalse(response.data['success'])
         self.assertIn('email', response.data['errors'])
         # self.assertIn("A user with that email already exists.", response.data['errors']['email'])
+
+    def test_registration_rejects_username_that_looks_like_email(self):
+        response = self.client.post(
+            self.url,
+            data={
+                "username": "name@example.com",
+                "email": "valid@example.com",
+                "password": "StrongPass123!",
+                "password2": "StrongPass123!",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+        self.assertIn("username", response.data["errors"])
     
 
     # weak password 
@@ -721,8 +738,116 @@ class TokenRefreshSessionExpiredTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(response.data["error"], "session_expired")
-        
-        
+
+
+class GoogleAuthTests(APITestCase):
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse("google-auth")
+
+    @override_settings(GOOGLE_CLIENT_ID="google-client-id")
+    @patch("authentication.views.id_token.verify_oauth2_token")
+    def test_google_auth_creates_user_and_returns_tokens(self, verify_mock):
+        verify_mock.return_value = {
+            "iss": "https://accounts.google.com",
+            "email": "google@example.com",
+            "name": "Google User",
+        }
+
+        response = self.client.post(
+            self.url,
+            data={"token": "google-id-token"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("tokens", response.data)
+        self.assertEqual(response.data["user"]["email"], "google@example.com")
+        self.assertTrue(User.objects.filter(email="google@example.com").exists())
+
+    @override_settings(GOOGLE_CLIENT_ID="google-client-id")
+    @patch("authentication.views.id_token.verify_oauth2_token")
+    def test_google_auth_rejects_invalid_token(self, verify_mock):
+        verify_mock.side_effect = ValueError("bad token")
+
+        response = self.client.post(
+            self.url,
+            data={"token": "bad-token"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "invalid_or_expired_token")
+
+
+class MagicLinkAuthTests(APITestCase):
+    def setUp(self):
+        self.client = Client()
+        self.request_url = reverse("magic-link-request")
+        self.verify_url = reverse("magic-link-verify")
+
+    @override_settings(MAGIC_LINK_URL="http://localhost:3000/auth/magic")
+    @patch("authentication.views.send_email_via_resend")
+    @patch("authentication.models.MagicLinkToken.generate_plaintext_token")
+    def test_magic_link_request_persists_token_and_sends_email(
+        self,
+        token_mock,
+        send_email_mock,
+    ):
+        token_mock.return_value = "plaintext-token"
+
+        response = self.client.post(
+            self.request_url,
+            data={"email": "magic@example.com"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertTrue(MagicLinkToken.objects.filter(email="magic@example.com").exists())
+        send_email_mock.assert_called_once()
+        kwargs = send_email_mock.call_args.kwargs
+        self.assertIn("plaintext-token", kwargs["text_content"])
+
+    def test_magic_link_verify_creates_user_and_marks_token_used(self):
+        token = "verify-me"
+        magic_link = MagicLinkToken.objects.create(
+            email="magic-verify@example.com",
+            token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+
+        response = self.client.post(
+            self.verify_url,
+            data={"token": token},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("tokens", response.data)
+        self.assertTrue(User.objects.filter(email="magic-verify@example.com").exists())
+        magic_link.refresh_from_db()
+        self.assertIsNotNone(magic_link.used_at)
+
+    def test_magic_link_verify_rejects_expired_token(self):
+        token = "expired-token"
+        MagicLinkToken.objects.create(
+            email="expired@example.com",
+            token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+
+        response = self.client.post(
+            self.verify_url,
+            data={"token": token},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "invalid_or_expired_token")
+
 @override_settings(MAX_ACTIVE_DEVICE_SESSIONS=4)
 class DeviceSessionLimitTests(APITestCase):
     def setUp(self):

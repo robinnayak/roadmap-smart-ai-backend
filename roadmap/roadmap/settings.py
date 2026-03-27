@@ -355,6 +355,17 @@ SIMPLE_JWT = {
 
 # Maximum number of concurrently active refresh-token sessions per user (device cap).
 MAX_ACTIVE_DEVICE_SESSIONS = config("MAX_ACTIVE_DEVICE_SESSIONS", default=0, cast=int)
+GOOGLE_CLIENT_ID = config("GOOGLE_CLIENT_ID", default="").strip()
+GOOGLE_VERIFY_SSL = bool_env("GOOGLE_VERIFY_SSL", default=True)
+MAGIC_LINK_TOKEN_MAX_AGE_SECONDS = config(
+    "MAGIC_LINK_TOKEN_MAX_AGE_SECONDS",
+    default=900,
+    cast=int,
+)
+MAGIC_LINK_URL = config(
+    "MAGIC_LINK_URL",
+    default="http://localhost:3000/auth/magic",
+).strip()
 
 # GIE rollout controls
 GIE_ROLLOUT_ENABLED = bool_env("GIE_ROLLOUT_ENABLED", default=True)
