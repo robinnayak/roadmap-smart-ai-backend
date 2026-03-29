@@ -58,11 +58,16 @@ from .serializers import (
     ResetPasswordSerializer,
     ChangePasswordSerializer,
     GoogleAuthSerializer,
-    MagicLinkRequestSerializer,
-    MagicLinkVerifySerializer,
+    LoginOTPRequestSerializer,
+    LoginOTPVerifySerializer,
     validate_non_email_username,
 )
-from .models import Profile, NotificationSettings, UserPersonalDetails, MagicLinkToken
+from .models import (
+    Profile,
+    NotificationSettings,
+    UserPersonalDetails,
+    LoginOTPToken,
+)
 from common.email import send_email_via_resend
 
 # ApiResponse utility for consistent API responses
@@ -74,8 +79,8 @@ REACTIVATION_TOKEN_SALT = "authentication.reactivation"
 REACTIVATION_TOKEN_MAX_AGE_SECONDS = getattr(
     settings, "REACTIVATION_TOKEN_MAX_AGE_SECONDS", 900
 )
-MAGIC_LINK_TOKEN_MAX_AGE_SECONDS = getattr(
-    settings, "MAGIC_LINK_TOKEN_MAX_AGE_SECONDS", 900
+LOGIN_OTP_TOKEN_MAX_AGE_SECONDS = getattr(
+    settings, "LOGIN_OTP_TOKEN_MAX_AGE_SECONDS", 600
 )
 
 
@@ -86,8 +91,8 @@ def _build_google_request():
     return google_requests.Request(session=session)
 
 
-def _hash_magic_link_token(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+def _hash_login_otp(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _generate_unique_username(base_value: str) -> str:
@@ -177,14 +182,14 @@ def _build_reactivation_path_payload(reactivation_token):
     }
 
 
-def _build_frontend_url_from_magic_link(*, path: str, params: dict[str, str]) -> str:
-    magic_link_base_url = getattr(settings, "MAGIC_LINK_URL", "").strip()
-    if not magic_link_base_url:
+def _build_frontend_url(*, path: str, params: dict[str, str] | None = None) -> str:
+    frontend_base_url = getattr(settings, "FRONTEND_BASE_URL", "").strip()
+    if not frontend_base_url:
         return ""
 
-    parsed = urlsplit(magic_link_base_url)
+    parsed = urlsplit(frontend_base_url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.update(params)
+    query.update(params or {})
     next_path = path if path.startswith("/") else f"/{path}"
     return urlunsplit(
         (
@@ -198,9 +203,20 @@ def _build_frontend_url_from_magic_link(*, path: str, params: dict[str, str]) ->
 
 
 def _build_reactivation_email_link(reactivation_token: str) -> str:
-    return _build_frontend_url_from_magic_link(
+    return _build_frontend_url(
         path="/auth/reactivate",
         params={"token": reactivation_token},
+    )
+
+
+def _build_password_reset_link(*, uid: str, token: str) -> str:
+    reset_base_url = getattr(settings, "PASSWORD_RESET_URL", "").strip()
+    if reset_base_url:
+        separator = "&" if "?" in reset_base_url else "?"
+        return f"{reset_base_url}{separator}uid={uid}&token={token}"
+    return _build_frontend_url(
+        path="/auth/reset-password",
+        params={"uid": uid, "token": token},
     )
 
 
@@ -229,6 +245,26 @@ def _send_reactivation_email(*, user) -> None:
         subject="Reactivate your DayOneGoal account",
         text_content=text_content,
         html_content=html_content,
+    )
+
+
+def _send_welcome_email(*, email: str, subject: str, headline: str, body: str) -> None:
+    dashboard_url = _build_frontend_url(path="/auth")
+    text_content = f"{headline}\n\n{body}"
+    html_parts = [
+        '<div style="font-family: Arial, sans-serif; color: #0f172a; max-width: 640px;">',
+        f"<h2>{headline}</h2>",
+        f"<p>{body}</p>",
+    ]
+    if dashboard_url:
+        text_content += f"\n\nOpen DayOneGoal: {dashboard_url}"
+        html_parts.append(f'<p><a href="{dashboard_url}">Open DayOneGoal</a></p>')
+    html_parts.append("</div>")
+    send_email_via_resend(
+        to_email=email,
+        subject=subject,
+        text_content=text_content,
+        html_content="".join(html_parts),
     )
 
 
@@ -373,6 +409,15 @@ class UserRegistrationView(ProductionApiView):
             user = serializer.save()
             refresh = RefreshToken.for_user(user)
             _enforce_active_session_limit(user=user, keep_jti=str(refresh["jti"]))
+            try:
+                _send_welcome_email(
+                    email=user.email,
+                    subject="Welcome to DayOneGoal",
+                    headline="Welcome to DayOneGoal",
+                    body="Your account is ready. Start building your roadmap and daily execution plan from one place.",
+                )
+            except Exception:
+                logger.exception("Welcome email dispatch failed for user %s", user.id)
 
             logger.info(f"User registered successfully: {user.email}")
 
@@ -498,12 +543,22 @@ class GoogleAuthView(ProductionApiView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        user, _created = _get_or_create_social_user(
+        user, created = _get_or_create_social_user(
             email=email,
             name=(payload.get("name") or "").strip(),
         )
         if not user.is_active:
             return _deactivated_account_response(user)
+        if created:
+            try:
+                _send_welcome_email(
+                    email=user.email,
+                    subject="Welcome to DayOneGoal",
+                    headline="Welcome to DayOneGoal",
+                    body="Your account is ready. Start building your roadmap and daily execution plan from one place.",
+                )
+            except Exception:
+                logger.exception("Welcome email dispatch failed for Google user %s", user.id)
 
         auth_payload = _build_auth_payload(user)
         return Response(
@@ -519,16 +574,16 @@ class GoogleAuthView(ProductionApiView):
         )
 
 
-class MagicLinkRequestView(ProductionApiView):
+class LoginOTPRequestView(ProductionApiView):
     permission_classes = [AllowAny]
     authentication_classes = []
     throttle_classes = [AnonRateThrottle]
 
     def post(self, request):
-        serializer = MagicLinkRequestSerializer(data=request.data)
+        serializer = LoginOTPRequestSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(
-                message="Invalid magic-link request payload.",
+                message="Invalid login OTP request payload.",
                 errors=serializer.errors,
                 code="invalid_data",
                 status=status.HTTP_400_BAD_REQUEST,
@@ -547,107 +602,113 @@ class MagicLinkRequestView(ProductionApiView):
                 )
 
             return success_response(
-                message="If an account can use this email, a sign-in link has been sent.",
+                message="If an account can use this email, a sign-in code has been sent.",
                 data={"expires_in_seconds": REACTIVATION_TOKEN_MAX_AGE_SECONDS},
                 status=status.HTTP_200_OK,
             )
 
-        plain_token = MagicLinkToken.generate_plaintext_token()
-        token_hash = _hash_magic_link_token(plain_token)
-        expires_at = timezone.now() + timedelta(seconds=MAGIC_LINK_TOKEN_MAX_AGE_SECONDS)
+        if user:
+            plain_otp = LoginOTPToken.generate_code()
+            otp_hash = _hash_login_otp(plain_otp)
+            expires_at = timezone.now() + timedelta(seconds=LOGIN_OTP_TOKEN_MAX_AGE_SECONDS)
 
-        MagicLinkToken.objects.filter(
-            email__iexact=email,
-            used_at__isnull=True,
-        ).update(used_at=timezone.now())
-        MagicLinkToken.objects.create(
-            email=email,
-            token_hash=token_hash,
-            expires_at=expires_at,
-        )
-
-        magic_link_base_url = getattr(settings, "MAGIC_LINK_URL", "").strip()
-        if magic_link_base_url:
-            separator = "&" if "?" in magic_link_base_url else "?"
-            magic_link = f"{magic_link_base_url}{separator}token={plain_token}"
+            LoginOTPToken.objects.filter(
+                email__iexact=email,
+                used_at__isnull=True,
+            ).update(used_at=timezone.now())
+            LoginOTPToken.objects.create(
+                email=email,
+                code_hash=otp_hash,
+                expires_at=expires_at,
+            )
             try:
                 text_content = (
-                    "Use the link below to sign in to DayOneGoal.\n\n"
-                    f"{magic_link}\n\n"
-                    f"This link expires in {MAGIC_LINK_TOKEN_MAX_AGE_SECONDS // 60} minutes."
+                    "Use the one-time password below to sign in to DayOneGoal.\n\n"
+                    f"{plain_otp}\n\n"
+                    f"This code expires in {LOGIN_OTP_TOKEN_MAX_AGE_SECONDS // 60} minutes."
                 )
                 html_content = (
                     "<div style=\"font-family: Arial, sans-serif; color: #0f172a; max-width: 640px;\">"
-                    "<h2>Your sign-in link</h2>"
-                    "<p>Use the link below to sign in to DayOneGoal.</p>"
-                    f"<p><a href=\"{magic_link}\">Sign in to DayOneGoal</a></p>"
-                    f"<p>This link expires in {MAGIC_LINK_TOKEN_MAX_AGE_SECONDS // 60} minutes.</p>"
+                    "<h2>Your sign-in code</h2>"
+                    "<p>Use the one-time password below to sign in to DayOneGoal.</p>"
+                    f"<p style=\"font-size: 32px; font-weight: 700; letter-spacing: 0.35em;\">{plain_otp}</p>"
+                    f"<p>This code expires in {LOGIN_OTP_TOKEN_MAX_AGE_SECONDS // 60} minutes.</p>"
                     "</div>"
                 )
                 send_email_via_resend(
                     to_email=email,
-                    subject="Your DayOneGoal magic link",
+                    subject="Your DayOneGoal login code",
                     text_content=text_content,
                     html_content=html_content,
                 )
             except Exception:
-                logger.exception("Magic-link email dispatch failed for email %s", email)
+                logger.exception("Login OTP email dispatch failed for email %s", email)
 
         return success_response(
-            message="If an account can use this email, a sign-in link has been sent.",
-            data={"expires_in_seconds": MAGIC_LINK_TOKEN_MAX_AGE_SECONDS},
+            message="If an account can use this email, a sign-in code has been sent.",
+            data={"expires_in_seconds": LOGIN_OTP_TOKEN_MAX_AGE_SECONDS},
             status=status.HTTP_200_OK,
         )
 
 
-class MagicLinkVerifyView(ProductionApiView):
+class LoginOTPVerifyView(ProductionApiView):
     permission_classes = [AllowAny]
     authentication_classes = []
     throttle_classes = [AnonRateThrottle]
 
     @transaction.atomic
     def post(self, request):
-        serializer = MagicLinkVerifySerializer(data=request.data)
+        serializer = LoginOTPVerifySerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(
-                message="Invalid magic-link verification payload.",
+                message="Invalid login OTP verification payload.",
                 errors=serializer.errors,
                 code="invalid_data",
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        token_hash = _hash_magic_link_token(serializer.validated_data["token"])
-        magic_token = MagicLinkToken.objects.select_for_update().filter(
-            token_hash=token_hash
+        email = serializer.validated_data["email"].strip().lower()
+        code_hash = _hash_login_otp(serializer.validated_data["otp"])
+        otp_token = LoginOTPToken.objects.select_for_update().filter(
+            email__iexact=email,
+            code_hash=code_hash,
         ).first()
 
-        if not magic_token:
+        if not otp_token:
             return error_response(
-                message="Magic link is invalid or expired.",
+                message="The login code is invalid or expired.",
                 code="invalid_or_expired_token",
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if magic_token.is_used or magic_token.is_expired:
-            if not magic_token.is_used:
-                magic_token.used_at = timezone.now()
-                magic_token.save(update_fields=["used_at"])
+        if otp_token.is_used or otp_token.is_expired:
+            if not otp_token.is_used:
+                otp_token.used_at = timezone.now()
+                otp_token.save(update_fields=["used_at"])
             return error_response(
-                message="Magic link is invalid or expired.",
+                message="The login code is invalid or expired.",
                 code="invalid_or_expired_token",
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        user, _created = _get_or_create_social_user(email=magic_token.email)
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            otp_token.used_at = timezone.now()
+            otp_token.save(update_fields=["used_at"])
+            return error_response(
+                message="The login code is invalid or expired.",
+                code="invalid_or_expired_token",
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not user.is_active:
             return _deactivated_account_response(user)
-        magic_token.used_at = timezone.now()
-        magic_token.save(update_fields=["used_at"])
+        otp_token.used_at = timezone.now()
+        otp_token.save(update_fields=["used_at"])
 
         auth_payload = _build_auth_payload(user)
         return Response(
             {
-                "message": "Magic link verified successfully",
+                "message": "Login code verified successfully",
                 "tokens": {
                     "access": auth_payload["access"],
                     "refresh": auth_payload["refresh"],
@@ -678,10 +739,8 @@ class ForgotPasswordView(ProductionApiView):
         if user:
             uid = urlsafe_base64_encode(force_bytes(user.pk))
             token = PasswordResetTokenGenerator().make_token(user)
-            reset_base_url = getattr(settings, "PASSWORD_RESET_URL", "").strip()
-            if reset_base_url:
-                separator = "&" if "?" in reset_base_url else "?"
-                reset_link = f"{reset_base_url}{separator}uid={uid}&token={token}"
+            reset_link = _build_password_reset_link(uid=uid, token=token)
+            if reset_link:
                 try:
                     text_content = (
                         "You requested a password reset.\n\n"

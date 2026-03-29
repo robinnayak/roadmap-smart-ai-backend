@@ -15,16 +15,16 @@ from .views import (
     ResetPasswordView,
     ChangePasswordView,
     GoogleAuthView,
-    MagicLinkRequestView,
-    MagicLinkVerifyView,
+    LoginOTPRequestView,
+    LoginOTPVerifyView,
 )
 
 urlpatterns = [
     path("register/", UserRegistrationView.as_view(), name="user-register"),
     path("login/", UserLoginView.as_view(), name="user-login"),
     path("google/", GoogleAuthView.as_view(), name="google-auth"),
-    path("magic-link/request/", MagicLinkRequestView.as_view(), name="magic-link-request"),
-    path("magic-link/verify/", MagicLinkVerifyView.as_view(), name="magic-link-verify"),
+    path("otp/request/", LoginOTPRequestView.as_view(), name="login-otp-request"),
+    path("otp/verify/", LoginOTPVerifyView.as_view(), name="login-otp-verify"),
     path("forgot-password/", ForgotPasswordView.as_view(), name="forgot-password"),
     path("reset-password/", ResetPasswordView.as_view(), name="reset-password"),
     path("change-password/", ChangePasswordView.as_view(), name="change-password"),

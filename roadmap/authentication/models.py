@@ -222,3 +222,30 @@ class MagicLinkToken(models.Model):
 
     def __str__(self):
         return f"Magic link for {self.email}"
+
+
+class LoginOTPToken(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    email = models.EmailField(db_index=True)
+    code_hash = models.CharField(max_length=64, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
+
+    @property
+    def is_used(self) -> bool:
+        return self.used_at is not None
+
+    @classmethod
+    def generate_code(cls, length: int = 6) -> str:
+        return get_random_string(length=length, allowed_chars="0123456789")
+
+    def __str__(self):
+        return f"Login OTP for {self.email}"
