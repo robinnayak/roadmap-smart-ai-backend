@@ -9,6 +9,7 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction, models
 from django.utils import timezone
 from rest_framework import status as http_status
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -20,6 +21,9 @@ from routine.models import (
     HealthProfile,
     GoalProgressEntry,
     DailyBrief,
+    PointsWallet,
+    PointsTransaction,
+    RewardCatalogItem,
 )
 from goal.models import Goal
 from routine.serializers import (
@@ -38,6 +42,10 @@ from routine.serializers import (
     ReorderRoutineTasksRequestSerializer,
     CreateRoutineTaskRequestSerializer,
     UpdateRoutineTaskRequestSerializer,
+    PointsWalletSerializer,
+    PointsTransactionSerializer,
+    RewardCatalogItemSerializer,
+    RewardRedemptionRequestSerializer,
 )
 from routine.daily_brief_service import get_or_generate_today_brief
 from routine.health_profile_selector import activate_profile
@@ -55,6 +63,12 @@ from routine.progress_services import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class WalletTransactionPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
 
 
 def _parse_interval_days(value: str | None) -> int:
@@ -276,6 +290,7 @@ class RoutineTaskListCreateAPIView(APIView):
             time_slot=validated.get("time_slot"),
             suggested_time=validated.get("suggested_time"),
             why_important=validated.get("why_important", ""),
+            base_points=validated.get("base_points", DailyTaskItem._meta.get_field("base_points").default),
             display_order=max_order + 1,
         )
         routine.update_progress()
@@ -474,29 +489,31 @@ class CompleteTaskItemAPIView(APIView):
         if not request_serializer.is_valid():
             return Response(request_serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
 
-        task_item = get_object_or_404(
-            DailyTaskItem,
-            id=task_id,
-            task_list__user=request.user,
-            removed_by_user=False,
-        )
-
-        if task_item.is_completed:
-            return Response(
-                {"message": "Task already completed."},
-                status=http_status.HTTP_200_OK,
+        with transaction.atomic():
+            task_item = get_object_or_404(
+                DailyTaskItem.objects.select_related("task_list").select_for_update(),
+                id=task_id,
+                task_list__user=request.user,
+                removed_by_user=False,
             )
 
-        task_item.mark_completed(
-            notes=request_serializer.validated_data.get("notes", ""),
-            actual_minutes=request_serializer.validated_data.get("actual_minutes"),
-        )
+            if task_item.is_completed:
+                return Response(
+                    {"message": "Task already completed."},
+                    status=http_status.HTTP_200_OK,
+                )
 
-        # FIX: Update discipline streak after every completion.
-        #      update_discipline_streak is a no-op unless the day is fully done.
-        update_discipline_streak(request.user, task_item.task_list)
+            task_item.mark_completed(
+                notes=request_serializer.validated_data.get("notes", ""),
+                actual_minutes=request_serializer.validated_data.get("actual_minutes"),
+            )
+            wallet_credit_result = getattr(task_item, "_wallet_credit_result", None)
 
-        task_list = task_item.task_list
+            # FIX: Update discipline streak after every completion.
+            #      update_discipline_streak is a no-op unless the day is fully done.
+            update_discipline_streak(request.user, task_item.task_list)
+            task_item.refresh_from_db()
+            task_list = task_item.task_list
         return Response(
             {
                 "message": "Task completed!",
@@ -507,6 +524,16 @@ class CompleteTaskItemAPIView(APIView):
                     "total_tasks":           task_list.total_tasks,
                     "is_fully_completed":    task_list.is_fully_completed,
                 },
+                "wallet": (
+                    {
+                        "awarded_points": str(wallet_credit_result["awarded_points"]),
+                        "current_balance": str(wallet_credit_result["wallet"].current_balance),
+                        "lifetime_earned": str(wallet_credit_result["wallet"].lifetime_earned),
+                        "transaction_id": str(wallet_credit_result["transaction"].id),
+                    }
+                    if wallet_credit_result
+                    else None
+                ),
             },
             status=http_status.HTTP_200_OK,
         )
@@ -550,6 +577,107 @@ class SkipTaskItemAPIView(APIView):
             {
                 "message": "Task skipped.",
                 "task": DailyTaskItemSerializer(task_item).data,
+            },
+            status=http_status.HTTP_200_OK,
+        )
+
+
+class PointsWalletAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        wallet = PointsWallet.objects.filter(user=request.user).first()
+        if wallet is None:
+            return Response(
+                {
+                    "wallet": {
+                        "current_balance": "0.0000",
+                        "lifetime_earned": "0.0000",
+                        "created_at": None,
+                        "updated_at": None,
+                        "has_wallet": False,
+                    }
+                },
+                status=http_status.HTTP_200_OK,
+            )
+        payload = PointsWalletSerializer(wallet).data
+        payload["has_wallet"] = True
+        return Response({"wallet": payload}, status=http_status.HTTP_200_OK)
+
+
+class PointsTransactionListAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+    pagination_class = WalletTransactionPagination
+
+    def get(self, request):
+        wallet = PointsWallet.objects.filter(user=request.user).first()
+        if wallet is None:
+            return Response(
+                {
+                    "count": 0,
+                    "next": None,
+                    "previous": None,
+                    "results": [],
+                },
+                status=http_status.HTTP_200_OK,
+            )
+
+        queryset = (
+            PointsTransaction.objects.filter(wallet=wallet)
+            .select_related("reward", "task_item")
+            .order_by("-created_at")
+        )
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        serializer = PointsTransactionSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+
+class RewardCatalogListAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        rewards = RewardCatalogItem.objects.filter(is_active=True).order_by("cost", "name")
+        return Response(
+            {"rewards": RewardCatalogItemSerializer(rewards, many=True).data},
+            status=http_status.HTTP_200_OK,
+        )
+
+
+class RewardRedeemAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, reward_id):
+        request_serializer = RewardRedemptionRequestSerializer(data=request.data)
+        if not request_serializer.is_valid():
+            return Response(request_serializer.errors, status=http_status.HTTP_400_BAD_REQUEST)
+
+        reward = get_object_or_404(RewardCatalogItem, id=reward_id, is_active=True)
+        with transaction.atomic():
+            wallet = PointsWallet._lock_for_user(request.user, create=False)
+            if wallet is None:
+                return Response(
+                    {"detail": "Insufficient points for this reward."},
+                    status=http_status.HTTP_400_BAD_REQUEST,
+                )
+
+            try:
+                transaction_entry = wallet.redeem_reward(reward)
+            except ValidationError as exc:
+                return Response(exc.message_dict, status=http_status.HTTP_400_BAD_REQUEST)
+
+            custom_note = request_serializer.validated_data.get("note")
+            if custom_note:
+                transaction_entry.note = f"{transaction_entry.note} - {custom_note}"
+                transaction_entry.save(update_fields=["note"])
+            wallet.refresh_from_db()
+
+        return Response(
+            {
+                "message": "Reward redeemed successfully.",
+                "wallet": PointsWalletSerializer(wallet).data,
+                "transaction": PointsTransactionSerializer(transaction_entry).data,
+                "reward": RewardCatalogItemSerializer(reward).data,
             },
             status=http_status.HTTP_200_OK,
         )

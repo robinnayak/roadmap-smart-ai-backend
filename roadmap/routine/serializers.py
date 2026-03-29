@@ -2,10 +2,13 @@
 # roadmap/routine/serializers.py
 # ==============================================================================
 
+from decimal import Decimal
+
 from rest_framework import serializers
 from routine.models import (
     DailyTaskList, DailyTaskItem, HabitTracker, HealthProfile, HabitRecommendation,
     GoalProgressEntry, DailyBrief, HabitCompletion, DisciplineStreak,
+    PointsWallet, PointsTransaction, RewardCatalogItem,
 )
 
 
@@ -58,6 +61,13 @@ class CreateRoutineTaskRequestSerializer(serializers.Serializer):
     )
     suggested_time = serializers.TimeField(required=False, allow_null=True, default=None)
     why_important = serializers.CharField(required=False, allow_blank=True, default="")
+    base_points = serializers.DecimalField(
+        required=False,
+        max_digits=10,
+        decimal_places=4,
+        min_value=Decimal("0.0000"),
+        default=Decimal("15.0000"),
+    )
 
 
 class UpdateRoutineTaskRequestSerializer(serializers.Serializer):
@@ -73,6 +83,16 @@ class UpdateRoutineTaskRequestSerializer(serializers.Serializer):
     )
     suggested_time = serializers.TimeField(required=False, allow_null=True)
     why_important = serializers.CharField(required=False, allow_blank=True)
+    base_points = serializers.DecimalField(
+        required=False,
+        max_digits=10,
+        decimal_places=4,
+        min_value=Decimal("0.0000"),
+    )
+
+
+class RewardRedemptionRequestSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True, default="")
 
 
 class HealthProfileSerializer(serializers.ModelSerializer):
@@ -267,7 +287,7 @@ class DailyTaskItemSerializer(serializers.ModelSerializer):
             'is_completed', 'completed_at', 'time_slot', 'suggested_time',
             'is_skipped', 'skip_reason', 'completion_notes',
             'removed_by_user', 'removed_at',
-            'why_important', 'display_order', 'points_earned', 'primary_category',
+            'why_important', 'display_order', 'base_points', 'points_earned', 'primary_category',
             'goal_task_id',
             'related_goal_info', 'habit_info', 'event_info',
             'created_at', 'updated_at',
@@ -326,7 +346,7 @@ class DailyTaskItemSummarySerializer(serializers.ModelSerializer):
         model = DailyTaskItem
         fields = [
             'id', 'item_type', 'title', 'description', 'icon',
-            'priority', 'estimated_minutes',
+            'priority', 'base_points', 'estimated_minutes',
             'is_completed', 'is_skipped', 'display_order',
             'removed_by_user',
             'primary_category', 'time_slot',
@@ -438,3 +458,51 @@ class DisciplineStreakSerializer(serializers.ModelSerializer):
             'total_perfect_days', 'total_days_tracked', 'last_updated',
         ]
         read_only_fields = ['id']
+
+
+class RewardCatalogItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RewardCatalogItem
+        fields = [
+            'id',
+            'slug',
+            'name',
+            'description',
+            'cost',
+            'is_active',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class PointsTransactionSerializer(serializers.ModelSerializer):
+    reward = RewardCatalogItemSerializer(read_only=True)
+    task_item_id = serializers.UUIDField(source='task_item.id', read_only=True)
+
+    class Meta:
+        model = PointsTransaction
+        fields = [
+            'id',
+            'transaction_type',
+            'amount',
+            'source_type',
+            'note',
+            'balance_after',
+            'task_item_id',
+            'reward',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class PointsWalletSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PointsWallet
+        fields = [
+            'current_balance',
+            'lifetime_earned',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields

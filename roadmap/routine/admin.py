@@ -11,6 +11,9 @@ from .models import (
     HabitRecommendation,
     HabitTracker,
     HealthProfile,
+    PointsWallet,
+    PointsTransaction,
+    RewardCatalogItem,
 )
 
 
@@ -20,6 +23,9 @@ admin.site.register(HabitTracker)
 admin.site.register(HabitCompletion)
 admin.site.register(DisciplineStreak)
 admin.site.register(AdaptiveRoadmapState)
+admin.site.register(PointsWallet)
+admin.site.register(PointsTransaction)
+admin.site.register(RewardCatalogItem)
 
 
 @admin.register(HealthProfile)

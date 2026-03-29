@@ -2,13 +2,23 @@
 # roadmap/routine/models.py
 # ==============================================================================
 
+import math
 import uuid
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import timedelta
 from django.apps import apps
 from django.db import models
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
+
+
+POINTS_DECIMAL_PLACES = Decimal("0.0001")
+DEFAULT_TASK_BASE_POINTS = Decimal("15.0000")
+
+
+def quantize_points(value: Decimal | int | float | str) -> Decimal:
+    return Decimal(str(value)).quantize(POINTS_DECIMAL_PLACES, rounding=ROUND_HALF_UP)
 
 
 # ==============================================================================
@@ -359,6 +369,12 @@ class DailyTaskItem(models.Model):
     )
     why_important = models.TextField(blank=True)
     display_order = models.IntegerField(default=0)
+    base_points = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        default=DEFAULT_TASK_BASE_POINTS,
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
     points_earned = models.IntegerField(default=0)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -388,6 +404,21 @@ class DailyTaskItem(models.Model):
             or self.item_type == "journal"
         )
 
+    def calculate_wallet_award(self, prior_completion_count: int | None = None) -> Decimal:
+        if prior_completion_count is None:
+            prior_completion_count = (
+                DailyTaskItem.objects.filter(
+                    task_list__user=self.task_list.user,
+                    is_completed=True,
+                )
+                .exclude(pk=self.pk)
+                .count()
+            )
+        divisor = Decimal(str(math.log10(prior_completion_count + 10)))
+        if divisor <= 0:
+            divisor = Decimal("1")
+        return quantize_points(Decimal(self.base_points) / divisor)
+
     def mark_completed(self, notes: str = "", actual_minutes: int | None = None):
         """
         Mark this item as completed and cascade updates to the goal hierarchy
@@ -412,6 +443,28 @@ class DailyTaskItem(models.Model):
             self.points_earned += 5
 
         self.save()
+
+        prior_completion_count = (
+            DailyTaskItem.objects.filter(
+                task_list__user=self.task_list.user,
+                is_completed=True,
+            )
+            .exclude(pk=self.pk)
+            .count()
+        )
+        awarded_points = self.calculate_wallet_award(
+            prior_completion_count=prior_completion_count,
+        )
+        wallet, transaction_entry = PointsWallet.credit_for_task_completion(
+            user=self.task_list.user,
+            task_item=self,
+            amount=awarded_points,
+        )
+        self._wallet_credit_result = {
+            "wallet": wallet,
+            "transaction": transaction_entry,
+            "awarded_points": awarded_points,
+        }
 
         # Cascade 1: update the parent DailyTaskList
         self.task_list.update_progress()
@@ -447,6 +500,168 @@ class DailyTaskItem(models.Model):
         self.skip_reason = reason
         self.save(update_fields=['is_skipped', 'skip_reason', 'updated_at'])
         self.task_list.update_progress()
+
+
+class PointsWallet(models.Model):
+    user = models.OneToOneField(
+        'authentication.CustomUser',
+        on_delete=models.CASCADE,
+        related_name='points_wallet',
+    )
+    current_balance = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    lifetime_earned = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'points_wallets'
+
+    def __str__(self):
+        return f"{self.user.email} wallet"
+
+    @classmethod
+    def _lock_for_user(cls, user, *, create: bool) -> "PointsWallet | None":
+        wallet = cls.objects.select_for_update().filter(user=user).first()
+        if wallet or not create:
+            return wallet
+        wallet, _ = cls.objects.get_or_create(user=user)
+        return cls.objects.select_for_update().get(pk=wallet.pk)
+
+    @classmethod
+    def credit_for_task_completion(
+        cls,
+        *,
+        user,
+        task_item: DailyTaskItem,
+        amount: Decimal,
+    ) -> tuple["PointsWallet", "PointsTransaction"]:
+        amount = quantize_points(amount)
+        existing_transaction = PointsTransaction.objects.filter(
+            source_type=PointsTransaction.SOURCE_TASK_COMPLETION,
+            task_item=task_item,
+        ).first()
+        if existing_transaction:
+            wallet = existing_transaction.wallet
+            return wallet, existing_transaction
+
+        wallet = cls._lock_for_user(user, create=True)
+        wallet.current_balance = quantize_points(wallet.current_balance + amount)
+        wallet.lifetime_earned = quantize_points(wallet.lifetime_earned + amount)
+        wallet.save(update_fields=["current_balance", "lifetime_earned", "updated_at"])
+        transaction_entry = PointsTransaction.objects.create(
+            wallet=wallet,
+            transaction_type=PointsTransaction.TYPE_CREDIT,
+            amount=amount,
+            source_type=PointsTransaction.SOURCE_TASK_COMPLETION,
+            note=f"Task completed: {task_item.title}",
+            task_item=task_item,
+            balance_after=wallet.current_balance,
+        )
+        return wallet, transaction_entry
+
+    def redeem_reward(self, reward: "RewardCatalogItem") -> "PointsTransaction":
+        cost = quantize_points(reward.cost)
+        if self.current_balance < cost:
+            raise ValidationError({"detail": "Insufficient points for this reward."})
+
+        self.current_balance = quantize_points(self.current_balance - cost)
+        self.save(update_fields=["current_balance", "updated_at"])
+        return PointsTransaction.objects.create(
+            wallet=self,
+            transaction_type=PointsTransaction.TYPE_DEBIT,
+            amount=cost,
+            source_type=PointsTransaction.SOURCE_REDEMPTION,
+            note=f"Redeemed reward: {reward.name}",
+            reward=reward,
+            balance_after=self.current_balance,
+        )
+
+
+class RewardCatalogItem(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    slug = models.SlugField(max_length=80, unique=True)
+    name = models.CharField(max_length=120)
+    description = models.TextField(blank=True)
+    cost = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'reward_catalog_items'
+        ordering = ['cost', 'name']
+
+    def __str__(self):
+        return self.name
+
+
+class PointsTransaction(models.Model):
+    TYPE_CREDIT = "credit"
+    TYPE_DEBIT = "debit"
+    SOURCE_TASK_COMPLETION = "task_completion"
+    SOURCE_REDEMPTION = "redemption"
+
+    TRANSACTION_TYPE_CHOICES = [
+        (TYPE_CREDIT, "Credit"),
+        (TYPE_DEBIT, "Debit"),
+    ]
+    SOURCE_TYPE_CHOICES = [
+        (SOURCE_TASK_COMPLETION, "Task Completion"),
+        (SOURCE_REDEMPTION, "Redemption"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    wallet = models.ForeignKey(
+        PointsWallet,
+        on_delete=models.CASCADE,
+        related_name='transactions',
+    )
+    transaction_type = models.CharField(max_length=10, choices=TRANSACTION_TYPE_CHOICES)
+    amount = models.DecimalField(max_digits=14, decimal_places=4)
+    source_type = models.CharField(max_length=30, choices=SOURCE_TYPE_CHOICES)
+    note = models.CharField(max_length=255)
+    task_item = models.ForeignKey(
+        DailyTaskItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='wallet_transactions',
+    )
+    reward = models.ForeignKey(
+        RewardCatalogItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='redemption_transactions',
+    )
+    balance_after = models.DecimalField(max_digits=14, decimal_places=4)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'points_transactions'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['task_item', 'source_type'],
+                condition=models.Q(task_item__isnull=False),
+                name='unique_task_completion_points_transaction',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.transaction_type} {self.amount} ({self.source_type})"
         
     @property
     def primary_category(self) -> str:

@@ -18,6 +18,10 @@ from .views import (
     TodayTaskListAPIView,
     CompleteTaskItemAPIView,
     SkipTaskItemAPIView,
+    PointsWalletAPIView,
+    PointsTransactionListAPIView,
+    RewardCatalogListAPIView,
+    RewardRedeemAPIView,
     WeekOverviewAPIView,
     ProgressOverviewAPIView,
     DisciplineStreakAPIView,
@@ -55,6 +59,12 @@ urlpatterns = [
     path('tasks/<uuid:task_id>/', RoutineTaskDetailAPIView.as_view(), name='routine-task-detail'),
     path('tasks/<uuid:task_id>/remove/', RoutineTaskRemoveAPIView.as_view(), name='routine-task-remove'),
     path('tasks/<uuid:task_id>/restore/', RoutineTaskRestoreAPIView.as_view(), name='routine-task-restore'),
+
+    # Points wallet and rewards
+    path('wallet/', PointsWalletAPIView.as_view(), name='points-wallet'),
+    path('wallet/transactions/', PointsTransactionListAPIView.as_view(), name='points-wallet-transactions'),
+    path('rewards/', RewardCatalogListAPIView.as_view(), name='reward-catalog-list'),
+    path('rewards/<uuid:reward_id>/redeem/', RewardRedeemAPIView.as_view(), name='reward-redeem'),
     
     # Week overview
     path('week/', WeekOverviewAPIView.as_view(), name='week-overview'),
