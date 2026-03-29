@@ -221,12 +221,19 @@ class GoogleAuthSerializer(serializers.Serializer):
     token = serializers.CharField(required=True, trim_whitespace=True)
 
 
-class MagicLinkRequestSerializer(serializers.Serializer):
+class LoginOTPRequestSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
 
 
-class MagicLinkVerifySerializer(serializers.Serializer):
-    token = serializers.CharField(required=True, trim_whitespace=True)
+class LoginOTPVerifySerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+    otp = serializers.CharField(required=True, trim_whitespace=True, min_length=6, max_length=6)
+
+    def validate_otp(self, value):
+        normalized = value.strip()
+        if not normalized.isdigit():
+            raise serializers.ValidationError("OTP must be a 6-digit numeric code.")
+        return normalized
 
 
 # Profile Prefer Email and Username as read-only fields since they are tied to the user model and should not be changed through the profile endpoint. If you want to allow updates, you can remove the read_only=True and handle the updates in the view.

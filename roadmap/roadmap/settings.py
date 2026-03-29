@@ -357,14 +357,14 @@ SIMPLE_JWT = {
 MAX_ACTIVE_DEVICE_SESSIONS = config("MAX_ACTIVE_DEVICE_SESSIONS", default=0, cast=int)
 GOOGLE_CLIENT_ID = config("GOOGLE_CLIENT_ID", default="").strip()
 GOOGLE_VERIFY_SSL = bool_env("GOOGLE_VERIFY_SSL", default=True)
-MAGIC_LINK_TOKEN_MAX_AGE_SECONDS = config(
-    "MAGIC_LINK_TOKEN_MAX_AGE_SECONDS",
-    default=900,
+LOGIN_OTP_TOKEN_MAX_AGE_SECONDS = config(
+    "LOGIN_OTP_TOKEN_MAX_AGE_SECONDS",
+    default=600,
     cast=int,
 )
-MAGIC_LINK_URL = config(
-    "MAGIC_LINK_URL",
-    default="http://localhost:3000/auth/magic",
+FRONTEND_BASE_URL = config(
+    "FRONTEND_BASE_URL",
+    default="http://localhost:3000",
 ).strip()
 
 # GIE rollout controls
@@ -510,7 +510,12 @@ def _require_non_empty_setting(name: str) -> None:
 
 
 if not DEBUG and not IS_TESTING:
-    for setting_name in ("RESEND_API_KEY", "RESEND_FROM_EMAIL", "PASSWORD_RESET_URL"):
+    for setting_name in (
+        "RESEND_API_KEY",
+        "RESEND_FROM_EMAIL",
+        "PASSWORD_RESET_URL",
+        "FRONTEND_BASE_URL",
+    ):
         _require_non_empty_setting(setting_name)
     if not REDIS_URL and not CELERY_TASK_ALWAYS_EAGER:
         raise ImproperlyConfigured(

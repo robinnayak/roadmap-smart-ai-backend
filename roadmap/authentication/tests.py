@@ -18,7 +18,7 @@ from django.test import override_settings
 from django.core.cache import cache
 from rest_framework import status 
 
-from authentication.models import MagicLinkToken, NotificationSettings, UserPersonalDetails
+from authentication.models import LoginOTPToken, NotificationSettings, UserPersonalDetails
 
 User = get_user_model()
 
@@ -51,7 +51,8 @@ class UserRegistrationTestCase(APITestCase):
 
     # =========================== SUCCESS CASES =========================
 
-    def test_valid_registration(self):
+    @patch("authentication.views.send_email_via_resend")
+    def test_valid_registration(self, send_email_mock):
         response = self.client.post(
             self.url, 
             data=self.valid_data, 
@@ -72,6 +73,8 @@ class UserRegistrationTestCase(APITestCase):
         
         #verify user was created in the database
         self.assertTrue(User.objects.filter(username="testuser").exists())
+        send_email_mock.assert_called_once()
+        self.assertEqual(send_email_mock.call_args.kwargs["to_email"], "testuser@example.com")
         
         
     # ============================ FAILURE CASES =========================
@@ -782,38 +785,42 @@ class GoogleAuthTests(APITestCase):
 
 
 @override_settings(SECURE_SSL_REDIRECT=False)
-class MagicLinkAuthTests(APITestCase):
+class LoginOtpAuthTests(APITestCase):
     def setUp(self):
         self.client = Client()
-        self.request_url = reverse("magic-link-request")
-        self.verify_url = reverse("magic-link-verify")
+        self.request_url = reverse("login-otp-request")
+        self.verify_url = reverse("login-otp-verify")
 
-    @override_settings(MAGIC_LINK_URL="http://localhost:3000/auth/magic")
     @patch("authentication.views.send_email_via_resend")
-    @patch("authentication.models.MagicLinkToken.generate_plaintext_token")
-    def test_magic_link_request_persists_token_and_sends_email(
+    @patch("authentication.models.LoginOTPToken.generate_code")
+    def test_login_otp_request_persists_token_and_sends_email(
         self,
-        token_mock,
+        code_mock,
         send_email_mock,
     ):
-        token_mock.return_value = "plaintext-token"
+        user = User.objects.create_user(
+            email="magic@example.com",
+            password="StrongPass123!",
+            username="otp-user",
+        )
+        code_mock.return_value = "123456"
 
         response = self.client.post(
             self.request_url,
-            data={"email": "magic@example.com"},
+            data={"email": user.email},
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["success"])
-        self.assertTrue(MagicLinkToken.objects.filter(email="magic@example.com").exists())
+        self.assertTrue(LoginOTPToken.objects.filter(email="magic@example.com").exists())
         send_email_mock.assert_called_once()
         kwargs = send_email_mock.call_args.kwargs
-        self.assertIn("plaintext-token", kwargs["text_content"])
+        self.assertIn("123456", kwargs["text_content"])
 
-    @override_settings(MAGIC_LINK_URL="http://localhost:3000/auth/magic")
     @patch("authentication.views.send_email_via_resend")
-    def test_magic_link_request_for_deactivated_user_sends_reactivation_email(
+    @override_settings(FRONTEND_BASE_URL="http://localhost:3000")
+    def test_login_otp_request_for_deactivated_user_sends_reactivation_email(
         self,
         send_email_mock,
     ):
@@ -833,7 +840,7 @@ class MagicLinkAuthTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["success"])
-        self.assertFalse(MagicLinkToken.objects.filter(email=user.email).exists())
+        self.assertFalse(LoginOTPToken.objects.filter(email=user.email).exists())
         send_email_mock.assert_called_once()
         kwargs = send_email_mock.call_args.kwargs
         self.assertEqual(kwargs["to_email"], user.email)
@@ -841,37 +848,47 @@ class MagicLinkAuthTests(APITestCase):
         self.assertIn("/auth/reactivate?token=", kwargs["text_content"])
         self.assertIn("Reactivate your DayOneGoal account", kwargs["html_content"])
 
-    def test_magic_link_verify_creates_user_and_marks_token_used(self):
-        token = "verify-me"
-        magic_link = MagicLinkToken.objects.create(
+    def test_login_otp_verify_authenticates_existing_user_and_marks_token_used(self):
+        user = User.objects.create_user(
             email="magic-verify@example.com",
-            token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            password="StrongPass123!",
+            username="otp-verify",
+        )
+        otp = "654321"
+        otp_record = LoginOTPToken.objects.create(
+            email="magic-verify@example.com",
+            code_hash=hashlib.sha256(otp.encode("utf-8")).hexdigest(),
             expires_at=timezone.now() + timedelta(minutes=10),
         )
 
         response = self.client.post(
             self.verify_url,
-            data={"token": token},
+            data={"email": user.email, "otp": otp},
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("tokens", response.data)
         self.assertTrue(User.objects.filter(email="magic-verify@example.com").exists())
-        magic_link.refresh_from_db()
-        self.assertIsNotNone(magic_link.used_at)
+        otp_record.refresh_from_db()
+        self.assertIsNotNone(otp_record.used_at)
 
-    def test_magic_link_verify_rejects_expired_token(self):
-        token = "expired-token"
-        MagicLinkToken.objects.create(
+    def test_login_otp_verify_rejects_expired_token(self):
+        user = User.objects.create_user(
             email="expired@example.com",
-            token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            password="StrongPass123!",
+            username="otp-expired",
+        )
+        otp = "222222"
+        LoginOTPToken.objects.create(
+            email="expired@example.com",
+            code_hash=hashlib.sha256(otp.encode("utf-8")).hexdigest(),
             expires_at=timezone.now() - timedelta(minutes=1),
         )
 
         response = self.client.post(
             self.verify_url,
-            data={"token": token},
+            data={"email": user.email, "otp": otp},
             format="json",
         )
 
