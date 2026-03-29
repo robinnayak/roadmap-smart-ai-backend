@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta
 from io import StringIO
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -29,6 +30,9 @@ from routine.models import (
     RoutineDayModeCheckIn,
     WakeBaselineState,
     WakeInteraction,
+    PointsWallet,
+    PointsTransaction,
+    RewardCatalogItem,
 )
 from routine.services import (
     _fetch_day_event_constraints,
@@ -105,7 +109,7 @@ class RoutineCompletionCascadeTests(APITestCase):
         )
         task_list.update_progress()
 
-        response = self.client.post(f"/routines/tasks/{daily_item.id}/complete/", data={})
+        response = self.client.post(f"/routines/tasks/{daily_item.id}/complete/", data={}, secure=True)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         daily_item.refresh_from_db()
@@ -122,6 +126,13 @@ class RoutineCompletionCascadeTests(APITestCase):
         self.assertEqual(milestone.status, "completed")
         self.assertEqual(goal.status, "completed")
         self.assertEqual(goal.progress_percentage, 100)
+        self.assertEqual(Decimal(str(response.data["wallet"]["awarded_points"])), Decimal("15.0000"))
+        wallet = PointsWallet.objects.get(user=self.user)
+        self.assertEqual(wallet.current_balance, Decimal("15.0000"))
+        self.assertEqual(wallet.lifetime_earned, Decimal("15.0000"))
+        ledger_entry = PointsTransaction.objects.get(task_item=daily_item)
+        self.assertEqual(ledger_entry.source_type, PointsTransaction.SOURCE_TASK_COMPLETION)
+        self.assertEqual(ledger_entry.amount, Decimal("15.0000"))
 
     def test_event_task_item_supports_complete_and_skip_without_goal_habit_cascade(self):
         target_date = timezone.localdate()
@@ -161,7 +172,11 @@ class RoutineCompletionCascadeTests(APITestCase):
         )
         task_list.update_progress()
 
-        complete_response = self.client.post(f"/routines/tasks/{complete_item.id}/complete/", data={})
+        complete_response = self.client.post(
+            f"/routines/tasks/{complete_item.id}/complete/",
+            data={},
+            secure=True,
+        )
         self.assertEqual(complete_response.status_code, status.HTTP_200_OK)
         complete_item.refresh_from_db()
         self.assertTrue(complete_item.is_completed)
@@ -169,6 +184,7 @@ class RoutineCompletionCascadeTests(APITestCase):
         skip_response = self.client.post(
             f"/routines/tasks/{skip_item.id}/skip/",
             data={"reason": "Rescheduled"},
+            secure=True,
         )
         self.assertEqual(skip_response.status_code, status.HTTP_200_OK)
         skip_item.refresh_from_db()
@@ -177,6 +193,47 @@ class RoutineCompletionCascadeTests(APITestCase):
         task_list.refresh_from_db()
         self.assertEqual(task_list.total_tasks, 2)
         self.assertEqual(task_list.completed_tasks, 1)
+
+    def test_complete_task_item_uses_base_points_scaling_for_wallet_credit(self):
+        task_list = DailyTaskList.objects.create(user=self.user, date=timezone.localdate())
+        prior_completed_items = [
+            DailyTaskItem(
+                task_list=task_list,
+                item_type="manual_task",
+                title=f"Done {index}",
+                priority="low",
+                estimated_minutes=10,
+                display_order=index,
+                is_completed=True,
+                completed_at=timezone.now(),
+            )
+            for index in range(90)
+        ]
+        DailyTaskItem.objects.bulk_create(prior_completed_items)
+        task_item = DailyTaskItem.objects.create(
+            task_list=task_list,
+            item_type="manual_task",
+            title="Scaled task",
+            priority="high",
+            estimated_minutes=30,
+            display_order=100,
+            base_points=Decimal("12.5000"),
+        )
+
+        response = self.client.post(
+            f"/routines/tasks/{task_item.id}/complete/",
+            data={},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        wallet = PointsWallet.objects.get(user=self.user)
+        transaction_entry = PointsTransaction.objects.get(task_item=task_item)
+        self.assertEqual(transaction_entry.amount, Decimal("6.2500"))
+        self.assertEqual(wallet.current_balance, Decimal("6.2500"))
+        self.assertEqual(wallet.lifetime_earned, Decimal("6.2500"))
+        self.assertEqual(Decimal(str(response.data["wallet"]["awarded_points"])), Decimal("6.2500"))
 
 
 class RoutineWriteValidationTests(APITestCase):
@@ -485,13 +542,16 @@ class RoutineTaskInlineManagementAPITests(APITestCase):
                 "description": "Created from routine page",
                 "priority": "high",
                 "estimated_minutes": 40,
+                "base_points": "7.2500",
             },
             format="json",
+            secure=True,
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["task"]["title"], "New Routine Task")
         self.assertEqual(response.data["task"]["item_type"], "manual_task")
         self.assertEqual(response.data["task"]["display_order"], 1)
+        self.assertEqual(response.data["task"]["base_points"], "7.2500")
 
     def test_create_task_rejects_blocked_schedule_slot(self):
         self.task_list.schedule_constraints = {
@@ -566,13 +626,15 @@ class RoutineTaskInlineManagementAPITests(APITestCase):
     def test_patch_task_detail_updates_fields(self):
         response = self.client.patch(
             f"/routines/tasks/{self.task_item.id}/",
-            data={"title": "Updated Task Title", "estimated_minutes": 60},
+            data={"title": "Updated Task Title", "estimated_minutes": 60, "base_points": "9.5000"},
             format="json",
+            secure=True,
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.task_item.refresh_from_db()
         self.assertEqual(self.task_item.title, "Updated Task Title")
         self.assertEqual(self.task_item.estimated_minutes, 60)
+        self.assertEqual(self.task_item.base_points, Decimal("9.5000"))
 
     def test_delete_task_detail_removes_task(self):
         response = self.client.delete(f"/routines/tasks/{self.task_item.id}/")
@@ -590,6 +652,83 @@ class RoutineTaskInlineManagementAPITests(APITestCase):
 
         delete_response = self.client.delete(f"/routines/tasks/{self.task_item.id}/")
         self.assertEqual(delete_response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class PointsWalletRewardAPITests(APITestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="wallet@test.com",
+            password="Password@123",
+        )
+        self.client.force_authenticate(self.user)
+        self.task_list = DailyTaskList.objects.create(user=self.user, date=timezone.localdate())
+        self.task_item = DailyTaskItem.objects.create(
+            task_list=self.task_list,
+            item_type="manual_task",
+            title="Earn points",
+            priority="medium",
+            estimated_minutes=20,
+            display_order=0,
+            base_points=Decimal("30.0000"),
+        )
+
+    def test_wallet_endpoint_returns_zero_state_before_first_credit(self):
+        response = self.client.get("/routines/wallet/", secure=True)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["wallet"]["current_balance"], "0.0000")
+        self.assertFalse(response.data["wallet"]["has_wallet"])
+
+    def test_wallet_transaction_endpoint_lists_task_credit(self):
+        self.client.post(
+            f"/routines/tasks/{self.task_item.id}/complete/",
+            data={},
+            format="json",
+            secure=True,
+        )
+
+        response = self.client.get("/routines/wallet/transactions/", secure=True)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["source_type"], "task_completion")
+        self.assertEqual(response.data["results"][0]["amount"], "30.0000")
+
+    def test_reward_catalog_lists_seeded_rewards(self):
+        response = self.client.get("/routines/rewards/", secure=True)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(response.data["rewards"]), 3)
+
+    def test_reward_redeem_debits_wallet_and_records_transaction(self):
+        self.client.post(
+            f"/routines/tasks/{self.task_item.id}/complete/",
+            data={},
+            format="json",
+            secure=True,
+        )
+        reward = RewardCatalogItem.objects.order_by("cost").first()
+
+        response = self.client.post(
+            f"/routines/rewards/{reward.id}/redeem/",
+            data={"note": "demo"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        wallet = PointsWallet.objects.get(user=self.user)
+        self.assertEqual(wallet.current_balance, Decimal("5.0000"))
+        self.assertEqual(wallet.lifetime_earned, Decimal("30.0000"))
+        self.assertEqual(response.data["transaction"]["source_type"], "redemption")
+        self.assertIn("demo", response.data["transaction"]["note"])
+
+    def test_reward_redeem_rejects_when_balance_is_insufficient(self):
+        reward = RewardCatalogItem.objects.order_by("-cost").first()
+        response = self.client.post(
+            f"/routines/rewards/{reward.id}/redeem/",
+            data={},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["detail"], "Insufficient points for this reward.")
 
 
 class DailyTaskGenerationTests(APITestCase):
