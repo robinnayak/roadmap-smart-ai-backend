@@ -10,7 +10,7 @@ from django.db import transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIRequestFactory, APITestCase
 
 from authentication.models import CustomUser
 from ai.models import AIProcessingJob
@@ -18,7 +18,7 @@ from ai.providers.base import AIResponse, BaseAIProvider
 from ai.utils.validators import normalize_task_type
 from goal.models import Goal, GoalAttributes, GoalCommitmentRecord, Milestone, SubGoal, Task, GoalLink, UserFinancialProfile, FinancialProgressEntry
 from goal.serializers import GoalSerializer
-from goal.services.goal_domain import build_goal_seed_data
+from goal.services.goal_domain import build_goal_seed_data, create_goal_for_user
 from goal.services.category_resolver import GOAL_CATEGORIES, resolve_category
 from goal.services.category_pillars import canonical_to_pillar, pillar_to_default_canonical
 from goal.services.contract_template import GoalContractTemplateService
@@ -384,7 +384,7 @@ class GoalContractTemplateServiceTests(APITestCase):
             "education",
             "career",
             "finance",
-            "parenting",
+            "communication",
         ]
 
         for category in categories:
@@ -2395,6 +2395,14 @@ class CategoryResolverTests(APITestCase):
         resolved = resolve_category("personal", "Improve communication with my partner and family", "")
         self.assertEqual(resolved, "relationships")
 
+    def test_personal_english_speaking_goal_resolves_to_communication(self):
+        resolved = resolve_category(
+            "personal",
+            "Improve my English speaking and presentation skills",
+            "Build fluency, vocabulary, and confidence in conversation",
+        )
+        self.assertEqual(resolved, "communication")
+
     def test_personal_university_thesis_goal_resolves_to_education(self):
         resolved = resolve_category("personal", "Complete my university thesis this semester", "")
         self.assertEqual(resolved, "education")
@@ -3459,6 +3467,88 @@ class GoalCategoryNormalizationContractTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         goal = Goal.objects.get(user=self.user, title="Emergency fund")
         self.assertEqual(goal.primary_category, "finance")
+
+    @patch("goal.services.goal_domain.classify_goal_category")
+    def test_create_trusts_explicit_primary_category_without_reclassification(self, mock_classify_goal_category):
+        payload = full_commitment_payload(
+            user=self.user,
+            goal_data={
+                "title": "Sleep better",
+                "description": "Reduce anxiety and improve sleep quality.",
+                "why_it_matters": ["Calm", "Recovery"],
+                "why_do_i_want_this": "I want steadier energy and less anxiety.",
+                "specific_measurable_target": "Sleep 7.5 hours on most nights.",
+                "primary_category": "wellness",
+                "target_date": str(timezone.localdate() + timedelta(days=90)),
+            },
+        )
+        payload.update(
+            {
+                "title": "Sleep better",
+                "description": "Reduce anxiety and improve sleep quality.",
+                "why_it_matters": ["Calm", "Recovery"],
+                "why_do_i_want_this": "I want steadier energy and less anxiety.",
+                "specific_measurable_target": "Sleep 7.5 hours on most nights.",
+                "primary_category": "wellness",
+                "priority": "medium",
+                "target_date": str(timezone.localdate() + timedelta(days=90)),
+            }
+        )
+        request = APIRequestFactory().post("/goal/", payload, format="json")
+        request.user = self.user
+
+        goal, errors = create_goal_for_user(
+            request_data=payload,
+            user=self.user,
+            request=request,
+        )
+
+        self.assertIsNone(errors)
+        self.assertIsNotNone(goal)
+        self.assertEqual(goal.primary_category, "wellness")
+        mock_classify_goal_category.assert_not_called()
+
+    @patch("goal.services.goal_domain.classify_goal_category")
+    def test_create_trusts_gie_goal_domain_without_reclassification(self, mock_classify_goal_category):
+        payload = full_commitment_payload(
+            user=self.user,
+            goal_data={
+                "title": "Sleep better",
+                "description": "Reduce anxiety and improve sleep quality.",
+                "why_it_matters": ["Calm", "Recovery"],
+                "why_do_i_want_this": "I want steadier energy and less anxiety.",
+                "specific_measurable_target": "Sleep 7.5 hours on most nights.",
+                "primary_category": "wellness",
+                "target_date": str(timezone.localdate() + timedelta(days=90)),
+            },
+        )
+        payload.update(
+            {
+                "title": "Sleep better",
+                "description": "Reduce anxiety and improve sleep quality.",
+                "why_it_matters": ["Calm", "Recovery"],
+                "why_do_i_want_this": "I want steadier energy and less anxiety.",
+                "specific_measurable_target": "Sleep 7.5 hours on most nights.",
+                "priority": "medium",
+                "target_date": str(timezone.localdate() + timedelta(days=90)),
+            }
+        )
+        payload.pop("primary_category", None)
+        payload["goal_domain"] = "wellness"
+
+        request = APIRequestFactory().post("/goal/create-with-hierarchy/", payload, format="json")
+        request.user = self.user
+
+        goal, errors = create_goal_for_user(
+            request_data=payload,
+            user=self.user,
+            request=request,
+        )
+
+        self.assertIsNone(errors)
+        self.assertIsNotNone(goal)
+        self.assertEqual(goal.primary_category, "wellness")
+        mock_classify_goal_category.assert_not_called()
 
     def test_patch_accepts_legacy_health_and_persists_fitness(self):
         goal = Goal.objects.create(

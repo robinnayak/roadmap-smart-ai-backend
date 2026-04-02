@@ -1,3 +1,5 @@
+import logging
+
 from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -12,12 +14,14 @@ from gie.serializers import (
     GIEAdaptationRequestSerializer,
     GIEFinalizeRequestSerializer,
     GIEGoalStartRequestSerializer,
+    GIEGoalStartResponseSerializer,
     GIEPlanSnapshotSerializer,
     GIESessionSerializer,
     GIESlotDefinitionSerializer,
     GIESlotStateSerializer,
     GIETurnSerializer,
     GIETurnSubmitRequestSerializer,
+    GIETurnSubmitResponseSerializer,
 )
 from gie.services import (
     GIEAdaptationService,
@@ -37,6 +41,24 @@ from gie.services.timeline_validation import (
     TIMELINE_REFRAME_ANALYSIS_KEY,
     TIMELINE_REFRAME_DECISION_KEY,
 )
+from gie.services.question_generation import (
+    DEFAULT_TOTAL_QUESTIONS,
+    classify_and_generate_first_question,
+    generate_next_question,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+def normalize_question_text(question: str | None) -> str:
+    return " ".join((question or "").strip().lower().split())
+
+
+def clamp_total_questions(total_questions: int | None) -> int:
+    if not isinstance(total_questions, int) or total_questions < 1:
+        return DEFAULT_TOTAL_QUESTIONS
+    return min(total_questions, DEFAULT_TOTAL_QUESTIONS)
 
 
 def error_payload(*, error: str, code: str, details: dict, status_code: int) -> Response:
@@ -129,6 +151,7 @@ class GIEGoalStartAPIView(APIView):
             else GIESession.PHASE_QUESTION_LOOP
         )
 
+        assistant_turn = None
         with transaction.atomic():
             session = GIESession.objects.create(
                 user=request.user,
@@ -176,7 +199,7 @@ class GIEGoalStartAPIView(APIView):
             )
 
             if next_prompt:
-                GIETurn.objects.create(
+                assistant_turn = GIETurn.objects.create(
                     session=session,
                     turn_index=1,
                     role=GIETurn.ROLE_ASSISTANT,
@@ -190,8 +213,54 @@ class GIEGoalStartAPIView(APIView):
         slot_state_qs = GIESlotState.objects.filter(session=session).order_by("slot_key")
         GIEObservabilityService.record_session_started(session=session, completeness=completeness)
 
-        return Response(
-            {
+        category = None
+        category_label = None
+        total_questions = None
+        current_question_number = None
+        gie_question = None
+        gie_suggestions = None
+        if next_prompt:
+            target_definition = next(
+                (slot for slot in schema["required_slots"] if slot["key"] == next_prompt["target_slot_key"]),
+                None,
+            )
+            try:
+                llm_result = classify_and_generate_first_question(
+                    session.goal_text,
+                    target_slot_key=next_prompt["target_slot_key"],
+                    target_slot_label=(target_definition or {}).get("label"),
+                    target_slot_description=(target_definition or {}).get("description"),
+                )
+                session.goal_domain = llm_result["category"]
+                session.total_questions = clamp_total_questions(llm_result["total_questions"])
+                session.current_question_number = 1
+                session.current_question = llm_result["question"]
+                session.save(
+                    update_fields=[
+                        "goal_domain",
+                        "total_questions",
+                        "current_question_number",
+                        "current_question",
+                    ]
+                )
+                if assistant_turn and assistant_turn.content != llm_result["question"]:
+                    assistant_turn.content = llm_result["question"]
+                    assistant_turn.save(update_fields=["content"])
+                category = llm_result["category"]
+                category_label = llm_result["category_label"]
+                total_questions = session.total_questions
+                current_question_number = 1
+                gie_question = llm_result["question"]
+                gie_suggestions = llm_result["suggestions"]
+            except Exception as exc:
+                logger.warning(
+                    "GIE first-question generation failed for goal_text=%r: %s",
+                    goal_text,
+                    str(exc),
+                )
+
+        response_serializer = GIEGoalStartResponseSerializer(
+            instance={
                 "session": GIESessionSerializer(session).data,
                 "schema": {
                     "required_slots": GIESlotDefinitionSerializer(required_qs, many=True).data,
@@ -199,12 +268,62 @@ class GIEGoalStartAPIView(APIView):
                 },
                 "slot_state": GIESlotStateSerializer(slot_state_qs, many=True).data,
                 "next_prompt": next_prompt,
-            },
-            status=status.HTTP_201_CREATED,
+                "category": category,
+                "category_label": category_label,
+                "total_questions": total_questions,
+                "current_question_number": current_question_number,
+                "gie_question": gie_question,
+                "gie_suggestions": gie_suggestions,
+            }
         )
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
 
 class GIEGoalTurnAPIView(GIESessionScopedAPIView):
+    @staticmethod
+    def _find_slot_definition(*, session: GIESession, slot_key: str | None):
+        if not slot_key:
+            return None
+        return session.slot_definitions.filter(key=slot_key).first()
+
+    @staticmethod
+    def _question_already_asked(*, question: str | None, conversation_history: list[dict[str, str]]) -> bool:
+        normalized_question = normalize_question_text(question)
+        if not normalized_question:
+            return False
+        return any(
+            normalize_question_text(item.get("question")) == normalized_question
+            for item in conversation_history
+        )
+
+    @staticmethod
+    def _build_conversation_history(*, session: GIESession) -> list[dict[str, str]]:
+        history: list[dict[str, str]] = []
+        pending_question: str | None = None
+        turns = GIETurn.objects.filter(session=session).order_by("turn_index", "created_at")
+        for turn in turns:
+            if (
+                turn.role == GIETurn.ROLE_ASSISTANT
+                and turn.kind == GIETurn.KIND_FOLLOWUP_QUESTION
+                and turn.content
+            ):
+                pending_question = turn.content.strip()
+                continue
+            if (
+                turn.role == GIETurn.ROLE_USER
+                and turn.kind == GIETurn.KIND_SLOT_ANSWER
+                and pending_question
+                and turn.content
+            ):
+                history.append(
+                    {
+                        "question": pending_question,
+                        "answer": turn.content.strip(),
+                    }
+                )
+                pending_question = None
+        return history
+
     @staticmethod
     def _get_latest_health_profile(*, user):
         try:
@@ -220,6 +339,7 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
             required_definitions,
             state_map,
             goal_text=session.goal_text,
+            goal_domain=session.goal_domain,
         )
 
         # Only evaluate timeline realism once required slots are complete.
@@ -344,6 +464,7 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
             required_definitions,
             slot_map,
             goal_text=session.goal_text,
+            goal_domain=session.goal_domain,
         )
         if pending_required_prompt:
             feasibility_state, _ = GIESlotState.objects.update_or_create(
@@ -436,6 +557,7 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
 
         with transaction.atomic():
             session_locked = GIESession.objects.select_for_update().get(pk=session.pk)
+            session_locked.total_questions = clamp_total_questions(session_locked.total_questions)
             max_turn_index = session_locked.turns.order_by("-turn_index").values_list("turn_index", flat=True).first() or 0
             next_turn_index = max_turn_index + 1
             user_turn = GIETurn.objects.create(
@@ -454,6 +576,7 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
                 required_definitions,
                 slot_states_by_key,
                 goal_text=session_locked.goal_text,
+                goal_domain=session_locked.goal_domain,
             )
             target_slot_key = next_prompt["target_slot_key"] if next_prompt else None
             if target_slot_key == TIMELINE_REFRAME_DECISION_KEY:
@@ -500,6 +623,7 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
                 required_definitions,
                 refreshed_state_map,
                 goal_text=session_locked.goal_text,
+                goal_domain=session_locked.goal_domain,
             )
             timeline_blocking = self._is_timeline_reframe_unresolved(refreshed_state_map)
             session_status = GIESession.STATUS_READY_TO_FINALIZE
@@ -527,9 +651,14 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
                 ]
             )
 
+            assistant_turn = None
+            limit_reached = session_locked.current_question_number >= session_locked.total_questions
+            if limit_reached:
+                followup_prompt = None
+
             if followup_prompt and session_status == GIESession.STATUS_ACTIVE:
                 assistant_turn_index = (session_locked.turns.order_by("-turn_index").values_list("turn_index", flat=True).first() or 0) + 1
-                GIETurn.objects.create(
+                assistant_turn = GIETurn.objects.create(
                     session=session_locked,
                     turn_index=assistant_turn_index,
                     role=GIETurn.ROLE_ASSISTANT,
@@ -544,19 +673,75 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
                     slot_states=refreshed_states,
                 )
                 slot_updates = merge_unique_slot_updates(slot_updates, [habit_suggestions_state, autofill_state])
+
+            is_llm_complete = limit_reached or session_status != GIESession.STATUS_ACTIVE or not followup_prompt
+            gie_question = None
+            gie_suggestions = None
+            if not is_llm_complete:
+                history = self._build_conversation_history(session=session_locked)
+                try:
+                    target_definition = self._find_slot_definition(
+                        session=session_locked,
+                        slot_key=followup_prompt["target_slot_key"],
+                    )
+                    llm_result = generate_next_question(
+                        goal_text=session_locked.goal_text,
+                        category=session_locked.goal_domain,
+                        conversation_history=history,
+                        target_slot_key=followup_prompt["target_slot_key"],
+                        target_slot_label=target_definition.label if target_definition else None,
+                        target_slot_description=target_definition.description if target_definition else None,
+                    )
+                    if self._question_already_asked(question=llm_result["question"], conversation_history=history):
+                        gie_question = followup_prompt["question"]
+                        gie_suggestions = None
+                    else:
+                        gie_question = llm_result["question"]
+                        gie_suggestions = llm_result["suggestions"]
+                    session_locked.current_question = gie_question
+                    session_locked.current_question_number += 1
+                    if assistant_turn and assistant_turn.content != gie_question:
+                        assistant_turn.content = gie_question
+                        assistant_turn.save(update_fields=["content"])
+                except Exception as exc:
+                    logger.warning(
+                        "GIE next-question generation failed for session_id=%s: %s",
+                        session_locked.id,
+                        str(exc),
+                    )
+                    session_locked.current_question = followup_prompt["question"] if followup_prompt else None
+                    session_locked.current_question_number += 1
+            else:
+                session_locked.current_question = None
+
+            is_llm_complete = (
+                is_llm_complete
+                or session_locked.current_question_number >= session_locked.total_questions
+            )
+            session_locked.save(
+                update_fields=[
+                    "total_questions",
+                    "current_question",
+                    "current_question_number",
+                ]
+            )
             GIEObservabilityService.record_turn_processed(session=session_locked, completeness=completeness)
 
-        return Response(
-            {
+        response_serializer = GIETurnSubmitResponseSerializer(
+            instance={
                 "session_id": str(session_id),
                 "turn": GIETurnSerializer(user_turn).data,
                 "slot_updates": GIESlotStateSerializer(slot_updates, many=True).data,
                 "completeness": completeness,
                 "next_prompt": followup_prompt,
                 "session_status": session_status,
-            },
-            status=status.HTTP_200_OK,
+                "current_question_number": session_locked.current_question_number,
+                "is_llm_complete": is_llm_complete,
+                "gie_question": gie_question,
+                "gie_suggestions": gie_suggestions,
+            }
         )
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
 
     def _build_turn_response(self, *, session: GIESession, turn: GIETurn, replay: bool) -> Response:
         slot_updates = list(session.slot_states.filter(last_updated_turn_index=turn.turn_index).order_by("slot_key"))
@@ -568,7 +753,11 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
             required_definitions,
             state_map,
             goal_text=session.goal_text,
+            goal_domain=session.goal_domain,
         )
+        total_questions = clamp_total_questions(session.total_questions)
+        if session.current_question_number >= total_questions:
+            next_prompt = None
         session_status = GIESession.STATUS_READY_TO_FINALIZE
         if completeness["filled_required_slot_count"] != completeness["required_slot_count"] or self._is_timeline_reframe_unresolved(state_map):
             session_status = GIESession.STATUS_ACTIVE
@@ -580,17 +769,21 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
             )
             slot_updates = merge_unique_slot_updates(slot_updates, [habit_suggestions_state, autofill_state])
         _ = replay
-        return Response(
-            {
+        response_serializer = GIETurnSubmitResponseSerializer(
+            instance={
                 "session_id": str(session.id),
                 "turn": GIETurnSerializer(turn).data,
                 "slot_updates": GIESlotStateSerializer(slot_updates, many=True).data,
                 "completeness": completeness,
                 "next_prompt": next_prompt,
                 "session_status": session_status,
-            },
-            status=status.HTTP_200_OK,
+                "current_question_number": session.current_question_number,
+                "is_llm_complete": session.current_question_number >= total_questions or not next_prompt,
+                "gie_question": None,
+                "gie_suggestions": None,
+            }
         )
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
 
 
 class GIEGoalStateAPIView(GIESessionScopedAPIView):

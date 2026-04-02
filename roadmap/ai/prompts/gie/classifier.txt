@@ -1,0 +1,21 @@
+Classify the user's goal into exactly one supported GIE category.
+
+Supported categories:
+- wellness
+- fitness
+- learning
+
+Return strict JSON only with this shape:
+{
+  "category": "wellness|fitness|learning",
+  "category_label": "Wellness|Fitness|Learning",
+  "total_questions": 5
+}
+
+Rules:
+- Choose the single best category for the user's stated goal.
+- Use `wellness` for anxiety, stress, sleep, mindfulness, burnout, mood, or emotional regulation goals.
+- Use `fitness` for running, exercise, strength, endurance, body composition, or training goals.
+- Use `learning` for studying, language learning, certifications, deliberate practice, or skill-building goals.
+- `total_questions` must always be 5.
+- Do not include markdown, commentary, or any keys outside the required JSON object.

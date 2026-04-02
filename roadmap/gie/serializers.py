@@ -19,6 +19,24 @@ class GIESessionSerializer(serializers.ModelSerializer):
             "status",
             "phase",
             "current_question",
+            "total_questions",
+            "current_question_number",
+            "required_slot_count",
+            "filled_required_slot_count",
+            "completeness_percent",
+            "created_at",
+            "updated_at",
+            "finalized_at",
+        ]
+        read_only_fields = [
+            "id",
+            "goal_text",
+            "goal_domain",
+            "status",
+            "phase",
+            "current_question",
+            "total_questions",
+            "current_question_number",
             "required_slot_count",
             "filled_required_slot_count",
             "completeness_percent",
@@ -78,6 +96,45 @@ class GIETurnSerializer(serializers.ModelSerializer):
             "applied",
             "created_at",
         ]
+
+
+class GIESchemaResponseSerializer(serializers.Serializer):
+    required_slots = GIESlotDefinitionSerializer(many=True)
+    optional_slots = GIESlotDefinitionSerializer(many=True)
+
+
+class GIEGoalStartResponseSerializer(serializers.Serializer):
+    session = GIESessionSerializer()
+    schema = GIESchemaResponseSerializer()
+    slot_state = GIESlotStateSerializer(many=True)
+    next_prompt = serializers.JSONField(allow_null=True, required=False)
+    category = serializers.CharField(allow_null=True, required=False)
+    category_label = serializers.CharField(allow_null=True, required=False)
+    total_questions = serializers.IntegerField(allow_null=True, required=False)
+    current_question_number = serializers.IntegerField(allow_null=True, required=False)
+    gie_question = serializers.CharField(allow_null=True, required=False)
+    gie_suggestions = serializers.ListField(
+        child=serializers.CharField(),
+        allow_null=True,
+        required=False,
+    )
+
+
+class GIETurnSubmitResponseSerializer(serializers.Serializer):
+    session_id = serializers.CharField()
+    turn = GIETurnSerializer()
+    slot_updates = GIESlotStateSerializer(many=True)
+    completeness = serializers.JSONField()
+    next_prompt = serializers.JSONField(allow_null=True, required=False)
+    session_status = serializers.CharField()
+    current_question_number = serializers.IntegerField(allow_null=True, required=False)
+    is_llm_complete = serializers.BooleanField(allow_null=True, required=False)
+    gie_question = serializers.CharField(allow_null=True, required=False)
+    gie_suggestions = serializers.ListField(
+        child=serializers.CharField(),
+        allow_null=True,
+        required=False,
+    )
 
 
 class GIEFinalizeCommitmentDecisionSerializer(serializers.Serializer):

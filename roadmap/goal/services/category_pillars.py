@@ -23,6 +23,7 @@ _CANONICAL_TO_PILLAR = {
     "learning": "Learning",
     "education": "Learning",
     "relationships": "Relationships",
+    "communication": "Relationships",
     "parenting": "Relationships",
     "productivity": "Personal",
     "digital_habits": "Personal",

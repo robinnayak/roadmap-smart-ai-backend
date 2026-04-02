@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from ai.providers.base import AIResponse, BaseAIProvider
 from ai.providers.router import create_routed_provider
 
+TIMELINE_INSIGHT_PROVIDER_OLLAMA = "ollama"
+
 
 @dataclass
 class TimelineAIProviderAdapter:

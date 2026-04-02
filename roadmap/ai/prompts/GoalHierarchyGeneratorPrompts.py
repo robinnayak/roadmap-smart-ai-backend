@@ -168,6 +168,10 @@ def _load_category(category: str) -> str:
 
 def _render_context(subgoal_data: dict, milestone_data: dict, goal_data: dict) -> str:
     resolved_category = goal_data.get("resolved_category") or goal_data.get("primary_category", "")
+    available_daily_minutes = _resolve_available_daily_minutes(goal_data)
+    user_strengths = _resolve_user_strengths(goal_data)
+    user_blockers = _resolve_user_blockers(goal_data)
+    motivation_style = _resolve_motivation_style(goal_data)
     return f"""
 USER AND GOAL CONTEXT
 
@@ -193,10 +197,10 @@ Week Number: {subgoal_data.get('week_number', '')}
 Learning Objectives: {_format_list(subgoal_data.get('learning_objectives', []))}
 
 USER CAPACITY
-Available Daily Time: {goal_data.get('available_daily_minutes', 60)} min
-Strengths: {_format_list(goal_data.get('user_strengths', []))}
-Blockers: {_format_list(goal_data.get('user_blockers', []))}
-Motivation Style: {goal_data.get('motivation_style', 'intrinsic')}
+Available Daily Time: {available_daily_minutes} min
+Strengths: {_format_list(user_strengths)}
+Blockers: {_format_list(user_blockers)}
+Motivation Style: {motivation_style}
 """.strip()
 
 
@@ -204,3 +208,59 @@ def _format_list(items) -> str:
     if isinstance(items, list):
         return ", ".join(str(item) for item in items) if items else "not provided"
     return str(items) if items else "not provided"
+
+
+def _resolve_available_daily_minutes(goal_data: dict) -> int:
+    for key in (
+        "available_daily_minutes",
+        "daily_session_minutes",
+        "daily_practice_minutes",
+        "prep_time_per_day_minutes",
+    ):
+        value = goal_data.get(key)
+        if isinstance(value, (int, float)):
+            return max(0, int(round(float(value))))
+        if isinstance(value, str) and value.strip().isdigit():
+            return max(0, int(value.strip()))
+    return 60
+
+
+def _resolve_user_strengths(goal_data: dict) -> list[str]:
+    for key in ("user_strengths", "key_skills"):
+        value = goal_data.get(key)
+        if isinstance(value, list) and value:
+            return [str(item).strip() for item in value if str(item).strip()]
+    fallback = []
+    for key in ("available_opportunities", "running_experience", "current_skill_level", "current_role"):
+        value = goal_data.get(key)
+        if isinstance(value, str) and value.strip():
+            fallback.append(value.strip())
+    return fallback
+
+
+def _resolve_user_blockers(goal_data: dict) -> list[str]:
+    for key in ("user_blockers", "constraints"):
+        value = goal_data.get(key)
+        if isinstance(value, list) and value:
+            return [str(item).strip() for item in value if str(item).strip()]
+    fallback = []
+    for key in ("injury_constraints", "dietary_constraints", "manager_feedback_on_gaps"):
+        value = goal_data.get(key)
+        if isinstance(value, str) and value.strip():
+            fallback.append(value.strip())
+    return fallback
+
+
+def _resolve_motivation_style(goal_data: dict) -> str:
+    explicit_style = goal_data.get("motivation_style")
+    if isinstance(explicit_style, str) and explicit_style.strip():
+        return explicit_style.strip()
+
+    motivation_driver = goal_data.get("motivation_driver")
+    if isinstance(motivation_driver, str) and motivation_driver.strip():
+        lowered = motivation_driver.strip().lower()
+        if any(token in lowered for token in ("deadline", "date", "save", "amount", "race", "event", "target")):
+            return "outcome-driven"
+        if any(token in lowered for token in ("coach", "mentor", "manager", "accountability")):
+            return "accountability-driven"
+    return "intrinsic"

@@ -3,6 +3,7 @@ from copy import deepcopy
 
 WAVE4_DOMAIN_RUNNING_ENDURANCE = "running_endurance"
 WAVE4_DOMAIN_NUTRITION = "nutrition"
+WAVE4_DOMAIN_WELLNESS = "wellness"
 WAVE4_DOMAIN_FINANCE = "finance"
 WAVE4_DOMAIN_SKILL_ACQUISITION = "skill_acquisition"
 WAVE4_DOMAIN_CAREER = "career"
@@ -22,10 +23,46 @@ NUTRITION_KEYWORDS = (
     "dinner",
 )
 
+WELLNESS_KEYWORDS = (
+    "anxiety",
+    "stress",
+    "mental",
+    "sleep",
+    "mindfulness",
+    "meditation",
+    "burnout",
+    "overwhelm",
+    "calm",
+    "mood",
+    "emotional",
+    "nervous",
+    "clarity",
+    "peace",
+)
+
+RUNNING_KEYWORDS = (
+    "run",
+    "running",
+    "marathon",
+    "5k",
+    "10k",
+    "half marathon",
+    "fitness",
+    "endurance",
+    "training",
+    "workout",
+    "gym",
+)
+
 
 def _is_nutrition_goal_text(goal_text: str) -> bool:
     lowered_goal_text = (goal_text or "").lower()
     return any(token in lowered_goal_text for token in NUTRITION_KEYWORDS)
+
+
+def _score_keyword_matches(goal_text: str, keywords: tuple[str, ...]) -> int:
+    lowered_goal_text = (goal_text or "").lower()
+    return sum(1 for token in keywords if token in lowered_goal_text)
 
 
 def map_session_domain_to_wave4_domain(goal_domain: str | None, goal_text: str = "") -> str:
@@ -37,6 +74,10 @@ def map_session_domain_to_wave4_domain(goal_domain: str | None, goal_text: str =
     if normalized_domain == "health":
         if _is_nutrition_goal_text(goal_text):
             return WAVE4_DOMAIN_NUTRITION
+        wellness_score = _score_keyword_matches(goal_text, WELLNESS_KEYWORDS)
+        running_score = _score_keyword_matches(goal_text, RUNNING_KEYWORDS)
+        if wellness_score > running_score:
+            return WAVE4_DOMAIN_WELLNESS
         return WAVE4_DOMAIN_RUNNING_ENDURANCE
     if normalized_domain == "learning":
         return WAVE4_DOMAIN_SKILL_ACQUISITION
@@ -256,6 +297,75 @@ class GIEDynamicSchemaService:
                     "enum_values": None,
                     "validation": {"minimum": 0},
                 },
+            ],
+        },
+        WAVE4_DOMAIN_WELLNESS: {
+            "required_slots": [
+                {
+                    "key": "current_wellness_baseline",
+                    "label": "Current Wellness Baseline",
+                    "description": "Current emotional, stress, or sleep baseline.",
+                    "required": True,
+                    "data_type": "string",
+                    "enum_values": None,
+                    "validation": {"min_length": 2},
+                },
+                {
+                    "key": "primary_challenge",
+                    "label": "Primary Challenge",
+                    "description": "The main wellness challenge to improve first.",
+                    "required": True,
+                    "data_type": "string",
+                    "enum_values": None,
+                    "validation": {"min_length": 2},
+                },
+                {
+                    "key": "daily_time_available",
+                    "label": "Daily Time Available",
+                    "description": "How much time is realistically available each day?",
+                    "required": True,
+                    "data_type": "integer",
+                    "enum_values": None,
+                    "validation": {"minimum": 5, "maximum": 240},
+                },
+                {
+                    "key": "existing_practices",
+                    "label": "Existing Practices",
+                    "description": "Current practices already being used, if any.",
+                    "required": True,
+                    "data_type": "string",
+                    "enum_values": None,
+                    "validation": {"min_length": 2},
+                },
+                {
+                    "key": "trigger_context",
+                    "label": "Trigger Context",
+                    "description": "Situations, times, or environments that trigger the challenge.",
+                    "required": True,
+                    "data_type": "string",
+                    "enum_values": None,
+                    "validation": {"min_length": 2},
+                },
+                {
+                    "key": "motivation_driver",
+                    "label": "Motivation Driver",
+                    "description": "Primary reason this wellness change matters now.",
+                    "required": True,
+                    "data_type": "string",
+                    "enum_values": None,
+                    "validation": {"min_length": 2},
+                },
+            ],
+            "optional_slots": [
+                {
+                    "key": "timeline_target_date",
+                    "label": "Target Date",
+                    "description": "Optional target date for evaluating progress.",
+                    "required": False,
+                    "data_type": "date",
+                    "enum_values": None,
+                    "validation": {},
+                }
             ],
         },
         WAVE4_DOMAIN_FINANCE: {

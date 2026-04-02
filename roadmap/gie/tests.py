@@ -6,7 +6,7 @@ from django.utils import timezone
 from datetime import timedelta
 import json
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APIClient
 from rest_framework.response import Response
 from unittest.mock import Mock, patch
 
@@ -35,6 +35,94 @@ from gie.services.turn_pipeline import GIETurnPipelineService
 from gie.services.unified_context import GIEUnifiedContextService
 from gie.views import GIEGoalTurnAPIView
 from goal.services.contract_template import GoalContractTemplateService
+
+
+class SecureAPIClient(APIClient):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.defaults["wsgi.url_scheme"] = "https"
+        self.defaults["SERVER_PORT"] = "443"
+        self.defaults["HTTP_X_FORWARDED_PROTO"] = "https"
+
+
+class SecureAPITestCase(APITestCase):
+    client_class = SecureAPIClient
+
+
+def start_mock_question_generation(test_case) -> None:
+    def fake_first_question(goal_text: str, **kwargs):
+        normalized = goal_text.lower()
+        if "anxiety" in normalized or "sleep" in normalized:
+            return {
+                "category": "wellness",
+                "category_label": "Wellness",
+                "total_questions": 5,
+                "current_question_number": 1,
+                "question": "When do anxiety or sleep issues affect you the most right now?",
+                "suggestions": [
+                    "At bedtime",
+                    "During work stress",
+                    "After difficult conversations",
+                    "Most mornings",
+                ],
+            }
+        if "run" in normalized or "marathon" in normalized or "half marathon" in normalized or "health" in normalized:
+            return {
+                "category": "health",
+                "category_label": "Health",
+                "total_questions": 5,
+                "current_question_number": 1,
+                "question": "What part of your current fitness routine feels most established right now?",
+                "suggestions": [
+                    "Weekly running",
+                    "Walking only",
+                    "Gym workouts",
+                    "No routine yet",
+                ],
+            }
+        return {
+            "category": "learning",
+            "category_label": "Learning",
+            "total_questions": 4,
+            "current_question_number": 1,
+            "question": "What are you already doing to move this goal forward?",
+            "suggestions": [
+                "I have a small routine",
+                "I am just starting",
+                "I have done this before",
+            ],
+        }
+
+    def fake_next_question(goal_text: str, category: str, conversation_history: list[dict], **kwargs):
+        latest_answer = conversation_history[-1]["answer"].lower()
+        if "stress" in latest_answer or "work" in latest_answer:
+            question = "What about work stress makes it hardest to stay calm or sleep well?"
+            suggestions = [
+                "My mind keeps racing",
+                "I stay up thinking about work",
+                "I feel tense after work",
+                "My schedule is unpredictable",
+            ]
+        else:
+            question = f"What feels like the next most important detail for your {category} goal?"
+            suggestions = [
+                "Time available",
+                "Main obstacle",
+                "Current routine",
+                "Support needed",
+            ]
+        return {
+            "current_question_number": len(conversation_history) + 1,
+            "question": question,
+            "suggestions": suggestions,
+        }
+
+    first_patcher = patch("gie.views.classify_and_generate_first_question", side_effect=fake_first_question)
+    next_patcher = patch("gie.views.generate_next_question", side_effect=fake_next_question)
+    test_case.mock_classify_and_generate_first_question = first_patcher.start()
+    test_case.mock_generate_next_question = next_patcher.start()
+    test_case.addCleanup(first_patcher.stop)
+    test_case.addCleanup(next_patcher.stop)
 
 
 def full_goal_commitment_context(*, user=None, goal_data=None, accepted_commitments=None, include_snapshot=True, **overrides):
@@ -237,6 +325,15 @@ class GIEIntakeUnderstandingServiceTests(TestCase):
             any(signal in analysis['goal_domain']['matched_signals'] for signal in ('meal', 'meal prep', 'protein'))
         )
 
+    def test_classifies_anxiety_and_sleep_goal_to_health_domain_for_wellness_routing(self):
+        analysis = GIEIntakeUnderstandingService.analyze_goal_text(
+            'I want to reduce my anxiety and sleep better'
+        )
+        self.assertEqual(analysis['goal_domain']['value'], 'health')
+        self.assertTrue(
+            any(signal in analysis['goal_domain']['matched_signals'] for signal in ('anxiety', 'sleep'))
+        )
+
     def test_extracts_cadence_and_horizon_signals(self):
         analysis = GIEIntakeUnderstandingService.analyze_goal_text(
             'I can train 4 days per week and complete this in 6 months.'
@@ -388,8 +485,47 @@ class GIEDynamicSchemaServiceTests(TestCase):
         self.assertIn("prep_time_per_day_minutes", required_keys)
         self.assertNotIn("weekly_training_days", required_keys)
 
+    def test_maps_anxiety_and_sleep_goal_to_wellness_not_running_endurance(self):
+        schema = GIEDynamicSchemaService.generate_schema(
+            goal_text="I want to reduce my anxiety and sleep better",
+            intake_analysis={"goal_domain": {"value": "health"}},
+        )
+        required_keys = {slot["key"] for slot in schema["required_slots"]}
+        self.assertIn("current_wellness_baseline", required_keys)
+        self.assertIn("primary_challenge", required_keys)
+        self.assertNotIn("running_experience", required_keys)
+
+    def test_running_goal_still_maps_to_running_endurance_schema(self):
+        schema = GIEDynamicSchemaService.generate_schema(
+            goal_text="I want to run a 5K",
+            intake_analysis={"goal_domain": {"value": "health"}},
+        )
+        required_keys = {slot["key"] for slot in schema["required_slots"]}
+        self.assertIn("running_experience", required_keys)
+        self.assertNotIn("current_wellness_baseline", required_keys)
+
 
 class GIEDialogueManagerServiceTests(TestCase):
+    def test_build_question_does_not_repeat_goal_title_prefix(self):
+        question = GIEDialogueManagerService.build_question(
+            slot_key="weekly_training_days",
+            goal_text="Run my first half marathon in 6 months",
+            goal_domain="health",
+        )
+
+        self.assertEqual(question, "How many days a week can you realistically train?")
+        self.assertNotIn('For your goal "', question)
+        self.assertNotIn("half marathon", question.lower())
+
+    def test_build_question_uses_domain_specific_wording_for_nutrition(self):
+        question = GIEDialogueManagerService.build_question(
+            slot_key="current_nutrition_baseline",
+            goal_text="Meal prep high-protein lunches 5 days a week.",
+            goal_domain="health",
+        )
+
+        self.assertEqual(question, "What does your eating routine look like today?")
+
     def test_build_initial_state_prefills_weekly_cadence_when_slot_exists(self):
         schema = GIEDynamicSchemaService.generate_schema(
             goal_text="I can train 4 days per week.",
@@ -423,6 +559,7 @@ class GIEDialogueManagerServiceTests(TestCase):
 
         self.assertIsNotNone(dialogue_state["next_prompt"])
         self.assertEqual(dialogue_state["next_prompt"]["target_slot_key"], first_required_key)
+        self.assertEqual(dialogue_state["next_prompt"]["question"], "What does your fitness base look like right now?")
 
     def test_nutrition_schema_prefills_meal_prep_days_from_weekly_cadence(self):
         schema = GIEDynamicSchemaService.generate_schema(
@@ -441,6 +578,23 @@ class GIEDialogueManagerServiceTests(TestCase):
         slot_by_key = {slot["slot_key"]: slot for slot in dialogue_state["slot_state"]}
         self.assertEqual(slot_by_key["meal_prep_days_per_week"]["status"], "filled")
         self.assertEqual(slot_by_key["meal_prep_days_per_week"]["value"], 5)
+
+    def test_build_initial_state_keeps_nutrition_prompt_domain_aware(self):
+        schema = GIEDynamicSchemaService.generate_schema(
+            goal_text="Meal prep high-protein lunches 5 days a week.",
+            intake_analysis={"goal_domain": {"value": "health"}},
+        )
+        dialogue_state = GIEDialogueManagerService.build_initial_state(
+            schema=schema,
+            intake_analysis={
+                "goal_text": "Meal prep high-protein lunches 5 days a week.",
+                "goal_domain": {"value": "health"},
+                "nlu": {},
+            },
+        )
+
+        self.assertEqual(dialogue_state["next_prompt"]["target_slot_key"], "current_nutrition_baseline")
+        self.assertEqual(dialogue_state["next_prompt"]["question"], "What does your eating routine look like today?")
 
 
 class GIETurnPipelineValueExtractionTests(TestCase):
@@ -483,6 +637,29 @@ class GIEUnifiedContextGoalCopyTests(TestCase):
 
         self.assertNotEqual(goal_details["why"], "I want to practice martial arts.")
         self.assertIn("because", goal_details["why"].lower())
+
+    def test_wellness_slot_profile_marks_complete_when_wellness_required_slots_are_filled(self):
+        session = GIESession.objects.create(
+            user=self.user,
+            goal_text="I want to reduce my anxiety and sleep better.",
+            goal_domain=GIESession.DOMAIN_HEALTH,
+            status=GIESession.STATUS_READY_TO_FINALIZE,
+            phase=GIESession.PHASE_REVIEW,
+        )
+        slot_states = [
+            GIESlotState(session=session, slot_key="current_wellness_baseline", required=True, status=GIESlotState.STATUS_FILLED, value="Stress spikes at night and sleep is fragmented."),
+            GIESlotState(session=session, slot_key="primary_challenge", required=True, status=GIESlotState.STATUS_FILLED, value="Anxiety before bed."),
+            GIESlotState(session=session, slot_key="daily_time_available", required=True, status=GIESlotState.STATUS_FILLED, value=20),
+            GIESlotState(session=session, slot_key="existing_practices", required=True, status=GIESlotState.STATUS_FILLED, value="Occasional breathing exercises."),
+            GIESlotState(session=session, slot_key="trigger_context", required=True, status=GIESlotState.STATUS_FILLED, value="Work stress in the evening."),
+            GIESlotState(session=session, slot_key="motivation_driver", required=True, status=GIESlotState.STATUS_FILLED, value="I want calmer evenings and better recovery."),
+        ]
+
+        context = GIEUnifiedContextService.build(session=session, slot_states=slot_states)
+
+        self.assertEqual(context["slot_profile"]["goal_domain"], "wellness")
+        self.assertEqual(context["slot_profile"]["completion_status"], "complete")
+        self.assertEqual(context["slot_profile"]["primary_challenge"], "Anxiety before bed.")
 
 
 class GIEPlanningBridgePayloadTests(TestCase):
@@ -1124,8 +1301,9 @@ class GIEHabitRankingServiceTests(TestCase):
             self.assertNotIn("None", rationale)
 
 
-class GIEGoalStartAPITests(APITestCase):
+class GIEGoalStartAPITests(SecureAPITestCase):
     def setUp(self):
+        start_mock_question_generation(self)
         user_model = get_user_model()
         self.user = user_model.objects.create_user(
             email='gie-api@test.com',
@@ -1145,13 +1323,35 @@ class GIEGoalStartAPITests(APITestCase):
         response = self.client.post(self.url, data=payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(sorted(response.data.keys()), sorted(["session", "schema", "slot_state", "next_prompt"]))
+        self.assertEqual(
+            sorted(response.data.keys()),
+            sorted(
+                [
+                    "session",
+                    "schema",
+                    "slot_state",
+                    "next_prompt",
+                    "category",
+                    "category_label",
+                    "total_questions",
+                    "current_question_number",
+                    "gie_question",
+                    "gie_suggestions",
+                ]
+            ),
+        )
 
         session = response.data["session"]
         self.assertEqual(session["goal_domain"], "health")
         self.assertEqual(session["status"], "active")
         self.assertEqual(session["phase"], "question_loop")
         self.assertIn("id", session)
+        self.assertEqual(response.data["category"], "health")
+        self.assertEqual(response.data["category_label"], "Health")
+        self.assertEqual(response.data["total_questions"], 5)
+        self.assertEqual(response.data["current_question_number"], 1)
+        self.assertTrue(response.data["gie_question"])
+        self.assertGreaterEqual(len(response.data["gie_suggestions"]), 3)
 
         schema = response.data["schema"]
         self.assertIn("required_slots", schema)
@@ -1170,10 +1370,59 @@ class GIEGoalStartAPITests(APITestCase):
 
         created_session = GIESession.objects.get(id=session["id"])
         self.assertEqual(created_session.user_id, self.user.id)
+        self.assertEqual(created_session.goal_domain, "health")
+        self.assertEqual(created_session.total_questions, 5)
+        self.assertEqual(created_session.current_question_number, 1)
         self.assertEqual(created_session.turns.count(), 1)
         self.assertEqual(created_session.turns.first().role, GIETurn.ROLE_ASSISTANT)
+        self.assertEqual(created_session.current_question, response.data["gie_question"])
+        self.assertEqual(created_session.turns.first().content, response.data["gie_question"])
         self.assertEqual(created_session.slot_definitions.count(), len(schema["required_slots"]) + len(schema["optional_slots"]))
         self.assertEqual(created_session.slot_states.count(), len(response.data["slot_state"]))
+
+    @patch(
+        "gie.views.classify_and_generate_first_question",
+        return_value={
+            "category": "health",
+            "category_label": "Health",
+            "total_questions": 8,
+            "current_question_number": 1,
+            "question": "What part of your training routine feels most stable right now?",
+            "suggestions": ["Walking", "Jogging", "Strength work"],
+        },
+    )
+    def test_start_clamps_total_questions_to_five(self, mocked_generation):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            self.url,
+            data={"goal_text": "I want to run my first half marathon in 6 months."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["total_questions"], 5)
+        created_session = GIESession.objects.get(id=response.data["session"]["id"])
+        self.assertEqual(created_session.total_questions, 5)
+        mocked_generation.assert_called_once()
+
+    @patch("gie.views.classify_and_generate_first_question", side_effect=Exception("llm unavailable"))
+    def test_start_llm_failure_keeps_static_flow_and_returns_null_additive_fields(self, mocked_generation):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            self.url,
+            data={"goal_text": "I want to reduce my anxiety and sleep better"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(response.data["category"])
+        self.assertIsNone(response.data["category_label"])
+        self.assertIsNone(response.data["total_questions"])
+        self.assertIsNone(response.data["current_question_number"])
+        self.assertIsNone(response.data["gie_question"])
+        self.assertIsNone(response.data["gie_suggestions"])
+        self.assertIsNotNone(response.data["next_prompt"])
+        mocked_generation.assert_called_once()
 
     def test_start_missing_goal_text_returns_locked_error_contract(self):
         self.client.force_authenticate(user=self.user)
@@ -1204,10 +1453,13 @@ class GIEGoalStartAPITests(APITestCase):
 
         next_prompt = response.data["next_prompt"]
         self.assertEqual(next_prompt["target_slot_key"], "current_nutrition_baseline")
+        self.assertEqual(next_prompt["question"], "What does your eating routine look like today?")
+        self.assertNotIn('For your goal "', next_prompt["question"])
 
 
-class GIETurnStateFinalizeAPITests(APITestCase):
+class GIETurnStateFinalizeAPITests(SecureAPITestCase):
     def setUp(self):
+        start_mock_question_generation(self)
         user_model = get_user_model()
         self.user = user_model.objects.create_user(email="gie-turn@test.com", password="Password@123")
         self.other_user = user_model.objects.create_user(email="gie-other@test.com", password="Password@123")
@@ -1277,6 +1529,124 @@ class GIETurnStateFinalizeAPITests(APITestCase):
 
         self.session.refresh_from_db()
         self.assertEqual(self.session.status, GIESession.STATUS_READY_TO_FINALIZE)
+        self.assertEqual(self.session.current_question_number, 2)
+
+    def test_turn_returns_additive_llm_fields_without_breaking_existing_payload(self):
+        turn_url = reverse("gie:goals-turn", kwargs={"session_id": self.session_id})
+        response = self.client.post(
+            turn_url,
+            data={"client_turn_id": "turn-llm-001", "answer": "Work stress is the main trigger"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            sorted(response.data.keys()),
+            sorted(
+                [
+                    "session_id",
+                    "turn",
+                    "slot_updates",
+                    "completeness",
+                    "next_prompt",
+                    "session_status",
+                    "current_question_number",
+                    "is_llm_complete",
+                    "gie_question",
+                    "gie_suggestions",
+                ]
+            ),
+        )
+        self.assertEqual(response.data["current_question_number"], 2)
+        self.assertFalse(response.data["is_llm_complete"])
+        self.assertIn("stress", response.data["gie_question"].lower())
+        self.assertGreaterEqual(len(response.data["gie_suggestions"]), 3)
+
+    @patch("gie.views.generate_next_question", side_effect=Exception("provider timeout"))
+    def test_turn_llm_failure_returns_null_additive_fields_and_preserves_static_prompt(self, mocked_generation):
+        turn_url = reverse("gie:goals-turn", kwargs={"session_id": self.session_id})
+        response = self.client.post(
+            turn_url,
+            data={"client_turn_id": "turn-llm-failure", "answer": "4"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["current_question_number"], 2)
+        self.assertFalse(response.data["is_llm_complete"])
+        self.assertIsNone(response.data["gie_question"])
+        self.assertIsNone(response.data["gie_suggestions"])
+        self.assertIn("next_prompt", response.data)
+        mocked_generation.assert_called_once()
+
+    @patch(
+        "gie.views.generate_next_question",
+        return_value={
+            "current_question_number": 2,
+            "question": "What part of your current fitness routine feels most established right now?",
+            "suggestions": ["Walking only", "Gym workouts"],
+        },
+    )
+    def test_turn_uses_slot_fallback_when_generated_question_repeats(self, mocked_generation):
+        GIESlotDefinition.objects.filter(session=self.session, key="daily_session_minutes").update(required=True)
+        GIESlotState.objects.filter(session=self.session, slot_key="daily_session_minutes").update(required=True)
+        self.session.required_slot_count = 2
+        self.session.filled_required_slot_count = 0
+        self.session.completeness_percent = 0
+        self.session.save(update_fields=["required_slot_count", "filled_required_slot_count", "completeness_percent", "updated_at"])
+
+        turn_url = reverse("gie:goals-turn", kwargs={"session_id": self.session_id})
+        response = self.client.post(
+            turn_url,
+            data={"client_turn_id": "turn-repeat-fallback", "answer": "4 days"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["session_status"], "active")
+        self.assertEqual(response.data["gie_question"], "How long can each session be?")
+        self.assertIsNone(response.data["gie_suggestions"])
+        mocked_generation.assert_called_once()
+
+    def test_turn_stops_when_question_limit_is_reached_even_if_slots_remain_missing(self):
+        GIESlotDefinition.objects.filter(session=self.session, key="daily_session_minutes").update(required=True)
+        GIESlotState.objects.filter(session=self.session, slot_key="daily_session_minutes").update(required=True)
+        self.session.required_slot_count = 2
+        self.session.filled_required_slot_count = 0
+        self.session.completeness_percent = 0
+        self.session.current_question_number = 5
+        self.session.total_questions = 5
+        self.session.current_question = "How many days per week can you train?"
+        self.session.save(
+            update_fields=[
+                "required_slot_count",
+                "filled_required_slot_count",
+                "completeness_percent",
+                "current_question_number",
+                "total_questions",
+                "current_question",
+                "updated_at",
+            ]
+        )
+
+        turn_url = reverse("gie:goals-turn", kwargs={"session_id": self.session_id})
+        response = self.client.post(
+            turn_url,
+            data={"client_turn_id": "turn-limit-stop", "answer": "4"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["session_status"], "active")
+        self.assertEqual(response.data["current_question_number"], 5)
+        self.assertTrue(response.data["is_llm_complete"])
+        self.assertIsNone(response.data["next_prompt"])
+        self.assertIsNone(response.data["gie_question"])
+        self.assertIsNone(response.data["gie_suggestions"])
+
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.current_question_number, 5)
+        self.assertIsNone(self.session.current_question)
 
     @patch("gie.services.planning.GIEUnifiedContextService.build")
     def test_turn_ready_to_finalize_autofill_matches_unified_context_goal_details(self, mocked_unified_context):
@@ -1834,7 +2204,10 @@ class GIETurnStateFinalizeAPITests(APITestCase):
         self.assertEqual(response.data["code"], "session_not_found")
 
 
-class GIELifecycleContractIntegrationTests(APITestCase):
+class GIELifecycleContractIntegrationTests(SecureAPITestCase):
+    def setUp(self):
+        start_mock_question_generation(self)
+
     @patch("gie.services.planning.GIEPlanningService.run_finalize_bridge")
     def test_full_lifecycle_start_turn_state_finalize_plan_adapt(self, mocked_bridge):
         user_model = get_user_model()
@@ -1852,7 +2225,23 @@ class GIELifecycleContractIntegrationTests(APITestCase):
             format="json",
         )
         self.assertEqual(start_response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(sorted(start_response.data.keys()), sorted(["session", "schema", "slot_state", "next_prompt"]))
+        self.assertEqual(
+            sorted(start_response.data.keys()),
+            sorted(
+                [
+                    "session",
+                    "schema",
+                    "slot_state",
+                    "next_prompt",
+                    "category",
+                    "category_label",
+                    "total_questions",
+                    "current_question_number",
+                    "gie_question",
+                    "gie_suggestions",
+                ]
+            ),
+        )
         session_id = start_response.data["session"]["id"]
         session = GIESession.objects.get(id=session_id)
 
@@ -1894,7 +2283,23 @@ class GIELifecycleContractIntegrationTests(APITestCase):
             format="json",
         )
         self.assertEqual(turn_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(sorted(turn_response.data.keys()), sorted(["session_id", "turn", "slot_updates", "completeness", "next_prompt", "session_status"]))
+        self.assertEqual(
+            sorted(turn_response.data.keys()),
+            sorted(
+                [
+                    "session_id",
+                    "turn",
+                    "slot_updates",
+                    "completeness",
+                    "next_prompt",
+                    "session_status",
+                    "current_question_number",
+                    "is_llm_complete",
+                    "gie_question",
+                    "gie_suggestions",
+                ]
+            ),
+        )
         self.assertEqual(turn_response.data["session_status"], "ready_to_finalize")
         populate_running_slot_profile(session, timeline_days=180)
 
@@ -2028,8 +2433,9 @@ class GIELifecycleContractIntegrationTests(APITestCase):
         self.assertEqual(commitment_by_id["c2"]["decision"], "accepted")
 
 
-class GIETimelineReframeFlowAPITests(APITestCase):
+class GIETimelineReframeFlowAPITests(SecureAPITestCase):
     def setUp(self):
+        start_mock_question_generation(self)
         user_model = get_user_model()
         self.user = user_model.objects.create_user(email="gie-reframe@test.com", password="Password@123")
         self.client.force_authenticate(user=self.user)
@@ -2127,8 +2533,9 @@ class GIETimelineReframeFlowAPITests(APITestCase):
         )
 
 
-class GIEAdaptationAPITests(APITestCase):
+class GIEAdaptationAPITests(SecureAPITestCase):
     def setUp(self):
+        start_mock_question_generation(self)
         user_model = get_user_model()
         self.user = user_model.objects.create_user(email="gie-adapt@test.com", password="Password@123")
         self.other_user = user_model.objects.create_user(email="gie-adapt-other@test.com", password="Password@123")
@@ -2215,8 +2622,9 @@ class GIEAdaptationAPITests(APITestCase):
         )
 
 
-class GIEObservabilityAndRolloutTests(APITestCase):
+class GIEObservabilityAndRolloutTests(SecureAPITestCase):
     def setUp(self):
+        start_mock_question_generation(self)
         user_model = get_user_model()
         self.user = user_model.objects.create_user(email="gie-observability@test.com", password="Password@123")
         self.client.force_authenticate(user=self.user)
@@ -2379,7 +2787,7 @@ class GIEObservabilityAndRolloutTests(APITestCase):
         self.assertEqual(analytics.last_fallback_reason_code, "gie_service_degraded")
 
 
-class GIEGoalCategoryNormalizationTests(APITestCase):
+class GIEGoalCategoryNormalizationTests(SecureAPITestCase):
     def test_autofill_payload_sparse_goals_produces_diverse_non_echo_title_and_why(self):
         user = get_user_model().objects.create_user(
             email="gie-autofill-copy@test.com",

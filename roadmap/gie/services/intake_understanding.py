@@ -18,6 +18,9 @@ class GIEIntakeUnderstandingService:
             'health', 'fitness', 'workout', 'exercise', 'run', 'running',
             'marathon', 'sleep', 'diet', 'weight', 'gym', 'injury',
             'meal', 'meals', 'meal prep', 'nutrition', 'protein',
+            'anxiety', 'stress', 'mental', 'mindfulness', 'meditation',
+            'burnout', 'overwhelm', 'calm', 'mood', 'emotional', 'nervous',
+            'clarity', 'peace',
         ),
         'financial': (
             'financial', 'finance', 'money', 'save', 'savings', 'invest',

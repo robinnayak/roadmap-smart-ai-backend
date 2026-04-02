@@ -46,6 +46,7 @@ class GIETurnPipelineService:
         slot_states: dict[str, GIESlotState],
         *,
         goal_text: str | None = None,
+        goal_domain: str | None = None,
     ) -> dict | None:
         for definition in slot_definitions:
             state = slot_states.get(definition.key)
@@ -58,6 +59,7 @@ class GIETurnPipelineService:
                 slot_label=definition.label,
                 slot_description=definition.description,
                 goal_text=goal_text,
+                goal_domain=goal_domain,
             )
             return {"question": question, "target_slot_key": definition.key}
         return None
@@ -68,11 +70,13 @@ class GIETurnPipelineService:
         slot_states: dict[str, GIESlotState],
         *,
         goal_text: str | None = None,
+        goal_domain: str | None = None,
     ) -> dict | None:
         missing_required_prompt = GIETurnPipelineService.select_next_prompt(
             slot_definitions,
             slot_states,
             goal_text=goal_text,
+            goal_domain=goal_domain,
         )
         if missing_required_prompt:
             return missing_required_prompt
