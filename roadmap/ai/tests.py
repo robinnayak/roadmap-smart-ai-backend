@@ -1175,6 +1175,45 @@ class HierarchyPartialFailureTests(TestCase):
         self.assertEqual(len(tasks), 3)
         self.assertEqual(tasks[0]["item_type"], "physical")
         self.assertEqual(tasks[0]["sequence_position"], 1)
+        self.assertIn("baseline training session", tasks[0]["title"].lower())
+        self.assertNotIn("write a 15-minute session plan", tasks[0]["title"].lower())
+
+    @patch("ai.services.GoalHierarchyGenerator.create_routed_provider")
+    @patch("ai.services.GoalHierarchyGenerator.get_hierarchy_model", return_value="test-hierarchy-model")
+    def test_fallback_tasks_vary_by_week_to_avoid_repetitive_output(self, _mock_model, mock_provider_factory):
+        mock_provider = MagicMock()
+        mock_provider.model = "test-hierarchy-model"
+        mock_provider.generate_response.side_effect = RuntimeError("All LLM routes failed")
+        mock_provider_factory.return_value = mock_provider
+        generator = GoalHierarchyGenerator()
+
+        week_one = generator._generate_tasks(
+            subgoal_data={"title": "Week 1: Foundation & Setup"},
+            milestone_data={"title": "Month 1: Establish Base Endurance"},
+            goal_data={
+                "title": "Run my first 5K in under 30 minutes",
+                "primary_category": "fitness",
+                "resolved_category": "fitness",
+            },
+        )
+        week_two = generator._generate_tasks(
+            subgoal_data={"title": "Week 2: Core Learning"},
+            milestone_data={"title": "Month 1: Establish Base Endurance"},
+            goal_data={
+                "title": "Run my first 5K in under 30 minutes",
+                "primary_category": "fitness",
+                "resolved_category": "fitness",
+            },
+        )
+
+        self.assertEqual(week_one["status"], "success")
+        self.assertEqual(week_two["status"], "success")
+        self.assertNotEqual(
+            week_one["data"]["tasks"][0]["title"],
+            week_two["data"]["tasks"][0]["title"],
+        )
+        self.assertIn("baseline", week_one["data"]["tasks"][0]["title"].lower())
+        self.assertIn("technique-focused", week_two["data"]["tasks"][0]["title"].lower())
 
     def test_calculate_months_is_hard_capped_to_two_months(self):
         months = GoalHierarchyGenerator._calculate_months(
