@@ -13,6 +13,7 @@ import logging
 from typing import Any
 from datetime import datetime
 import math
+import re
 from ai.models import AIProcessingJob
 
 
@@ -567,52 +568,298 @@ class GoalHierarchyGenerator(BaseAIService):
             or "productivity"
         )
         item_type = FALLBACK_TASK_ITEM_TYPE_BY_CATEGORY.get(category, "task")
+        week_number = self._resolve_week_number(subgoal_data)
+        templates = self._build_category_fallback_task_templates(
+            category=category,
+            item_type=item_type,
+            week_number=week_number,
+            subgoal_title=subgoal_title,
+            milestone_title=milestone_title,
+            goal_title=goal_title,
+        )
 
         return [
             {
-                "title": f"Write a 15-minute session plan for {subgoal_title}",
+                **template,
+                "item_type": template.get("item_type") or item_type,
+                "sequence_position": index,
+            }
+            for index, template in enumerate(templates, 1)
+        ]
+
+    @staticmethod
+    def _resolve_week_number(subgoal_data: dict) -> int:
+        explicit = subgoal_data.get("week_number")
+        if isinstance(explicit, int) and explicit > 0:
+            return explicit
+
+        display_order = subgoal_data.get("display_order")
+        if isinstance(display_order, int) and display_order >= 0:
+            return display_order + 1
+
+        title = str(subgoal_data.get("title") or "")
+        match = re.search(r"week\s+(\d+)", title, flags=re.IGNORECASE)
+        if match:
+            return max(1, int(match.group(1)))
+        return 1
+
+    def _build_category_fallback_task_templates(
+        self,
+        *,
+        category: str,
+        item_type: str,
+        week_number: int,
+        subgoal_title: str,
+        milestone_title: str,
+        goal_title: str,
+    ) -> list[dict[str, Any]]:
+        normalized_category = str(category or "").strip().lower()
+        if normalized_category in {"fitness", "health", "wellness", "nutrition"}:
+            return self._build_health_fallback_tasks(
+                category=normalized_category,
+                item_type=item_type,
+                week_number=week_number,
+                subgoal_title=subgoal_title,
+                milestone_title=milestone_title,
+                goal_title=goal_title,
+            )
+        return self._build_general_fallback_tasks(
+            item_type=item_type,
+            week_number=week_number,
+            subgoal_title=subgoal_title,
+            milestone_title=milestone_title,
+            goal_title=goal_title,
+        )
+
+    @staticmethod
+    def _build_health_fallback_tasks(
+        *,
+        category: str,
+        item_type: str,
+        week_number: int,
+        subgoal_title: str,
+        milestone_title: str,
+        goal_title: str,
+    ) -> list[dict[str, Any]]:
+        if category in {"fitness", "health"}:
+            focus_by_week = {
+                1: {
+                    "title": f"Complete one baseline training session for {subgoal_title}",
+                    "description": (
+                        f"Do one easy 20-30 minute session tied to {subgoal_title}. "
+                        f"Record pace, breathing, and energy so Month work for {milestone_title} starts from a real baseline."
+                    ),
+                    "duration_minutes": 30,
+                    "difficulty_level": 2,
+                    "rationale": f"A baseline session makes progress on {goal_title} measurable instead of guesswork.",
+                },
+                2: {
+                    "title": f"Run one technique-focused session for {subgoal_title}",
+                    "description": (
+                        f"Complete one controlled session that improves form or pacing for {subgoal_title}. "
+                        "Keep the effort sustainable and note one technique cue to repeat next time."
+                    ),
+                    "duration_minutes": 35,
+                    "difficulty_level": 3,
+                    "rationale": f"Week 2 should turn the initial baseline from {goal_title} into repeatable execution.",
+                },
+                3: {
+                    "title": f"Complete one progression workout for {subgoal_title}",
+                    "description": (
+                        f"Repeat a core workout from {subgoal_title} and improve one metric such as distance, pace, or consistency. "
+                        "Stop while form still feels controlled."
+                    ),
+                    "duration_minutes": 40,
+                    "difficulty_level": 3,
+                    "rationale": f"Progressive overload keeps {goal_title} moving without spiking injury risk.",
+                },
+            }
+            primary = focus_by_week.get(week_number, {
+                "title": f"Complete one benchmark session for {subgoal_title}",
                 "description": (
-                    f"Open your notes app or notebook and list the exact steps for {subgoal_title}. "
-                    f"Include one concrete action you can complete today for {milestone_title}."
+                    f"Run one benchmark session linked to {subgoal_title} and compare the result against earlier weeks in {milestone_title}. "
+                    "Write down what improved and what still feels hard."
+                ),
+                "duration_minutes": 35,
+                "difficulty_level": 3,
+                "rationale": f"A benchmark session closes the loop on {goal_title} and sets up the next block.",
+            })
+
+            return [
+                {
+                    **primary,
+                    "item_type": item_type,
+                    "frequency": "once",
+                    "is_prerequisite": True,
+                    "trigger_after_days": 0,
+                },
+                {
+                    "title": f"Schedule the next 2 training blocks for {subgoal_title}",
+                    "description": (
+                        f"Pick two exact time slots for the next sessions in {subgoal_title}. "
+                        f"Put them on your calendar and make sure they fit the broader target for {milestone_title}."
+                    ),
+                    "item_type": "task",
+                    "duration_minutes": 15,
+                    "frequency": "once",
+                    "difficulty_level": 1,
+                    "is_prerequisite": False,
+                    "trigger_after_days": 0,
+                    "rationale": f"Scheduling the next two blocks protects momentum on {goal_title} when the week gets busy.",
+                },
+                {
+                    "title": f"Log recovery notes after the main session for {subgoal_title}",
+                    "description": (
+                        "Write down how the session felt, what body signals showed up, and the next small adjustment to make. "
+                        "Keep the note short enough to reuse before the next workout."
+                    ),
+                    "item_type": "habit" if item_type == "physical" else item_type,
+                    "duration_minutes": 10,
+                    "frequency": "once",
+                    "difficulty_level": 1,
+                    "is_prerequisite": False,
+                    "trigger_after_days": 0,
+                    "rationale": "A quick review makes the next session easier to start and safer to progress.",
+                },
+            ]
+
+        wellness_focus_by_week = {
+            1: "Build a realistic baseline routine",
+            2: "Repeat one calming practice consistently",
+            3: "Strengthen one recovery habit under stress",
+        }
+        wellness_focus = wellness_focus_by_week.get(week_number, "Review what actually reduced stress")
+        return [
+            {
+                "title": f"Practice one 10-minute reset for {subgoal_title}",
+                "description": (
+                    f"Choose one short reset practice that supports {wellness_focus.lower()} for {subgoal_title}. "
+                    "Do it once today and note the best time of day to repeat it."
                 ),
                 "item_type": item_type,
-                "duration_minutes": 15,
-                "frequency": "once",
-                "difficulty_level": 1,
-                "sequence_position": 1,
-                "is_prerequisite": True,
-                "trigger_after_days": 0,
-                "rationale": f"A clear plan keeps progress moving on {goal_title} even when AI task generation is unavailable.",
-            },
-            {
-                "title": f"Complete one focused 30-minute work session for {subgoal_title}",
-                "description": (
-                    f"Set a 30-minute timer and do the single highest-value action for {subgoal_title}. "
-                    "Work without switching tasks until the timer ends."
-                ),
-                "item_type": item_type,
-                "duration_minutes": 30,
-                "frequency": "once",
-                "difficulty_level": 2,
-                "sequence_position": 2,
-                "is_prerequisite": False,
-                "trigger_after_days": 0,
-                "rationale": "A short focused session converts planning into visible execution.",
-            },
-            {
-                "title": f"Log results and choose the next step for {subgoal_title}",
-                "description": (
-                    "Write down what you completed, what blocked you, and the next action to continue tomorrow. "
-                    "Keep the note brief and specific."
-                ),
-                "item_type": "cognitive" if item_type == "task" else item_type,
                 "duration_minutes": 10,
                 "frequency": "once",
                 "difficulty_level": 1,
-                "sequence_position": 3,
+                "is_prerequisite": True,
+                "trigger_after_days": 0,
+                "rationale": f"A short repeatable reset is more likely to stick while building {goal_title}.",
+            },
+            {
+                "title": f"Prepare one environment cue for {subgoal_title}",
+                "description": (
+                    f"Set up one visible cue that makes {subgoal_title} easier to start, such as a reminder, journal, water bottle, or wind-down trigger. "
+                    f"Place it where you will see it during {milestone_title}."
+                ),
+                "item_type": "ritual" if category == "wellness" else item_type,
+                "duration_minutes": 5,
+                "frequency": "once",
+                "difficulty_level": 1,
                 "is_prerequisite": False,
                 "trigger_after_days": 0,
-                "rationale": "A short review loop protects momentum and makes the next session easier to start.",
+                "rationale": "Environment cues reduce startup friction when energy is low.",
+            },
+            {
+                "title": f"Write one short reflection for {subgoal_title}",
+                "description": (
+                    "Note what improved your energy or calm today, what triggered stress, and the one small change to repeat tomorrow. "
+                    "Use 3-5 sentences only."
+                ),
+                "item_type": "cognitive",
+                "duration_minutes": 10,
+                "frequency": "once",
+                "difficulty_level": 1,
+                "is_prerequisite": False,
+                "trigger_after_days": 0,
+                "rationale": f"A short reflection turns {goal_title} into a learnable routine instead of a vague intention.",
+            },
+        ]
+
+    @staticmethod
+    def _build_general_fallback_tasks(
+        *,
+        item_type: str,
+        week_number: int,
+        subgoal_title: str,
+        milestone_title: str,
+        goal_title: str,
+    ) -> list[dict[str, Any]]:
+        primary_by_week = {
+            1: {
+                "title": f"Define the first concrete deliverable for {subgoal_title}",
+                "description": (
+                    f"Write down the exact output that proves {subgoal_title} has started. "
+                    f"Keep the deliverable small enough to finish inside {milestone_title}."
+                ),
+                "duration_minutes": 20,
+                "difficulty_level": 1,
+                "rationale": f"Week 1 needs a visible starting point so {goal_title} does not stay abstract.",
+            },
+            2: {
+                "title": f"Produce one focused work output for {subgoal_title}",
+                "description": (
+                    f"Spend one uninterrupted block creating a real output for {subgoal_title}. "
+                    "Finish one meaningful unit before switching context."
+                ),
+                "duration_minutes": 35,
+                "difficulty_level": 2,
+                "rationale": f"Week 2 should convert planning for {goal_title} into visible work.",
+            },
+            3: {
+                "title": f"Ship one progress checkpoint for {subgoal_title}",
+                "description": (
+                    f"Complete one concrete checkpoint for {subgoal_title} and save it in a form you can review later. "
+                    "Do not expand scope mid-session."
+                ),
+                "duration_minutes": 40,
+                "difficulty_level": 3,
+                "rationale": f"A checkpoint makes momentum on {goal_title} reviewable and easier to continue.",
+            },
+        }
+        primary = primary_by_week.get(week_number, {
+            "title": f"Review and tighten the next step for {subgoal_title}",
+            "description": (
+                f"Check what is complete in {subgoal_title}, remove one low-value action, and define the highest-value next step for the next block in {milestone_title}."
+            ),
+            "duration_minutes": 20,
+            "difficulty_level": 1,
+            "rationale": f"A review week keeps {goal_title} from drifting into busywork.",
+        })
+
+        return [
+            {
+                **primary,
+                "item_type": item_type,
+                "frequency": "once",
+                "is_prerequisite": True,
+                "trigger_after_days": 0,
+            },
+            {
+                "title": f"Complete one 30-minute deep-work block for {subgoal_title}",
+                "description": (
+                    f"Set a 30-minute timer and work only on the highest-value action for {subgoal_title}. "
+                    "Stop when the timer ends and capture what remains."
+                ),
+                "item_type": "cognitive" if item_type == "task" else item_type,
+                "duration_minutes": 30,
+                "frequency": "once",
+                "difficulty_level": 2,
+                "is_prerequisite": False,
+                "trigger_after_days": 0,
+                "rationale": "A short deep-work block creates forward motion even when generation is degraded.",
+            },
+            {
+                "title": f"Capture blockers and the next move for {subgoal_title}",
+                "description": (
+                    "Write down what moved forward, what blocked you, and the next action to continue. "
+                    "Keep the note brief enough to review before your next session."
+                ),
+                "item_type": "cognitive",
+                "duration_minutes": 10,
+                "frequency": "once",
+                "difficulty_level": 1,
+                "is_prerequisite": False,
+                "trigger_after_days": 0,
+                "rationale": f"A short review loop helps {goal_title} survive interruptions without losing clarity.",
             },
         ]
 
