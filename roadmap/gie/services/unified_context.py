@@ -12,6 +12,7 @@ from gie.services.dynamic_schema import (
     WAVE4_DOMAIN_NUTRITION,
     WAVE4_DOMAIN_RUNNING_ENDURANCE,
     WAVE4_DOMAIN_SKILL_ACQUISITION,
+    WAVE4_DOMAIN_WELLNESS,
     map_session_domain_to_wave4_domain,
 )
 
@@ -93,11 +94,17 @@ class GIEUnifiedContextService:
             "domain_minimum_weeks": domain_minimum_weeks,
         }
 
+        task_generation_context = cls._build_task_generation_context(
+            slot_profile=slot_profile,
+            wave_domain=wave_domain,
+        )
+
         return {
             "raw_goal": session.goal_text.strip(),
             "slot_profile": slot_profile,
             "goal_details": goal_details,
             "timeline": timeline,
+            "task_generation_context": task_generation_context,
         }
 
     @staticmethod
@@ -130,6 +137,15 @@ class GIEUnifiedContextService:
                 "protein_goal_grams_per_day",
                 "dietary_constraints",
                 "prep_time_per_day_minutes",
+                "motivation_driver",
+            ]
+        if wave_domain == WAVE4_DOMAIN_WELLNESS:
+            return [
+                "current_wellness_baseline",
+                "primary_challenge",
+                "daily_time_available",
+                "existing_practices",
+                "trigger_context",
                 "motivation_driver",
             ]
         if wave_domain == WAVE4_DOMAIN_SKILL_ACQUISITION:
@@ -286,6 +302,68 @@ class GIEUnifiedContextService:
             goal_milestone_event = GIEUnifiedContextService._as_text(slot_profile.get("goal_milestone_event"), fallback="a meaningful milestone")
             return f"Deliver {goal_milestone_event} by {target_date}."
         return f"Reach target role by {target_date}."
+
+    @classmethod
+    def _build_task_generation_context(cls, *, slot_profile: dict, wave_domain: str) -> dict:
+        return {
+            "available_daily_minutes": cls._resolve_available_daily_minutes(slot_profile),
+            "user_strengths": cls._resolve_user_strengths(slot_profile=slot_profile, wave_domain=wave_domain),
+            "user_blockers": cls._resolve_user_blockers(slot_profile=slot_profile, wave_domain=wave_domain),
+            "motivation_style": cls._resolve_motivation_style(slot_profile=slot_profile),
+        }
+
+    @classmethod
+    def _resolve_available_daily_minutes(cls, slot_profile: dict) -> int:
+        for key in ("daily_session_minutes", "daily_practice_minutes", "prep_time_per_day_minutes"):
+            value = slot_profile.get(key)
+            if isinstance(value, (int, float)):
+                return max(0, int(round(float(value))))
+            if isinstance(value, str) and value.strip().isdigit():
+                return max(0, int(value.strip()))
+        return 60
+
+    @classmethod
+    def _resolve_user_strengths(cls, *, slot_profile: dict, wave_domain: str) -> list[str]:
+        strengths: list[str] = []
+        for key in ("available_opportunities", "running_experience", "current_skill_level", "learning_method"):
+            value = cls._as_text(slot_profile.get(key), fallback="")
+            if value:
+                strengths.append(value)
+
+        if wave_domain == WAVE4_DOMAIN_FINANCE and cls._as_text(slot_profile.get("current_savings"), fallback=""):
+            strengths.append(f"Current savings: {cls._as_text(slot_profile.get('current_savings'), fallback='0')}")
+
+        if wave_domain == WAVE4_DOMAIN_CAREER and cls._as_text(slot_profile.get("current_role"), fallback=""):
+            strengths.append(f"Current role: {cls._as_text(slot_profile.get('current_role'), fallback='')}")
+
+        return strengths
+
+    @classmethod
+    def _resolve_user_blockers(cls, *, slot_profile: dict, wave_domain: str) -> list[str]:
+        blockers: list[str] = []
+        for key in ("injury_constraints", "dietary_constraints", "manager_feedback_on_gaps"):
+            value = cls._as_text(slot_profile.get(key), fallback="")
+            if value:
+                blockers.append(value)
+
+        if wave_domain == WAVE4_DOMAIN_FINANCE and cls._as_text(slot_profile.get("existing_debt"), fallback=""):
+            blockers.append(f"Existing debt: {cls._as_text(slot_profile.get('existing_debt'), fallback='0')}")
+
+        return blockers
+
+    @classmethod
+    def _resolve_motivation_style(cls, *, slot_profile: dict) -> str:
+        motivation_driver = cls._as_text(
+            slot_profile.get("motivation_driver") or slot_profile.get("savings_purpose"),
+            fallback="",
+        ).lower()
+        if not motivation_driver:
+            return "intrinsic"
+        if any(token in motivation_driver for token in ("deadline", "date", "save", "amount", "race", "event")):
+            return "outcome-driven"
+        if any(token in motivation_driver for token in ("accountability", "mentor", "manager", "coach")):
+            return "accountability-driven"
+        return "intrinsic"
 
     @staticmethod
     def _as_text(value, *, fallback: str) -> str:

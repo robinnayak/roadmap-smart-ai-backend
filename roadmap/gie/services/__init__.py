@@ -1,28 +1,30 @@
-from gie.services.intake_understanding import GIEIntakeUnderstandingService
-from gie.services.dynamic_schema import GIEDynamicSchemaService
-from gie.services.dialogue_manager import GIEDialogueManagerService
-from gie.services.turn_pipeline import GIETurnPipelineService, map_goal_domain_to_primary_category
-from gie.services.planning import GIEPlanningService
-from gie.services.adaptation import GIEAdaptationService
-from gie.services.timeline_validation import GIETimelineValidationService
-from gie.services.timeline_feasibility import GIETimelineFeasibilityService
-from gie.services.unified_context import GIEUnifiedContextService
-from gie.services.habit_ranking import GIEHabitRankingService
-from gie.services.observability import GIEObservabilityService
-from gie.services.rollout import GIERolloutPolicyService
+from importlib import import_module
 
-__all__ = [
-    'GIEIntakeUnderstandingService',
-    'GIEDynamicSchemaService',
-    'GIEDialogueManagerService',
-    'GIETurnPipelineService',
-    'GIEPlanningService',
-    'GIEAdaptationService',
-    'GIETimelineValidationService',
-    'GIETimelineFeasibilityService',
-    'GIEUnifiedContextService',
-    'GIEHabitRankingService',
-    'GIEObservabilityService',
-    'GIERolloutPolicyService',
-    'map_goal_domain_to_primary_category',
-]
+
+_EXPORT_MAP = {
+    "GIEIntakeUnderstandingService": (".intake_understanding", "GIEIntakeUnderstandingService"),
+    "GIEDynamicSchemaService": (".dynamic_schema", "GIEDynamicSchemaService"),
+    "GIEDialogueManagerService": (".dialogue_manager", "GIEDialogueManagerService"),
+    "GIETurnPipelineService": (".turn_pipeline", "GIETurnPipelineService"),
+    "GIEPlanningService": (".planning", "GIEPlanningService"),
+    "GIEAdaptationService": (".adaptation", "GIEAdaptationService"),
+    "GIETimelineValidationService": (".timeline_validation", "GIETimelineValidationService"),
+    "GIETimelineFeasibilityService": (".timeline_feasibility", "GIETimelineFeasibilityService"),
+    "GIEUnifiedContextService": (".unified_context", "GIEUnifiedContextService"),
+    "GIEHabitRankingService": (".habit_ranking", "GIEHabitRankingService"),
+    "GIEObservabilityService": (".observability", "GIEObservabilityService"),
+    "GIERolloutPolicyService": (".rollout", "GIERolloutPolicyService"),
+    "map_goal_domain_to_primary_category": (".turn_pipeline", "map_goal_domain_to_primary_category"),
+}
+
+__all__ = list(_EXPORT_MAP.keys())
+
+
+def __getattr__(name: str):
+    if name not in _EXPORT_MAP:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = _EXPORT_MAP[name]
+    module = import_module(module_name, package=__name__)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value

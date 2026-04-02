@@ -16,6 +16,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from authentication.models import CustomUser, Profile
 from ai.services.DailyRoutineGenerator import DailyRoutineGenerator
 from events.models import Event
+from gie.models import GIEPlanSnapshot, GIESession
 from goal.models import Goal, Milestone, SubGoal, Task
 from journal.models import JournalEntry
 from routine.models import (
@@ -37,6 +38,7 @@ from routine.models import (
 from routine.services import (
     _fetch_day_event_constraints,
     _get_event_occurrences_for_day,
+    _load_rie_signal_for_goal,
     _resolve_and_persist_day_mode,
     _select_balanced_goal_tasks,
     build_adaptive_roadmap_adjustment,
@@ -1381,6 +1383,90 @@ class DailyTaskGenerationTests(APITestCase):
         self.assertEqual([task.id for task in selected], [prerequisite.id, non_prerequisite.id])
         self.assertEqual(goal.id, selected[0].subgoal.milestone.goal_id)
 
+    def test_routine_generation_stays_stable_without_rie_signal(self):
+        target_date = timezone.localdate()
+        goal, subgoal = self._create_goal_with_subgoal("No Signal Goal", priority="high")
+        longer_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Longer default-first task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=90,
+            display_order=1,
+        )
+        shorter_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Shorter follow-up task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=20,
+            display_order=2,
+        )
+
+        self.assertIsNone(_load_rie_signal_for_goal(goal.id))
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+
+        self.assertTrue(created)
+        ordered_ids = list(
+            task_list.tasks.filter(item_type="goal_task").order_by("display_order").values_list("goal_task_id", flat=True)
+        )
+        self.assertEqual(ordered_ids[:2], [longer_task.id, shorter_task.id])
+
+    def test_routine_generation_loads_and_applies_rie_signal(self):
+        target_date = timezone.localdate()
+        goal, subgoal = self._create_goal_with_subgoal("Signal Guided Goal", priority="high")
+        longer_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Longer task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=90,
+            display_order=1,
+        )
+        shorter_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Shorter task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=20,
+            display_order=2,
+        )
+
+        session = GIESession.objects.create(
+            user=self.user,
+            goal_text=goal.title,
+            goal_domain=GIESession.DOMAIN_CAREER,
+            status=GIESession.STATUS_FINALIZED,
+            phase=GIESession.PHASE_FINALIZED,
+        )
+        expected_signal = {
+            "goal_priority": "high",
+            "confirmed_habits": [],
+            "suggested_sequence_order": [],
+            "estimated_daily_capacity_minutes": 30,
+        }
+        GIEPlanSnapshot.objects.create(
+            session=session,
+            status=GIEPlanSnapshot.STATUS_FINALIZED,
+            goal_summary=goal.description,
+            milestones=[],
+            weekly_routine_guidance=[],
+            rie_signal=expected_signal,
+        )
+
+        loaded_signal = _load_rie_signal_for_goal(goal.id)
+
+        self.assertEqual(loaded_signal, expected_signal)
+
+        task_list, created = get_or_create_today_task_list(self.user, target_date)
+
+        self.assertTrue(created)
+        ordered_ids = list(
+            task_list.tasks.filter(item_type="goal_task").order_by("display_order").values_list("goal_task_id", flat=True)
+        )
+        self.assertEqual(ordered_ids[:2], [shorter_task.id, longer_task.id])
+
     def test_selector_applies_deadline_urgency_across_goal_buckets(self):
         today = timezone.localdate()
         near_goal, near_subgoal = self._create_goal_with_subgoal(
@@ -1439,6 +1525,95 @@ class DailyTaskGenerationTests(APITestCase):
         selected = _select_balanced_goal_tasks(user=self.user, limit=2)
 
         self.assertEqual([task.id for task in selected], [easier_task.id, hard_task.id])
+
+    def test_selector_deprioritizes_recently_skipped_tasks_when_alternatives_exist(self):
+        _, subgoal = self._create_goal_with_subgoal("Adaptive Recovery Goal", priority="high")
+        repeated_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Large skipped task",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=90,
+            display_order=1,
+            difficulty_level=4,
+        )
+        alternative_task = Task.objects.create(
+            subgoal=subgoal,
+            title="Smaller next step",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=25,
+            display_order=2,
+            difficulty_level=1,
+        )
+
+        previous_date = timezone.localdate() - timedelta(days=1)
+        previous_list = DailyTaskList.objects.create(user=self.user, date=previous_date)
+        skipped_item = DailyTaskItem.objects.create(
+            task_list=previous_list,
+            item_type="goal_task",
+            goal_task=repeated_task,
+            related_goal=repeated_task.subgoal.milestone.goal,
+            title=repeated_task.title,
+            description="Previously surfaced and skipped",
+            priority="high",
+            estimated_minutes=90,
+            display_order=0,
+        )
+        skipped_item.mark_skipped(reason="Too difficult and I got stuck")
+
+        selected = _select_balanced_goal_tasks(user=self.user, limit=2)
+
+        self.assertEqual([task.id for task in selected], [alternative_task.id, repeated_task.id])
+
+    def test_selector_promotes_subgoal_momentum_after_recent_completion(self):
+        _, momentum_subgoal = self._create_goal_with_subgoal("Momentum Goal", priority="high")
+        _, competing_subgoal = self._create_goal_with_subgoal("Competing Goal", priority="high")
+        finished_step = Task.objects.create(
+            subgoal=momentum_subgoal,
+            title="Completed setup step",
+            status="completed",
+            priority="high",
+            estimated_duration_minutes=20,
+            display_order=1,
+        )
+        next_step = Task.objects.create(
+            subgoal=momentum_subgoal,
+            title="Next momentum step",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=30,
+            display_order=2,
+        )
+        competing_task = Task.objects.create(
+            subgoal=competing_subgoal,
+            title="Unrelated competing step",
+            status="pending",
+            priority="high",
+            estimated_duration_minutes=30,
+            display_order=1,
+        )
+
+        previous_date = timezone.localdate() - timedelta(days=1)
+        previous_list = DailyTaskList.objects.create(user=self.user, date=previous_date)
+        completed_item = DailyTaskItem.objects.create(
+            task_list=previous_list,
+            item_type="goal_task",
+            goal_task=finished_step,
+            related_goal=finished_step.subgoal.milestone.goal,
+            title=finished_step.title,
+            description="Completed yesterday",
+            priority="high",
+            estimated_minutes=20,
+            display_order=0,
+            is_completed=True,
+            completed_at=timezone.now(),
+        )
+        previous_list.update_progress()
+
+        selected = _select_balanced_goal_tasks(user=self.user, limit=2)
+
+        self.assertEqual([task.id for task in selected], [next_step.id, competing_task.id])
 
     def test_selector_excludes_completed_milestones_from_candidates(self):
         _, active_subgoal = self._create_goal_with_subgoal(

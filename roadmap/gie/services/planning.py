@@ -103,6 +103,41 @@ class GIEPlanningService:
     CONTRACT_TEMPLATE_SERVICE = GoalContractTemplateService()
 
     @staticmethod
+    def _build_autofill_slot_value(payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+        slot_value = dict(payload)
+        slot_value.pop("category_pillar", None)
+        return slot_value
+
+    @staticmethod
+    def _resolve_primary_category_from_unified_context(*, session: GIESession, unified_context: dict) -> str:
+        slot_profile = unified_context.get("slot_profile", {}) if isinstance(unified_context, dict) else {}
+        goal_domain = str(slot_profile.get("goal_domain") or "").strip().lower()
+        domain_category_map = {
+            "running_endurance": "fitness",
+            "nutrition": "nutrition",
+            "wellness": "wellness",
+            "finance": "finance",
+            "skill_acquisition": "learning",
+            "career": "career",
+        }
+        mapped = domain_category_map.get(goal_domain)
+        if mapped:
+            return mapped
+
+        resolved_title = str(((unified_context or {}).get("goal_details") or {}).get("title") or session.goal_text.strip())
+        resolved_description = str(((unified_context or {}).get("goal_details") or {}).get("description") or "")
+        return normalize_goal_category_for_storage(
+            classify_goal_category_deterministic(
+                goal_title=resolved_title,
+                goal_description=resolved_description,
+            ),
+            goal_title=resolved_title,
+            goal_description=resolved_description,
+        )
+
+    @staticmethod
     def get_latest_health_profile(*, user):
         try:
             from routine.health_profile_selector import get_effective_profile
@@ -173,7 +208,7 @@ class GIEPlanningService:
             defaults={
                 "required": False,
                 "status": GIESlotState.STATUS_LOCKED,
-                "value": autofill_payload,
+                "value": cls._build_autofill_slot_value(autofill_payload),
                 "source": GIESlotState.SOURCE_INFERENCE,
                 "confidence": 0.95,
                 "last_updated_turn_index": None,
@@ -195,16 +230,13 @@ class GIEPlanningService:
     ) -> dict:
         goal_details = unified_context.get("goal_details", {})
         timeline_context = unified_context.get("timeline", {})
+        inferred_primary_category = cls._resolve_primary_category_from_unified_context(
+            session=session,
+            unified_context=unified_context,
+        )
         base_payload = {
             "title": str(goal_details.get("title") or session.goal_text.strip())[:255],
-            "primary_category": normalize_goal_category_for_storage(
-                classify_goal_category_deterministic(
-                    goal_title=str(goal_details.get("title") or session.goal_text.strip()),
-                    goal_description=str(goal_details.get("description") or ""),
-                ),
-                goal_title=str(goal_details.get("title") or session.goal_text.strip()),
-                goal_description=str(goal_details.get("description") or ""),
-            ),
+            "primary_category": inferred_primary_category,
             "category_pillar": None,
             "priority": resolved_priority,
             "description": str(goal_details.get("description") or ""),
@@ -887,6 +919,9 @@ class GIEPlanningService:
             form_goal_context=form_goal_context,
             refine_language=True,
         )
+        explicit_title = resolved_goal_context.get("title")
+        if not (isinstance(explicit_title, str) and explicit_title.strip()):
+            goal_payload["title"] = session.goal_text.strip()[:255]
         for field in (
             "commitment_confirmed",
             "commitment_intent",

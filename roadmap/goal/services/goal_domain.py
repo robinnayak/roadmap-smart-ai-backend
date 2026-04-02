@@ -1,14 +1,31 @@
 from django.utils import timezone
 from django.db.models import Sum
+import re
 
 from goal.models import Goal, SubGoal, Task, UserFinancialProfile
 from goal.serializers import GoalListSerializer, GoalSerializer
 from goal.services.create_contract import (
     normalize_goal_create_payload,
 )
-from goal.services.category_resolver import classify_goal_category, DEFAULT_GOAL_CATEGORY
+from goal.services.category_resolver import (
+    classify_goal_category,
+    DEFAULT_GOAL_CATEGORY,
+)
 from goal.services.category_pillars import canonical_to_pillar, resolve_canonical_category
 from goal.services.financial_intelligence import calculate_feasibility
+
+
+GIE_GOAL_DOMAIN_TO_CATEGORY = {
+    "running_endurance": "fitness",
+    "nutrition": "nutrition",
+    "wellness": "wellness",
+    "finance": "finance",
+    "financial": "finance",
+    "skill_acquisition": "learning",
+    "learning": "learning",
+    "career": "career",
+    "business": "business",
+}
 
 
 def sanitize_goal_payload(request_data):
@@ -101,13 +118,9 @@ def evaluate_financial_goal_feasibility(*, user, validated_data, instance=None):
 
 def create_goal_for_user(*, request_data, user, request):
     data = sanitize_goal_payload(request_data)
-    if data.get("primary_category") or data.get("category_pillar"):
-        data["primary_category"] = resolve_canonical_category(
-            data.get("primary_category"),
-            data.get("category_pillar"),
-            str(data.get("title") or ""),
-            str(data.get("description") or ""),
-        )
+    resolved_category = _resolve_trusted_goal_category(data=data)
+    if resolved_category:
+        data["primary_category"] = resolved_category
     else:
         data["primary_category"] = classify_goal_category(
             goal_title=str(data.get("title") or ""),
@@ -134,6 +147,36 @@ def create_goal_for_user(*, request_data, user, request):
     return goal, None
 
 
+def _resolve_trusted_goal_category(*, data: dict) -> str | None:
+    title = str(data.get("title") or "")
+    description = str(data.get("description") or "")
+
+    primary_category = data.get("primary_category")
+    if isinstance(primary_category, str) and primary_category.strip():
+        return resolve_canonical_category(
+            primary_category,
+            data.get("category_pillar"),
+            title,
+            description,
+        )
+
+    goal_domain = data.get("goal_domain")
+    if isinstance(goal_domain, str) and goal_domain.strip():
+        mapped_category = GIE_GOAL_DOMAIN_TO_CATEGORY.get(goal_domain.strip().lower())
+        if mapped_category:
+            return mapped_category
+
+    if data.get("category_pillar"):
+        return resolve_canonical_category(
+            None,
+            data.get("category_pillar"),
+            title,
+            description,
+        )
+
+    return None
+
+
 def get_user_goals_payload(*, user, detailed: bool):
     goals = Goal.objects.filter(user=user).prefetch_related("milestones", "attributes")
     serializer_class = GoalSerializer if detailed else GoalListSerializer
@@ -143,6 +186,7 @@ def get_user_goals_payload(*, user, detailed: bool):
 
 def build_goal_seed_data(goal):
     impact_dimensions = goal.impact_dimensions or {}
+    mapped_context = _build_task_generation_context(goal=goal, impact_dimensions=impact_dimensions)
     return {
         "id": str(goal.id),
         "title": goal.title,
@@ -157,7 +201,133 @@ def build_goal_seed_data(goal):
         "impact_dimensions": goal.impact_dimensions,
         "start_date": goal.start_date,
         "target_date": goal.target_date,
+        **mapped_context,
     }
+
+
+def _build_task_generation_context(*, goal, impact_dimensions: dict) -> dict:
+    current_situation = _get_current_situation_context(goal)
+    health_profile_context = _get_health_profile_context(goal)
+
+    available_daily_minutes = (
+        _coerce_minutes(impact_dimensions.get("available_daily_minutes"))
+        or _coerce_minutes(impact_dimensions.get("daily_session_minutes"))
+        or _coerce_minutes(impact_dimensions.get("daily_practice_minutes"))
+        or _coerce_minutes(impact_dimensions.get("prep_time_per_day_minutes"))
+        or _coerce_minutes(health_profile_context.get("daily_time_available"))
+        or _coerce_minutes(current_situation.get("time_availability"))
+        or 60
+    )
+
+    user_strengths = _coerce_text_list(impact_dimensions.get("user_strengths")) or _coerce_text_list(
+        current_situation.get("key_skills")
+    )
+    user_blockers = _coerce_text_list(impact_dimensions.get("user_blockers")) or _coerce_text_list(
+        current_situation.get("constraints")
+    )
+    motivation_style = (
+        _coerce_text(impact_dimensions.get("motivation_style"))
+        or _coerce_text(health_profile_context.get("motivation_style"))
+        or _derive_motivation_style(
+            _coerce_text(impact_dimensions.get("motivation_driver"))
+            or _coerce_text(impact_dimensions.get("why_do_i_want_this"))
+            or _coerce_text(impact_dimensions.get("specific_measurable_target"))
+        )
+        or "intrinsic"
+    )
+
+    return {
+        "available_daily_minutes": available_daily_minutes,
+        "user_strengths": user_strengths,
+        "user_blockers": user_blockers,
+        "motivation_style": motivation_style,
+    }
+
+
+def _get_current_situation_context(goal) -> dict:
+    try:
+        personal_details = getattr(goal.user, "user_personal_details", None)
+        current_situation = (
+            getattr(personal_details, "current_situation_goal", None)
+            if personal_details is not None
+            else None
+        )
+    except Exception:
+        current_situation = None
+
+    if not current_situation:
+        return {}
+
+    return {
+        "key_skills": current_situation.key_skills,
+        "constraints": current_situation.constraints,
+        "time_availability": current_situation.time_availability,
+    }
+
+
+def _get_health_profile_context(goal) -> dict:
+    try:
+        from routine.models import HealthProfile
+    except Exception:
+        return {}
+
+    profile = (
+        HealthProfile.objects.filter(user=goal.user, is_active=True)
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+    if not profile:
+        return {}
+
+    return {
+        "motivation_style": profile.motivation_style,
+        "daily_time_available": profile.daily_time_available,
+    }
+
+
+def _coerce_text(value) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _coerce_text_list(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _coerce_minutes(value) -> int | None:
+    if isinstance(value, (int, float)):
+        return max(0, int(round(float(value))))
+    if not isinstance(value, str):
+        return None
+
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+
+    direct_match = re.search(r"(\d+)", normalized)
+    if not direct_match:
+        return None
+
+    amount = int(direct_match.group(1))
+    if "hour" in normalized:
+        return amount * 60
+    return amount
+
+
+def _derive_motivation_style(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if not normalized:
+        return ""
+    if any(token in normalized for token in ("deadline", "date", "amount", "save", "target", "race", "event")):
+        return "outcome-driven"
+    if any(token in normalized for token in ("coach", "mentor", "manager", "accountability")):
+        return "accountability-driven"
+    return "intrinsic"
 
 
 def get_goal_with_hierarchy_for_user(*, goal_id, user):

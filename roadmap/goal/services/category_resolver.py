@@ -25,7 +25,7 @@ GOAL_CATEGORIES = (
     "education",
     "career",
     "finance",
-    "parenting",
+    "communication",
 )
 
 GOAL_CATEGORY_CHOICES = [(category, category.replace("_", " ").title()) for category in GOAL_CATEGORIES]
@@ -36,6 +36,8 @@ LEGACY_TO_CANONICAL_CATEGORY = {
     "career": "career",
     "health": "fitness",
     "personal": "productivity",
+    "parenting": "communication",
+    "communication": "communication",
 }
 
 ATTRIBUTE_HEALTH_CATEGORIES = {"fitness", "wellness", "nutrition"}
@@ -104,9 +106,10 @@ CATEGORY_SIGNALS = {
         "save", "debt", "invest", "budget", "money", "fund", "financial",
         "emergency fund", "credit", "mortgage", "retirement", "savings",
     ],
-    "parenting": [
-        "parenting", "parent", "kids", "children", "child", "co-parent",
-        "mother", "father", "son", "daughter",
+    "communication": [
+        "english", "communication", "speaking", "writing", "presentation",
+        "vocabulary", "fluency", "language", "accent", "articulate",
+        "express", "conversation",
     ],
 }
 

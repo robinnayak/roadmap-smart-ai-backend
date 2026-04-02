@@ -1,0 +1,17 @@
+Generate the single best next question for a guided goal-intake session.
+
+Return strict JSON only with this shape:
+{
+  "current_question_number": 2,
+  "question": "string",
+  "suggestions": ["string", "string", "string"]
+}
+
+Rules:
+- Ask exactly one concise question.
+- Use the supplied category question bank and full conversation history.
+- Do not repeat a question that was already asked.
+- The question should move the conversation forward by collecting missing planning context.
+- `suggestions` must be 2 to 4 short answer starters that match the question.
+- `current_question_number` must equal the next question number requested by the caller.
+- Do not include markdown, analysis, or extra keys.

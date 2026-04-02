@@ -55,6 +55,8 @@ class GIESession(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
     phase = models.CharField(max_length=20, choices=PHASE_CHOICES, default=PHASE_INTAKE)
     current_question = models.TextField(null=True, blank=True)
+    total_questions = models.PositiveIntegerField(default=5)
+    current_question_number = models.PositiveIntegerField(default=1)
     required_slot_count = models.IntegerField(default=0)
     filled_required_slot_count = models.IntegerField(default=0)
     completeness_percent = models.FloatField(default=0.0)

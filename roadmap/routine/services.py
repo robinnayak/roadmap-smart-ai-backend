@@ -6,7 +6,7 @@ Routine selection logic - pure database queries for task picking plus
 deterministic routine text generation.
 """
 import logging
-from collections import deque
+from collections import defaultdict, deque
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -733,12 +733,12 @@ def _apply_overbooked_fallback(
     return habits, limited, minutes_multiplier, "partial", partial_required
 
 
-def _goal_deadline_urgency_score(goal) -> int:
+def _goal_deadline_urgency_score(goal, *, reference_date: date | None = None) -> int:
     target_date = getattr(goal, "target_date", None)
     if not target_date:
         return 0
 
-    days_remaining = (target_date - timezone.localdate()).days
+    days_remaining = (target_date - (reference_date or timezone.localdate())).days
     if days_remaining <= 0:
         return 35
     if days_remaining <= 7:
@@ -750,19 +750,183 @@ def _goal_deadline_urgency_score(goal) -> int:
     return 0
 
 
-def _score_goal_task(task: Task) -> int:
+def _load_rie_signal_for_goal(goal_id) -> dict | None:
+    """
+    Best-effort lookup for the latest GIE rie_signal related to a goal.
+
+    The current schema has no direct Goal -> GIESession/GIEPlanSnapshot link, so
+    this resolver uses a conservative same-user + exact title match and returns
+    None whenever the relationship cannot be established safely.
+    """
+    try:
+        from gie.models import GIEPlanSnapshot
+        from goal.models import Goal
+
+        goal = (
+            Goal.objects.only("id", "user_id", "title")
+            .filter(id=goal_id)
+            .first()
+        )
+        if not goal or not goal.title:
+            return None
+
+        normalized_title = goal.title.strip().lower()
+        snapshots = (
+            GIEPlanSnapshot.objects.filter(
+                session__user_id=goal.user_id,
+                status=GIEPlanSnapshot.STATUS_FINALIZED,
+            )
+            .select_related("session")
+            .order_by("-created_at")
+        )
+        for snapshot in snapshots:
+            rie_signal = snapshot.rie_signal if isinstance(snapshot.rie_signal, dict) else None
+            if not rie_signal:
+                continue
+
+            goal_summary = str(snapshot.goal_summary or "").strip().lower()
+            session_goal_text = str(snapshot.session.goal_text or "").strip().lower()
+            if normalized_title == session_goal_text or normalized_title in goal_summary:
+                return rie_signal
+    except Exception:
+        return None
+
+    return None
+
+
+def _build_goal_task_behavior_signals(
+    user,
+    *,
+    reference_date: date | None = None,
+    lookback_days: int = 7,
+) -> tuple[dict[str, dict], dict[str, int]]:
+    lookback_days = max(1, int(lookback_days or 7))
+    reference_date = reference_date or timezone.localdate()
+    window_start = reference_date - timedelta(days=lookback_days)
+    window_end = reference_date - timedelta(days=1)
+
+    if window_end < window_start:
+        return {}, {}
+
+    behavior_by_task: dict[str, dict] = {}
+    completed_subgoal_counts: dict[str, int] = defaultdict(int)
+    recent_items = (
+        DailyTaskItem.objects.filter(
+            task_list__user=user,
+            task_list__date__range=(window_start, window_end),
+            item_type="goal_task",
+            goal_task__isnull=False,
+            removed_by_user=False,
+        )
+        .select_related("goal_task", "goal_task__subgoal")
+        .order_by("-task_list__date", "-created_at")
+    )
+
+    for item in recent_items:
+        task_id = str(item.goal_task_id)
+        signal = behavior_by_task.setdefault(
+            task_id,
+            {
+                "presented_count": 0,
+                "skip_count": 0,
+                "completion_count": 0,
+                "stalled_count": 0,
+                "last_skip_reason_class": "",
+            },
+        )
+        signal["presented_count"] += 1
+
+        if item.is_completed:
+            signal["completion_count"] += 1
+            completed_subgoal_counts[str(item.goal_task.subgoal_id)] += 1
+            continue
+
+        if item.is_skipped:
+            signal["skip_count"] += 1
+            if not signal["last_skip_reason_class"]:
+                signal["last_skip_reason_class"] = _classify_skip_reason(item.skip_reason)
+            continue
+
+        signal["stalled_count"] += 1
+
+    return behavior_by_task, dict(completed_subgoal_counts)
+
+
+def _score_goal_task(
+    task: Task,
+    *,
+    reference_date: date | None = None,
+    behavior_by_task: dict[str, dict] | None = None,
+    completed_subgoal_counts: dict[str, int] | None = None,
+    rie_signal: dict | None = None,
+) -> int:
     score = 0
     if task.is_prerequisite:
         score += 40
 
-    score += _goal_deadline_urgency_score(task.subgoal.milestone.goal)
+    score += _goal_deadline_urgency_score(
+        task.subgoal.milestone.goal,
+        reference_date=reference_date,
+    )
     score -= int(task.difficulty_level or 0) * 3
+
+    task_signal = (behavior_by_task or {}).get(str(task.id), {})
+    skip_count = int(task_signal.get("skip_count", 0) or 0)
+    completion_count = int(task_signal.get("completion_count", 0) or 0)
+    stalled_count = int(task_signal.get("stalled_count", 0) or 0)
+    presented_count = int(task_signal.get("presented_count", 0) or 0)
+    last_skip_reason_class = str(task_signal.get("last_skip_reason_class", "") or "")
+
+    if skip_count:
+        score -= min(45, 18 * skip_count)
+    if stalled_count:
+        score -= min(24, 8 * stalled_count)
+    if presented_count >= 3 and completion_count == 0:
+        score -= 10
+
+    if last_skip_reason_class == "time_pressure" and int(task.estimated_duration_minutes or 0) >= 45:
+        score -= 12
+    elif last_skip_reason_class == "difficulty":
+        score -= 10
+    elif last_skip_reason_class == "low_energy":
+        score -= max(4, int(task.difficulty_level or 0) * 2)
+
+    subgoal_completion_count = int(
+        (completed_subgoal_counts or {}).get(str(task.subgoal_id), 0) or 0
+    )
+    if subgoal_completion_count:
+        score += min(18, 6 * subgoal_completion_count)
+
+    if isinstance(rie_signal, dict):
+        capacity_minutes = int(rie_signal.get("estimated_daily_capacity_minutes", 0) or 0)
+        task_minutes = int(task.estimated_duration_minutes or 0)
+        if capacity_minutes > 0 and task_minutes > 0:
+            if task_minutes <= capacity_minutes:
+                score += 4
+            elif task_minutes > capacity_minutes * 2:
+                score -= 6
+            else:
+                score -= 2
+
     return score
 
 
-def _goal_task_sort_key(task: Task) -> tuple:
+def _goal_task_sort_key(
+    task: Task,
+    *,
+    reference_date: date | None = None,
+    behavior_by_task: dict[str, dict] | None = None,
+    completed_subgoal_counts: dict[str, int] | None = None,
+    rie_signal: dict | None = None,
+) -> tuple:
     return (
-        -_score_goal_task(task),
+        -_score_goal_task(
+            task,
+            reference_date=reference_date,
+            behavior_by_task=behavior_by_task,
+            completed_subgoal_counts=completed_subgoal_counts,
+            rie_signal=rie_signal,
+        ),
         task.subgoal.milestone.display_order,
         task.subgoal.display_order,
         task.display_order,
@@ -770,7 +934,13 @@ def _goal_task_sort_key(task: Task) -> tuple:
     )
 
 
-def _select_balanced_goal_tasks(user, limit: int = MAX_DAILY_GOAL_TASKS) -> list[Task]:
+def _select_balanced_goal_tasks(
+    user,
+    limit: int = MAX_DAILY_GOAL_TASKS,
+    *,
+    reference_date: date | None = None,
+    goal_rie_signals: dict[str, dict | None] | None = None,
+) -> list[Task]:
     """
     Pick pending tasks across active goals using scored balanced round-robin.
 
@@ -805,21 +975,49 @@ def _select_balanced_goal_tasks(user, limit: int = MAX_DAILY_GOAL_TASKS) -> list
     if limit <= 0:
         return []
 
+    behavior_by_task, completed_subgoal_counts = _build_goal_task_behavior_signals(
+        user=user,
+        reference_date=reference_date,
+    )
+
     goals_to_tasks: dict[str, dict] = {}
     for task in goal_tasks_qs:
         goal = task.subgoal.milestone.goal
         goal_id = str(goal.id)
         if goal_id not in goals_to_tasks:
-            goals_to_tasks[goal_id] = {"goal": goal, "tasks": []}
+            goals_to_tasks[goal_id] = {
+                "goal": goal,
+                "tasks": [],
+                "rie_signal": (goal_rie_signals or {}).get(goal_id),
+            }
         goals_to_tasks[goal_id]["tasks"].append(task)
 
     if not goals_to_tasks:
         return []
 
     for bucket in goals_to_tasks.values():
-        ranked_tasks = sorted(bucket["tasks"], key=_goal_task_sort_key)
+        ranked_tasks = sorted(
+            bucket["tasks"],
+            key=lambda task: _goal_task_sort_key(
+                task,
+                reference_date=reference_date,
+                behavior_by_task=behavior_by_task,
+                completed_subgoal_counts=completed_subgoal_counts,
+                rie_signal=bucket.get("rie_signal"),
+            ),
+        )
         bucket["tasks"] = deque(ranked_tasks)
-        bucket["top_score"] = _score_goal_task(ranked_tasks[0]) if ranked_tasks else 0
+        bucket["top_score"] = (
+            _score_goal_task(
+                ranked_tasks[0],
+                reference_date=reference_date,
+                behavior_by_task=behavior_by_task,
+                completed_subgoal_counts=completed_subgoal_counts,
+                rie_signal=bucket.get("rie_signal"),
+            )
+            if ranked_tasks
+            else 0
+        )
 
     goal_buckets = sorted(
         goals_to_tasks.values(),
@@ -1635,8 +1833,28 @@ def get_or_create_today_task_list(
         deprioritize_goal_tasks = True
         add_split_hint = True
 
+    pending_goal_ids = (
+        Task.objects.filter(
+            subgoal__milestone__goal__user=user,
+            subgoal__milestone__goal__status__in=["not_started", "in_progress"],
+            subgoal__milestone__status__in=["not_started", "in_progress", "blocked"],
+            status="pending",
+        )
+        .values_list("subgoal__milestone__goal_id", flat=True)
+        .distinct()
+    )
+    goal_rie_signals = {
+        str(goal_id): _load_rie_signal_for_goal(goal_id)
+        for goal_id in pending_goal_ids
+    }
+
     # 1) Fetch pending goal tasks with balanced cross-goal coverage
-    goal_tasks = _select_balanced_goal_tasks(user=user, limit=goal_task_limit)
+    goal_tasks = _select_balanced_goal_tasks(
+        user=user,
+        limit=goal_task_limit,
+        reference_date=target_date,
+        goal_rie_signals=goal_rie_signals,
+    )
 
     # 2) Fetch habits that should run on target_date
     habits = [
