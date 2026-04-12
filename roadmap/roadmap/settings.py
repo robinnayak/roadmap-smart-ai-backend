@@ -494,7 +494,7 @@ WHITENOISE_AUTOREFRESH = DEBUG
 WHITENOISE_USE_FINDERS = DEBUG
 WHITENOISE_MAX_AGE = config("WHITENOISE_MAX_AGE", default=31536000, cast=int)
 
-if not DEBUG:
+if not DEBUG and not IS_TESTING:
     SECURE_SSL_REDIRECT = bool_env("SECURE_SSL_REDIRECT", default=True)
     SESSION_COOKIE_SECURE = bool_env("SESSION_COOKIE_SECURE", default=True)
     CSRF_COOKIE_SECURE = bool_env("CSRF_COOKIE_SECURE", default=True)
@@ -502,6 +502,10 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = config("SECURE_HSTS_SECONDS", default=31536000, cast=int)
     SECURE_HSTS_INCLUDE_SUBDOMAINS = bool_env("SECURE_HSTS_INCLUDE_SUBDOMAINS", default=True)
     SECURE_HSTS_PRELOAD = bool_env("SECURE_HSTS_PRELOAD", default=True)
+elif IS_TESTING:
+    SECURE_SSL_REDIRECT = False
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
 
 
 def _require_non_empty_setting(name: str) -> None:
