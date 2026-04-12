@@ -39,6 +39,9 @@ from .services.category_pillars import (
 
 logger = logging.getLogger(__name__)
 
+HIERARCHY_TARGET_MIN_DAYS = 30
+HIERARCHY_TARGET_MAX_DAYS = 60
+
 
 def _goal_attributes_defaults(target_field: str, extracted_payload):
     defaults = {
@@ -591,6 +594,25 @@ class GoalSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"target_date": "Target date must be after start date."}
             )
+
+        if (
+            self.context.get("enforce_hierarchy_target_window")
+            and start
+            and target
+        ):
+            timeline_days = (target - start).days
+            if (
+                timeline_days < HIERARCHY_TARGET_MIN_DAYS
+                or timeline_days > HIERARCHY_TARGET_MAX_DAYS
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "target_date": (
+                            f"Target date must be between {HIERARCHY_TARGET_MIN_DAYS} and "
+                            f"{HIERARCHY_TARGET_MAX_DAYS} days after the start date for hierarchy generation."
+                        )
+                    }
+                )
 
         if self.instance is None:
             missing_fields = list_missing_required_goal_fields(attrs)

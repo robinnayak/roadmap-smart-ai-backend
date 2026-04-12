@@ -978,6 +978,7 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                 user=user,
                 user_context=user_context,
                 existing_job_id=job_id,
+                mark_job_completed=False,
             )
 
             if hierarchy_result.get("status") != "success":
@@ -991,6 +992,25 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
 
             saved_counts = self._save_complete_hierarchy_to_db(
                 goal, hierarchy_result.get("data", {})
+            )
+
+            generated_milestones = len(hierarchy_result.get("data", {}).get("milestones", []))
+            job = AIProcessingJob.objects.get(id=job_id, user=user)
+            if generated_milestones > 0 and saved_counts["milestones"] == 0:
+                job.mark_failed("Hierarchy was generated but failed to save any milestones.")
+                logger.error(
+                    "Async hierarchy generation produced %d milestones but saved none for goal %s",
+                    generated_milestones,
+                    goal.id,
+                )
+                return
+
+            job.mark_completed(
+                output_data={
+                    **(hierarchy_result.get("data", {}) or {}),
+                    "saved_counts": saved_counts,
+                },
+                model_used=generator.provider.model,
             )
             logger.info(
                 "Async hierarchy saved for goal %s — milestones: %d, subgoals: %d, tasks: %d",

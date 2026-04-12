@@ -104,6 +104,7 @@ class GoalHierarchyGenerator(BaseAIService):
         user,
         user_context: dict | None = None,
         existing_job_id: str | None = None,
+        mark_job_completed: bool = True,
     ) -> dict[str, Any]:
         """
         Generate a complete hierarchy for a goal and track it as a job.
@@ -347,11 +348,15 @@ class GoalHierarchyGenerator(BaseAIService):
                 "partial_failures": partial_failures,
             }
 
-            # FIX: Use mark_completed() — sets status, output_data, timestamps atomically
-            job.mark_completed(
-                output_data=output_data,
-                model_used=self.provider.model,
-            )
+            if mark_job_completed:
+                # Synchronous callers can mark completion here because they persist immediately after return.
+                job.mark_completed(
+                    output_data=output_data,
+                    model_used=self.provider.model,
+                )
+            else:
+                # Async callers still need to persist the hierarchy into goal tables first.
+                job.update_progress(95, "Hierarchy generated. Saving your plan...")
 
             logger.info(
                 "Hierarchy complete — milestones: %d, subgoals: %d, tasks: %d",
