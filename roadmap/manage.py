@@ -5,6 +5,12 @@ import sys
 
 
 def main():
+    import platform
+    platform._wmi_query = lambda *args, **kwargs: ('10', '1', '1', '1', '0')
+    try:
+        platform.win32_ver = lambda *args, **kwargs: ('10', '10.0.19041', '', 'Multiprocessor Free')
+    except Exception:
+        pass
     """Run administrative tasks."""
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'roadmap.settings')
     try:

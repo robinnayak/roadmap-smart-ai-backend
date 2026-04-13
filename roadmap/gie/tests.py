@@ -1375,8 +1375,8 @@ class GIEGoalStartAPITests(SecureAPITestCase):
         self.assertEqual(created_session.current_question_number, 1)
         self.assertEqual(created_session.turns.count(), 1)
         self.assertEqual(created_session.turns.first().role, GIETurn.ROLE_ASSISTANT)
-        self.assertEqual(created_session.current_question, response.data["gie_question"])
-        self.assertEqual(created_session.turns.first().content, response.data["gie_question"])
+        self.assertEqual(created_session.current_question, response.data["next_prompt"]["question"])
+        self.assertEqual(created_session.turns.first().content, response.data["next_prompt"]["question"])
         self.assertEqual(created_session.slot_definitions.count(), len(schema["required_slots"]) + len(schema["optional_slots"]))
         self.assertEqual(created_session.slot_states.count(), len(response.data["slot_state"]))
 
@@ -1529,7 +1529,7 @@ class GIETurnStateFinalizeAPITests(SecureAPITestCase):
 
         self.session.refresh_from_db()
         self.assertEqual(self.session.status, GIESession.STATUS_READY_TO_FINALIZE)
-        self.assertEqual(self.session.current_question_number, 2)
+        self.assertEqual(self.session.current_question_number, 1)
 
     def test_turn_returns_additive_llm_fields_without_breaking_existing_payload(self):
         turn_url = reverse("gie:goals-turn", kwargs={"session_id": self.session_id})
@@ -1562,6 +1562,9 @@ class GIETurnStateFinalizeAPITests(SecureAPITestCase):
         self.assertIn("stress", response.data["gie_question"].lower())
         self.assertGreaterEqual(len(response.data["gie_suggestions"]), 3)
 
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.current_question, response.data["next_prompt"]["question"])
+
     @patch("gie.views.generate_next_question", side_effect=Exception("provider timeout"))
     def test_turn_llm_failure_returns_null_additive_fields_and_preserves_static_prompt(self, mocked_generation):
         turn_url = reverse("gie:goals-turn", kwargs={"session_id": self.session_id})
@@ -1572,12 +1575,15 @@ class GIETurnStateFinalizeAPITests(SecureAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["current_question_number"], 2)
-        self.assertFalse(response.data["is_llm_complete"])
+        self.assertEqual(response.data["current_question_number"], 1)
+        self.assertTrue(response.data["is_llm_complete"])
         self.assertIsNone(response.data["gie_question"])
         self.assertIsNone(response.data["gie_suggestions"])
         self.assertIn("next_prompt", response.data)
-        mocked_generation.assert_called_once()
+        self.assertIsNone(response.data["next_prompt"])
+        self.session.refresh_from_db()
+        self.assertIsNone(self.session.current_question)
+        mocked_generation.assert_not_called()
 
     @patch(
         "gie.views.generate_next_question",
@@ -1587,7 +1593,7 @@ class GIETurnStateFinalizeAPITests(SecureAPITestCase):
             "suggestions": ["Walking only", "Gym workouts"],
         },
     )
-    def test_turn_uses_slot_fallback_when_generated_question_repeats(self, mocked_generation):
+    def test_turn_keeps_slot_aligned_current_question_even_when_generated_copy_differs(self, mocked_generation):
         GIESlotDefinition.objects.filter(session=self.session, key="daily_session_minutes").update(required=True)
         GIESlotState.objects.filter(session=self.session, slot_key="daily_session_minutes").update(required=True)
         self.session.required_slot_count = 2
@@ -1604,8 +1610,14 @@ class GIETurnStateFinalizeAPITests(SecureAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["session_status"], "active")
-        self.assertEqual(response.data["gie_question"], "How long can each session be?")
-        self.assertIsNone(response.data["gie_suggestions"])
+        self.assertEqual(
+            response.data["gie_question"],
+            "What part of your current fitness routine feels most established right now?",
+        )
+        self.assertEqual(response.data["next_prompt"]["question"], "How much time can you give each workout?")
+        self.assertEqual(response.data["current_question_number"], 2)
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.current_question, "How much time can you give each workout?")
         mocked_generation.assert_called_once()
 
     def test_turn_stops_when_question_limit_is_reached_even_if_slots_remain_missing(self):

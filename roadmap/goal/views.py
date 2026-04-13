@@ -762,11 +762,24 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
         )
 
     @staticmethod
+    def _format_validation_error_message(errors) -> str:
+        if isinstance(errors, dict):
+            for field, value in errors.items():
+                if isinstance(value, list) and value:
+                    first = value[0]
+                    if isinstance(first, str):
+                        return f"{field}: {first}"
+                if isinstance(value, str):
+                    return f"{field}: {value}"
+        return "Please correct the highlighted goal details and try again."
+
+    @staticmethod
     def _validation_error_response(errors):
         return Response(
             {
                 "error": "validation_error",
                 "code": "validation_error",
+                "message": CreateGoalWithHierarchyAPIView._format_validation_error_message(errors),
                 "details": errors,
                 "status": status.HTTP_400_BAD_REQUEST,
             },

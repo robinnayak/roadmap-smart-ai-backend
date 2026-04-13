@@ -251,6 +251,10 @@ class GoalCreateContractValidationTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"], "validation_error")
         self.assertEqual(response.data["code"], "validation_error")
+        self.assertEqual(
+            response.data["message"],
+            "specific_measurable_target: Specific measurable target is required.",
+        )
         self.assertIn("specific_measurable_target", response.data["details"])
 
     def test_create_with_hierarchy_rejects_missing_commitment_payload_fields(self):
@@ -266,33 +270,33 @@ class GoalCreateContractValidationTests(APITestCase):
 
     def test_create_with_hierarchy_full_commitment_payload_creates_commitment_record(self):
         response = self.client.post("/goal/create-with-hierarchy/", data=self.base_payload, format="json")
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         goal = Goal.objects.get(user=self.user, title=self.base_payload["title"])
         record = GoalCommitmentRecord.objects.get(goal=goal)
         self.assertEqual(record.user, self.user)
         self.assertEqual(record.contract_snapshot, self.base_payload["contract_snapshot"])
 
-    def test_create_with_hierarchy_rejects_target_dates_shorter_than_30_days(self):
+    def test_create_with_hierarchy_allows_target_dates_shorter_than_30_days(self):
         payload = {
             **self.base_payload,
-            "target_date": str(timezone.localdate() + timedelta(days=29)),
+            "target_date": str(timezone.localdate() + timedelta(days=14)),
+        }
+
+        response = self.client.post("/goal/create-with-hierarchy/", data=payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+    def test_create_with_hierarchy_rejects_target_dates_beyond_two_months(self):
+        payload = {
+            **self.base_payload,
+            "target_date": str(timezone.localdate() + timedelta(days=70)),
         }
 
         response = self.client.post("/goal/create-with-hierarchy/", data=payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("target_date", response.data["details"])
-
-    def test_create_with_hierarchy_rejects_target_dates_longer_than_60_days(self):
-        payload = {
-            **self.base_payload,
-            "target_date": str(timezone.localdate() + timedelta(days=61)),
-        }
-
-        response = self.client.post("/goal/create-with-hierarchy/", data=payload, format="json")
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("target_date", response.data["details"])
+        self.assertIn("within 2 months", response.data["message"])
 
     @patch("goal.serializers.GoalCommitmentRecord.objects.create")
     def test_goal_create_rolls_back_when_commitment_record_creation_fails(self, mock_commitment_create):

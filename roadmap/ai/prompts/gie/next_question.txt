@@ -12,6 +12,8 @@ Rules:
 - Use the supplied category question bank and full conversation history.
 - Do not repeat a question that was already asked.
 - The question should move the conversation forward by collecting missing planning context.
+- The question must stay aligned with the supplied target slot key, label, and description.
+- If the target slot expects a number, boolean, or date, ask directly for that value instead of switching to a different planning topic.
 - `suggestions` must be 2 to 4 short answer starters that match the question.
 - `current_question_number` must equal the next question number requested by the caller.
 - Do not include markdown, analysis, or extra keys.

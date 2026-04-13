@@ -1,4 +1,6 @@
 import logging
+import os
+from calendar import monthrange
 from decimal import Decimal
 from django.core.exceptions import ImproperlyConfigured
 from django.db import transaction
@@ -39,8 +41,19 @@ from .services.category_pillars import (
 
 logger = logging.getLogger(__name__)
 
-HIERARCHY_TARGET_MIN_DAYS = 30
-HIERARCHY_TARGET_MAX_DAYS = 60
+HIERARCHY_TARGET_HARD_MAX_MONTHS = 2
+HIERARCHY_TARGET_MAX_MONTHS = min(
+    int(os.getenv("HIERARCHY_MAX_MONTHS", str(HIERARCHY_TARGET_HARD_MAX_MONTHS))),
+    HIERARCHY_TARGET_HARD_MAX_MONTHS,
+)
+
+
+def _add_months(anchor_date, months: int):
+    month_index = anchor_date.month - 1 + months
+    year = anchor_date.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(anchor_date.day, monthrange(year, month)[1])
+    return anchor_date.replace(year=year, month=month, day=day)
 
 
 def _goal_attributes_defaults(target_field: str, extracted_payload):
@@ -600,16 +613,13 @@ class GoalSerializer(serializers.ModelSerializer):
             and start
             and target
         ):
-            timeline_days = (target - start).days
-            if (
-                timeline_days < HIERARCHY_TARGET_MIN_DAYS
-                or timeline_days > HIERARCHY_TARGET_MAX_DAYS
-            ):
+            latest_target_date = _add_months(start, HIERARCHY_TARGET_MAX_MONTHS)
+            if target > latest_target_date:
                 raise serializers.ValidationError(
                     {
                         "target_date": (
-                            f"Target date must be between {HIERARCHY_TARGET_MIN_DAYS} and "
-                            f"{HIERARCHY_TARGET_MAX_DAYS} days after the start date for hierarchy generation."
+                            f"Target date must be within {HIERARCHY_TARGET_MAX_MONTHS} month"
+                            f"{'' if HIERARCHY_TARGET_MAX_MONTHS == 1 else 's'} after the start date for hierarchy generation."
                         )
                     }
                 )
