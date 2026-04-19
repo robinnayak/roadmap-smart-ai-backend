@@ -127,7 +127,17 @@ def create_goal_for_user(*, request_data, user, request):
             goal_description=str(data.get("description") or ""),
             current_category=data.get("primary_category") or DEFAULT_GOAL_CATEGORY,
         )
-    serializer = GoalSerializer(data=data, context={"request": request})
+    enforce_hierarchy_target_window = bool(
+        request is not None
+        and "/goal/create-with-hierarchy/" in getattr(request, "path", "")
+    )
+    serializer = GoalSerializer(
+        data=data,
+        context={
+            "request": request,
+            "enforce_hierarchy_target_window": enforce_hierarchy_target_window,
+        },
+    )
     if not serializer.is_valid():
         return None, serializer.errors
 

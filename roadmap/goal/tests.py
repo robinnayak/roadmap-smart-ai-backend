@@ -182,7 +182,7 @@ class GoalCreateContractValidationTests(APITestCase):
             "specific_measurable_target": "Get promoted by Q4 with measurable outcomes.",
             "primary_category": "career",
             "priority": "medium",
-            "target_date": str(timezone.localdate() + timedelta(days=90)),
+            "target_date": str(timezone.localdate() + timedelta(days=45)),
             **full_commitment_payload(
                 user=self.user,
                 goal_data={
@@ -192,7 +192,7 @@ class GoalCreateContractValidationTests(APITestCase):
                     "why_do_i_want_this": "I want stronger career optionality.",
                     "specific_measurable_target": "Get promoted by Q4 with measurable outcomes.",
                     "primary_category": "career",
-                    "target_date": str(timezone.localdate() + timedelta(days=90)),
+                    "target_date": str(timezone.localdate() + timedelta(days=45)),
                 },
             ),
         }
@@ -251,6 +251,10 @@ class GoalCreateContractValidationTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"], "validation_error")
         self.assertEqual(response.data["code"], "validation_error")
+        self.assertEqual(
+            response.data["message"],
+            "specific_measurable_target: Specific measurable target is required.",
+        )
         self.assertIn("specific_measurable_target", response.data["details"])
 
     def test_create_with_hierarchy_rejects_missing_commitment_payload_fields(self):
@@ -266,11 +270,33 @@ class GoalCreateContractValidationTests(APITestCase):
 
     def test_create_with_hierarchy_full_commitment_payload_creates_commitment_record(self):
         response = self.client.post("/goal/create-with-hierarchy/", data=self.base_payload, format="json")
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         goal = Goal.objects.get(user=self.user, title=self.base_payload["title"])
         record = GoalCommitmentRecord.objects.get(goal=goal)
         self.assertEqual(record.user, self.user)
         self.assertEqual(record.contract_snapshot, self.base_payload["contract_snapshot"])
+
+    def test_create_with_hierarchy_allows_target_dates_shorter_than_30_days(self):
+        payload = {
+            **self.base_payload,
+            "target_date": str(timezone.localdate() + timedelta(days=14)),
+        }
+
+        response = self.client.post("/goal/create-with-hierarchy/", data=payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+    def test_create_with_hierarchy_rejects_target_dates_beyond_two_months(self):
+        payload = {
+            **self.base_payload,
+            "target_date": str(timezone.localdate() + timedelta(days=70)),
+        }
+
+        response = self.client.post("/goal/create-with-hierarchy/", data=payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("target_date", response.data["details"])
+        self.assertIn("within 2 months", response.data["message"])
 
     @patch("goal.serializers.GoalCommitmentRecord.objects.create")
     def test_goal_create_rolls_back_when_commitment_record_creation_fails(self, mock_commitment_create):
@@ -1006,6 +1032,105 @@ class CreateGoalWithHierarchyAsyncCommitSafetyTests(APITestCase):
             self.assertEqual(len(callbacks), 1)
             callbacks[0]()
             mocked_thread.return_value.start.assert_called_once()
+
+    @patch.object(CreateGoalWithHierarchyAPIView, "_save_complete_hierarchy_to_db")
+    @patch("goal.views.GoalHierarchyGenerator")
+    def test_async_worker_marks_job_completed_only_after_hierarchy_is_saved(
+        self,
+        mock_generator_cls,
+        mock_save_hierarchy,
+    ):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Async Save Goal",
+            description="Verify completion happens after persistence.",
+            why_it_matters=["Reliability"],
+            primary_category="career",
+            priority="medium",
+            target_date=timezone.localdate() + timedelta(days=45),
+        )
+        job = AIProcessingJob.objects.create(
+            user=self.user,
+            job_type="milestone_generation",
+            input_data={},
+            metadata={},
+            status="pending",
+            progress_percentage=0,
+        )
+
+        mock_generator = mock_generator_cls.return_value
+        mock_generator.provider.model = "test-model"
+        mock_generator.generate_complete_hierarchy.return_value = {
+            "status": "success",
+            "data": {
+                "milestones": [
+                    {
+                        "milestone_data": {"title": "Month 1"},
+                        "subgoals": [],
+                    }
+                ],
+                "stats": {"milestones_total": 1, "subgoals_total": 0, "tasks_total": 0},
+            },
+        }
+        mock_save_hierarchy.return_value = {"milestones": 1, "subgoals": 0, "tasks": 0}
+
+        view = CreateGoalWithHierarchyAPIView()
+        view._run_hierarchy_generation_async(str(goal.id), self.user.id, str(job.id))
+
+        mock_generator.generate_complete_hierarchy.assert_called_once()
+        self.assertFalse(mock_generator.generate_complete_hierarchy.call_args.kwargs["mark_job_completed"])
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.output_data["saved_counts"]["milestones"], 1)
+
+    @patch.object(CreateGoalWithHierarchyAPIView, "_save_complete_hierarchy_to_db")
+    @patch("goal.views.GoalHierarchyGenerator")
+    def test_async_worker_marks_job_failed_when_generated_hierarchy_saves_nothing(
+        self,
+        mock_generator_cls,
+        mock_save_hierarchy,
+    ):
+        goal = Goal.objects.create(
+            user=self.user,
+            title="Async Failure Goal",
+            description="Verify failed save does not look complete.",
+            why_it_matters=["Integrity"],
+            primary_category="career",
+            priority="medium",
+            target_date=timezone.localdate() + timedelta(days=45),
+        )
+        job = AIProcessingJob.objects.create(
+            user=self.user,
+            job_type="milestone_generation",
+            input_data={},
+            metadata={},
+            status="pending",
+            progress_percentage=0,
+        )
+
+        mock_generator = mock_generator_cls.return_value
+        mock_generator.provider.model = "test-model"
+        mock_generator.generate_complete_hierarchy.return_value = {
+            "status": "success",
+            "data": {
+                "milestones": [
+                    {
+                        "milestone_data": {"title": "Month 1"},
+                        "subgoals": [],
+                    }
+                ],
+                "stats": {"milestones_total": 1, "subgoals_total": 0, "tasks_total": 0},
+            },
+        }
+        mock_save_hierarchy.return_value = {"milestones": 0, "subgoals": 0, "tasks": 0}
+
+        view = CreateGoalWithHierarchyAPIView()
+        view._run_hierarchy_generation_async(str(goal.id), self.user.id, str(job.id))
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, "failed")
+        self.assertIn("failed to save any milestones", job.error_message.lower())
 
 
 class FinancialProfileAPIViewTests(APITestCase):
@@ -3479,7 +3604,7 @@ class GoalCategoryNormalizationContractTests(APITestCase):
                 "why_do_i_want_this": "I want steadier energy and less anxiety.",
                 "specific_measurable_target": "Sleep 7.5 hours on most nights.",
                 "primary_category": "wellness",
-                "target_date": str(timezone.localdate() + timedelta(days=90)),
+                "target_date": str(timezone.localdate() + timedelta(days=45)),
             },
         )
         payload.update(
@@ -3530,7 +3655,7 @@ class GoalCategoryNormalizationContractTests(APITestCase):
                 "why_do_i_want_this": "I want steadier energy and less anxiety.",
                 "specific_measurable_target": "Sleep 7.5 hours on most nights.",
                 "priority": "medium",
-                "target_date": str(timezone.localdate() + timedelta(days=90)),
+                "target_date": str(timezone.localdate() + timedelta(days=45)),
             }
         )
         payload.pop("primary_category", None)

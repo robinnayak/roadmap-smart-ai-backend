@@ -762,11 +762,24 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
         )
 
     @staticmethod
+    def _format_validation_error_message(errors) -> str:
+        if isinstance(errors, dict):
+            for field, value in errors.items():
+                if isinstance(value, list) and value:
+                    first = value[0]
+                    if isinstance(first, str):
+                        return f"{field}: {first}"
+                if isinstance(value, str):
+                    return f"{field}: {value}"
+        return "Please correct the highlighted goal details and try again."
+
+    @staticmethod
     def _validation_error_response(errors):
         return Response(
             {
                 "error": "validation_error",
                 "code": "validation_error",
+                "message": CreateGoalWithHierarchyAPIView._format_validation_error_message(errors),
                 "details": errors,
                 "status": status.HTTP_400_BAD_REQUEST,
             },
@@ -978,6 +991,7 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
                 user=user,
                 user_context=user_context,
                 existing_job_id=job_id,
+                mark_job_completed=False,
             )
 
             if hierarchy_result.get("status") != "success":
@@ -991,6 +1005,25 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
 
             saved_counts = self._save_complete_hierarchy_to_db(
                 goal, hierarchy_result.get("data", {})
+            )
+
+            generated_milestones = len(hierarchy_result.get("data", {}).get("milestones", []))
+            job = AIProcessingJob.objects.get(id=job_id, user=user)
+            if generated_milestones > 0 and saved_counts["milestones"] == 0:
+                job.mark_failed("Hierarchy was generated but failed to save any milestones.")
+                logger.error(
+                    "Async hierarchy generation produced %d milestones but saved none for goal %s",
+                    generated_milestones,
+                    goal.id,
+                )
+                return
+
+            job.mark_completed(
+                output_data={
+                    **(hierarchy_result.get("data", {}) or {}),
+                    "saved_counts": saved_counts,
+                },
+                model_used=generator.provider.model,
             )
             logger.info(
                 "Async hierarchy saved for goal %s — milestones: %d, subgoals: %d, tasks: %d",

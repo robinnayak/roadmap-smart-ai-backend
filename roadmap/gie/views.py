@@ -234,7 +234,7 @@ class GIEGoalStartAPIView(APIView):
                 session.goal_domain = llm_result["category"]
                 session.total_questions = clamp_total_questions(llm_result["total_questions"])
                 session.current_question_number = 1
-                session.current_question = llm_result["question"]
+                session.current_question = next_prompt["question"]
                 session.save(
                     update_fields=[
                         "goal_domain",
@@ -243,8 +243,8 @@ class GIEGoalStartAPIView(APIView):
                         "current_question",
                     ]
                 )
-                if assistant_turn and assistant_turn.content != llm_result["question"]:
-                    assistant_turn.content = llm_result["question"]
+                if assistant_turn and assistant_turn.content != next_prompt["question"]:
+                    assistant_turn.content = next_prompt["question"]
                     assistant_turn.save(update_fields=["content"])
                 category = llm_result["category"]
                 category_label = llm_result["category_label"]
@@ -698,10 +698,10 @@ class GIEGoalTurnAPIView(GIESessionScopedAPIView):
                     else:
                         gie_question = llm_result["question"]
                         gie_suggestions = llm_result["suggestions"]
-                    session_locked.current_question = gie_question
+                    session_locked.current_question = followup_prompt["question"] if followup_prompt else None
                     session_locked.current_question_number += 1
-                    if assistant_turn and assistant_turn.content != gie_question:
-                        assistant_turn.content = gie_question
+                    if assistant_turn and followup_prompt and assistant_turn.content != followup_prompt["question"]:
+                        assistant_turn.content = followup_prompt["question"]
                         assistant_turn.save(update_fields=["content"])
                 except Exception as exc:
                     logger.warning(
