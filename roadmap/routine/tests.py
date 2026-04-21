@@ -2925,7 +2925,7 @@ class SystemHabitsServiceTests(APITestCase):
         self.assertFalse(system_habits.filter(description="").exists())
         self.assertFalse(system_habits.filter(reason_body="").exists())
 
-    def test_seed_service_backfills_blank_guidance_without_overwriting_customized_fields(self):
+    def test_seed_service_syncs_fixture_guidance_without_overwriting_timing_preferences(self):
         user = CustomUser.objects.create_user(
             email="seed-backfill@test.com",
             password="Password@123",
@@ -2938,6 +2938,10 @@ class SystemHabitsServiceTests(APITestCase):
         HabitTracker.objects.filter(pk=habit.pk).update(
             description="",
             reason_body="",
+            reason_headline="",
+            science_badge="",
+            rewards=[],
+            proof_metric_name="",
             why_important="",
             estimated_minutes=17,
             time_slot="evening",
@@ -2951,13 +2955,17 @@ class SystemHabitsServiceTests(APITestCase):
         self.assertEqual(created_count, 0)
         self.assertTrue(habit.description)
         self.assertTrue(habit.reason_body)
+        self.assertTrue(habit.reason_headline)
+        self.assertTrue(habit.science_badge)
+        self.assertTrue(habit.rewards)
+        self.assertTrue(habit.proof_metric_name)
         self.assertTrue(habit.why_important)
         self.assertEqual(habit.estimated_minutes, 17)
         self.assertEqual(habit.time_slot, "evening")
         self.assertEqual(str(habit.suggested_time), "20:45:00")
         self.assertFalse(habit.is_active)
 
-    def test_seed_service_does_not_override_non_blank_existing_guidance(self):
+    def test_seed_service_refreshes_existing_system_guidance_from_fixture(self):
         user = CustomUser.objects.create_user(
             email="seed-preserve@test.com",
             password="Password@123",
@@ -2970,13 +2978,23 @@ class SystemHabitsServiceTests(APITestCase):
         HabitTracker.objects.filter(pk=habit.pk).update(
             description="Custom guidance stays.",
             reason_body="Custom body stays.",
+            reason_headline="Custom headline stays.",
+            science_badge="Custom badge stays.",
+            rewards=[{"icon": "🧪", "label": "Custom reward", "sub": "Custom sub"}],
+            proof_metric_name="Custom metric",
+            why_important="Custom why stays.",
         )
 
         seed_system_habits_for_user(user)
         habit.refresh_from_db()
 
-        self.assertEqual(habit.description, "Custom guidance stays.")
-        self.assertEqual(habit.reason_body, "Custom body stays.")
+        self.assertNotEqual(habit.description, "Custom guidance stays.")
+        self.assertNotEqual(habit.reason_body, "Custom body stays.")
+        self.assertNotEqual(habit.reason_headline, "Custom headline stays.")
+        self.assertNotEqual(habit.science_badge, "Custom badge stays.")
+        self.assertNotEqual(habit.rewards, [{"icon": "🧪", "label": "Custom reward", "sub": "Custom sub"}])
+        self.assertNotEqual(habit.proof_metric_name, "Custom metric")
+        self.assertNotEqual(habit.why_important, "Custom why stays.")
 
     def test_management_command_backfills_missing_system_habits_only(self):
         user = CustomUser.objects.create_user(
@@ -3074,33 +3092,54 @@ class SystemHabitDetailApiTests(APITestCase):
         self.system_habit.refresh_from_db()
         self.assertEqual(self.system_habit.name, "Protected System Habit")
 
-    def test_habit_list_backfills_blank_system_guidance(self):
+    def test_habit_list_syncs_system_guidance_from_fixture(self):
         habit = HabitTracker.objects.get(
             user=self.user,
             name="Visualization",
             is_system=True,
         )
-        HabitTracker.objects.filter(pk=habit.pk).update(description="", reason_body="")
+        HabitTracker.objects.filter(pk=habit.pk).update(
+            description="Old description",
+            reason_body="Old reason body",
+            reason_headline="Old headline",
+            science_badge="Old badge",
+            rewards=[],
+            proof_metric_name="",
+        )
 
         response = self.client.get("/routines/habits/")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         payload = next(item for item in response.data["habits"] if item["name"] == "Visualization")
-        self.assertTrue(payload["description"])
-        self.assertTrue(payload["reason_body"])
+        self.assertNotEqual(payload["description"], "Old description")
+        self.assertNotEqual(payload["reason_body"], "Old reason body")
+        self.assertNotEqual(payload["reason_headline"], "Old headline")
+        self.assertNotEqual(payload["science_badge"], "Old badge")
+        self.assertTrue(payload["rewards"])
+        self.assertTrue(payload["proof_metric_name"])
 
-    def test_habit_detail_backfills_blank_reason_body_for_system_habit(self):
+    def test_habit_detail_syncs_system_guidance_from_fixture(self):
         habit = HabitTracker.objects.get(
             user=self.user,
             name="Gratitude Practice",
             is_system=True,
         )
-        HabitTracker.objects.filter(pk=habit.pk).update(reason_body="")
+        HabitTracker.objects.filter(pk=habit.pk).update(
+            reason_body="Old reason body",
+            reason_headline="Old headline",
+            science_badge="Old badge",
+            rewards=[],
+            proof_metric_name="",
+        )
 
         response = self.client.get(f"/routines/habits/{habit.id}/")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertTrue(response.data["habit"]["reason_body"])
+        self.assertNotEqual(response.data["habit"]["reason_body"], "Old reason body")
+        self.assertNotEqual(response.data["habit"]["reason_headline"], "Old headline")
+        self.assertNotEqual(response.data["habit"]["science_badge"], "Old badge")
+        self.assertTrue(response.data["habit"]["rewards"])
+        self.assertTrue(response.data["habit"]["proof_metric_name"])
 
     def test_non_system_habit_keeps_existing_put_patch_and_delete_behavior(self):
         patch_response = self.client.patch(

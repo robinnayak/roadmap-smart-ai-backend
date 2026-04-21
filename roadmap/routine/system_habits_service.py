@@ -11,17 +11,23 @@ from routine.models import HabitTracker
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "system_habits.json"
 
-BACKFILL_FIELDS = ("description", "reason_body", "why_important")
+SYNC_FIELDS = (
+    "description",
+    "reason_headline",
+    "reason_body",
+    "science_badge",
+    "rewards",
+    "proof_metric_name",
+    "why_important",
+)
 
 
 def _backfill_habit_from_fixture(habit, habit_data) -> bool:
     update_fields = []
-    for field_name in BACKFILL_FIELDS:
+    for field_name in SYNC_FIELDS:
         current_value = getattr(habit, field_name, "")
         fixture_value = habit_data.get(field_name, "")
-        if current_value:
-            continue
-        if not fixture_value:
+        if current_value == fixture_value:
             continue
         setattr(habit, field_name, fixture_value)
         update_fields.append(field_name)
@@ -37,8 +43,8 @@ def _backfill_habit_from_fixture(habit, habit_data) -> bool:
 
 def backfill_system_habit_guidance_for_user(user) -> int:
     """
-    Fill blank guidance fields on already-existing system habits.
-    Does not create missing habits and does not overwrite non-blank values.
+    Sync system-habit guidance fields from the canonical fixture.
+    Does not create missing habits and does not modify user timing/settings fields.
     """
     with open(FIXTURE_PATH, "r", encoding="utf-8") as fixture_file:
         system_habits = json.load(fixture_file)
