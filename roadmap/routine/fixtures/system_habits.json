@@ -12,10 +12,29 @@
     "is_deletable": false,
     "ai_suggested": false,
     "is_active": true,
-    "why_important": "What am I grateful for right now? Who do I appreciate? What opportunity exists today?",
+    "why_important": "Gratitude shifts attention toward what is already working, which changes how you meet the rest of the day.",
+    "reason_headline": "Gratitude trains your brain to notice what is working instead of only scanning for threat.",
+    "reason_body": "Research in positive psychology shows gratitude practice can steadily shift attention, mood, and resilience over time. This is not about forced positivity. It is a deliberate mental rep that teaches your mind to register support, progress, and possibility.",
+    "science_badge": "Positive psychology evidence",
     "description": "1. Pause and take one slow breath.\n2. Name three things you are grateful for right now.\n3. Say why each one matters to you.\n4. Choose one gratitude to carry with you into the day.",
-    "reason_body": "1. Pause and take one slow breath.\n2. Name three things you are grateful for right now.\n3. Say why each one matters to you.\n4. Choose one gratitude to carry with you into the day.",
-    "rewards": []
+    "rewards": [
+      {
+        "icon": "🧠",
+        "label": "Less reactivity",
+        "sub": "You start the day less defensive and more grounded."
+      },
+      {
+        "icon": "⚡",
+        "label": "More emotional energy",
+        "sub": "Your attention moves toward support instead of stress."
+      },
+      {
+        "icon": "🌱",
+        "label": "Compounding optimism",
+        "sub": "What you notice repeatedly becomes your normal."
+      }
+    ],
+    "proof_metric_name": "Gratitude entries"
   },
   {
     "name": "Visualization",
@@ -30,10 +49,29 @@
     "is_deletable": false,
     "ai_suggested": false,
     "is_active": true,
-    "why_important": "See yourself one year from now. Two years from now. Feel the emotions: pride, strength, freedom, respect.",
+    "why_important": "Mental rehearsal makes the future feel familiar, which lowers hesitation when it is time to act.",
+    "reason_headline": "Your brain responds to vivid rehearsal with many of the same circuits it uses during real execution.",
+    "reason_body": "Neuroscience refers to this as mental simulation: when you vividly imagine action, the motor and emotional systems involved in that action become easier to access later. Done well, visualization is not fantasy. It is practice for identity, emotional state, and follow-through.",
+    "science_badge": "Mental simulation research",
     "description": "1. Close your eyes and slow your breathing.\n2. Picture your future self living the result you want.\n3. Add details: where you are, what you see, and how you feel.\n4. Connect that future to one action you must execute today.",
-    "reason_body": "1. Close your eyes and slow your breathing.\n2. Picture your future self living the result you want.\n3. Add details: where you are, what you see, and how you feel.\n4. Connect that future to one action you must execute today.",
-    "rewards": []
+    "rewards": [
+      {
+        "icon": "🎯",
+        "label": "Clearer direction",
+        "sub": "You stop drifting because the target feels concrete."
+      },
+      {
+        "icon": "🛡️",
+        "label": "Less self-sabotage",
+        "sub": "The future version of you starts feeling reachable, not foreign."
+      },
+      {
+        "icon": "🔥",
+        "label": "Stronger execution energy",
+        "sub": "You connect today's action to a future that already feels real."
+      }
+    ],
+    "proof_metric_name": "Visualization sessions"
   },
   {
     "name": "Today's Intention",
@@ -48,10 +86,29 @@
     "is_deletable": false,
     "ai_suggested": false,
     "is_active": true,
-    "why_important": "Choose ONE intention for today. Say it out loud 3 times. This becomes your anchor when you feel like quitting.",
+    "why_important": "A stated intention filters your day so attention does not get stolen by whatever is loudest.",
+    "reason_headline": "Specific implementation intentions outperform vague motivation because they tell your brain what to execute.",
+    "reason_body": "Behavioral research consistently shows that deciding in advance what you will do increases follow-through dramatically. One clear sentence is powerful because it reduces friction at decision points. You do not need more hype. You need a sharper instruction.",
+    "science_badge": "Implementation intention research",
     "description": "1. Choose one clear intention for today.\n2. Say it out loud three times.\n3. Write it in a short phrase you can remember quickly.\n4. Come back to that phrase whenever you feel distracted or resistant.",
-    "reason_body": "1. Choose one clear intention for today.\n2. Say it out loud three times.\n3. Write it in a short phrase you can remember quickly.\n4. Come back to that phrase whenever you feel distracted or resistant.",
-    "rewards": []
+    "rewards": [
+      {
+        "icon": "🧭",
+        "label": "A better mental filter",
+        "sub": "You make decisions faster because the priority is already set."
+      },
+      {
+        "icon": "🚫",
+        "label": "More resistance to distraction",
+        "sub": "Random urgency has less power when the day has a declared purpose."
+      },
+      {
+        "icon": "✅",
+        "label": "A measurable win condition",
+        "sub": "You can end the day knowing whether the right thing happened."
+      }
+    ],
+    "proof_metric_name": "Intentions kept"
   },
   {
     "name": "Review Today's Plan",
@@ -66,10 +123,29 @@
     "is_deletable": false,
     "ai_suggested": false,
     "is_active": true,
-    "why_important": "Review your routine and know exactly what you are executing today.",
+    "why_important": "A quick review turns your plan from a nice idea into an active operating system for the day.",
+    "reason_headline": "When you preview your day in advance, your brain is more likely to remember and execute future intentions.",
+    "reason_body": "Psychology calls this prospective memory: the ability to remember what you planned to do later. A short daily review surfaces conflicts, sharpens priorities, and helps you start with control instead of reacting in real time. It is one of the simplest ways to raise follow-through.",
+    "science_badge": "Prospective memory principle",
     "description": "1. Scan your routine from top to bottom.\n2. Identify the most important task you must protect today.\n3. Confirm when each key task will happen.\n4. Remove any confusion before you begin execution.",
-    "reason_body": "1. Scan your routine from top to bottom.\n2. Identify the most important task you must protect today.\n3. Confirm when each key task will happen.\n4. Remove any confusion before you begin execution.",
-    "rewards": []
+    "rewards": [
+      {
+        "icon": "🧩",
+        "label": "Fewer hidden conflicts",
+        "sub": "You catch unrealistic plans before they derail the day."
+      },
+      {
+        "icon": "👀",
+        "label": "Sharper prioritization",
+        "sub": "The non-negotiables become obvious before noise arrives."
+      },
+      {
+        "icon": "🕹️",
+        "label": "A more controlled start",
+        "sub": "You begin from intention instead of reaction."
+      }
+    ],
+    "proof_metric_name": "Plan reviews"
   },
   {
     "name": "Meditation",
@@ -84,10 +160,29 @@
     "is_deletable": false,
     "ai_suggested": false,
     "is_active": true,
-    "why_important": "Focus on your breath. When thoughts come, acknowledge them and return to your breath. Final 2 minutes: see yourself executing today perfectly.",
+    "why_important": "Meditation is a daily rep for attention, and attention is the foundation of self-control.",
+    "reason_headline": "Every time you notice the mind wandering and return, you strengthen the circuits behind focus and emotional regulation.",
+    "reason_body": "Meditation works because the return itself is the training. Studies have linked consistent practice with lower stress reactivity, better attentional control, and measurable structural changes in regions tied to regulation. It is not about emptying the mind. It is about becoming less ruled by it.",
+    "science_badge": "Attention training evidence",
     "description": "1. Sit upright and relax your shoulders.\n2. Breathe slowly through your nose and follow the inhale and exhale.\n3. When thoughts appear, notice them without judgment and return to the breath.\n4. Use the final moments to reset your mind for focused execution today.",
-    "reason_body": "1. Sit upright and relax your shoulders.\n2. Breathe slowly through your nose and follow the inhale and exhale.\n3. When thoughts appear, notice them without judgment and return to the breath.\n4. Use the final moments to reset your mind for focused execution today.",
-    "rewards": []
+    "rewards": [
+      {
+        "icon": "🌬️",
+        "label": "A calmer nervous system",
+        "sub": "You settle faster instead of carrying stress into everything."
+      },
+      {
+        "icon": "🎯",
+        "label": "Stronger focus",
+        "sub": "You get better at staying with the task in front of you."
+      },
+      {
+        "icon": "🧘",
+        "label": "Less emotional drag",
+        "sub": "You create space between a trigger and your reaction."
+      }
+    ],
+    "proof_metric_name": "Meditation sessions"
   },
   {
     "name": "Evening Journal & Reflection",
@@ -102,10 +197,29 @@
     "is_deletable": false,
     "ai_suggested": false,
     "is_active": true,
-    "why_important": "Review your day. What were your wins? What did you learn? End on a positive note.",
+    "why_important": "Reflection turns experience into usable feedback instead of letting the same patterns repeat tomorrow.",
+    "reason_headline": "Improvement compounds when doing is followed by honest review.",
+    "reason_body": "Research on deliberate practice shows the review phase is what separates repeated effort from real learning. Evening reflection helps you process the day, identify patterns, and notice the gap between what you intended and what you actually did. That is how self-awareness becomes behavioral change.",
+    "science_badge": "Deliberate practice principle",
     "description": "1. Write down your main wins from today.\n2. Note where you felt resistance or drifted off plan.\n3. Capture one lesson you want to keep.\n4. End with one adjustment that will improve tomorrow.",
-    "reason_body": "1. Write down your main wins from today.\n2. Note where you felt resistance or drifted off plan.\n3. Capture one lesson you want to keep.\n4. End with one adjustment that will improve tomorrow.",
-    "rewards": []
+    "rewards": [
+      {
+        "icon": "🪞",
+        "label": "Clearer self-awareness",
+        "sub": "You start seeing your real patterns instead of guessing at them."
+      },
+      {
+        "icon": "📘",
+        "label": "Better learning retention",
+        "sub": "The day becomes a lesson, not just a blur of activity."
+      },
+      {
+        "icon": "🌙",
+        "label": "A cleaner mental close",
+        "sub": "You go to sleep with less unfinished noise in your head."
+      }
+    ],
+    "proof_metric_name": "Reflection entries"
   },
   {
     "name": "Sleep Preparation",
@@ -120,9 +234,28 @@
     "is_deletable": false,
     "ai_suggested": false,
     "is_active": true,
-    "why_important": "All devices away. Dark, cool, quiet room. 4-7-8 breathing: inhale 4, hold 7, exhale 8. Review 3 wins. Lights out at 10:30 PM.",
+    "why_important": "Sleep quality is not decided at the moment you lie down. It is decided by the routine that leads into it.",
+    "reason_headline": "Your brain needs a predictable descent out of stimulation before it can enter real recovery.",
+    "reason_body": "Strong sleep is built through cueing the nervous system that the day is ending. Reduced light, lower stimulation, and a repeated wind-down routine help the body shift toward melatonin release and calmer physiology. A better night usually begins 30 minutes before bed, not at bedtime itself.",
+    "science_badge": "Sleep hygiene evidence",
     "description": "1. Put devices away and lower stimulation.\n2. Prepare a dark, cool, quiet sleep environment.\n3. Take a few slow calming breaths to downshift your body.\n4. Close the day, review your wins, and get to lights out on time.",
-    "reason_body": "1. Put devices away and lower stimulation.\n2. Prepare a dark, cool, quiet sleep environment.\n3. Take a few slow calming breaths to downshift your body.\n4. Close the day, review your wins, and get to lights out on time.",
-    "rewards": []
+    "rewards": [
+      {
+        "icon": "😴",
+        "label": "Faster sleep onset",
+        "sub": "Your body has fewer reasons to stay switched on."
+      },
+      {
+        "icon": "🔋",
+        "label": "Better recovery",
+        "sub": "You wake with more usable energy instead of carrying fatigue forward."
+      },
+      {
+        "icon": "🌅",
+        "label": "Stronger mornings",
+        "sub": "Tomorrow gets easier when tonight ends with intention."
+      }
+    ],
+    "proof_metric_name": "Sleep prep sessions"
   }
 ]
