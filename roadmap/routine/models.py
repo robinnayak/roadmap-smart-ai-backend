@@ -368,6 +368,9 @@ class DailyTaskItem(models.Model):
         related_name='daily_items',
     )
     why_important = models.TextField(blank=True)
+    how_it_helps_you = models.TextField(blank=True, null=True)
+    how_to_do_it = models.JSONField(blank=True, null=True)
+    your_log_placeholder = models.TextField(blank=True, null=True)
     display_order = models.IntegerField(default=0)
     base_points = models.DecimalField(
         max_digits=10,

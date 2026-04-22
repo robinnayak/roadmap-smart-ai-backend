@@ -516,7 +516,10 @@ class GoalHierarchyGenerator(BaseAIService):
                     "You are a daily task planner. "
                     "Create specific, actionable tasks that follow the provided category instructions. "
                     "Each task must include title, description, item_type, duration_minutes, "
-                    "frequency, difficulty_level, sequence_position, and rationale. "
+                    "frequency, difficulty_level, sequence_position, rationale, why_this, "
+                    "how_it_helps_you, how_to_do_it, and your_log_placeholder. "
+                    "Use a mix of science-backed credibility and grounded motivation. "
+                    "Never sound generic or preachy. "
                     "Respond with valid JSON containing a 'tasks' array. No prose."
                 ),
             )
@@ -585,12 +588,73 @@ class GoalHierarchyGenerator(BaseAIService):
 
         return [
             {
-                **template,
+                **self._enrich_task_copy_fields(
+                    task_data=template,
+                    goal_title=goal_title,
+                    milestone_title=milestone_title,
+                    subgoal_title=subgoal_title,
+                ),
                 "item_type": template.get("item_type") or item_type,
                 "sequence_position": index,
             }
             for index, template in enumerate(templates, 1)
         ]
+
+    @staticmethod
+    def _enrich_task_copy_fields(
+        *,
+        task_data: dict[str, Any],
+        goal_title: str,
+        milestone_title: str,
+        subgoal_title: str,
+    ) -> dict[str, Any]:
+        enriched = dict(task_data)
+        title = str(task_data.get("title") or "this task").strip()
+        description = str(task_data.get("description") or "").strip()
+        rationale = str(task_data.get("rationale") or "").strip()
+
+        how_to_do_it = task_data.get("how_to_do_it")
+        if not isinstance(how_to_do_it, list) or not how_to_do_it:
+            steps = []
+            if description:
+                for segment in re.split(r"(?:\n+|\s+\d+\.\s+)", description):
+                    cleaned = str(segment).strip(" -\n\r\t.")
+                    if cleaned:
+                        steps.append(cleaned)
+            if not steps:
+                steps = [
+                    f"Open a focused work block for {title.lower()}.",
+                    f"Complete the main action linked to {subgoal_title.lower()}.",
+                    "Capture one note so the next session starts faster.",
+                ]
+            enriched["how_to_do_it"] = steps[:5]
+
+        if not enriched.get("why_this"):
+            enriched["why_this"] = (
+                rationale
+                or f"Doing this today turns {subgoal_title} into visible progress instead of intention. "
+                f"It keeps momentum moving inside {milestone_title} while the work is still fresh."
+            )
+
+        if not enriched.get("how_it_helps_you"):
+            enriched["how_it_helps_you"] = (
+                f"This builds practical traction for {goal_title} by strengthening follow-through and reducing restart friction. "
+                "A small completed rep today makes the next rep easier to begin."
+            )
+
+        if not enriched.get("your_log_placeholder"):
+            enriched["your_log_placeholder"] = (
+                "When you complete this, note what became clearer, easier, or more repeatable for your larger goal."
+            )
+
+        if not enriched.get("description"):
+            enriched["description"] = (
+                enriched["how_to_do_it"][0]
+                if isinstance(enriched["how_to_do_it"], list) and enriched["how_to_do_it"]
+                else rationale
+            )
+
+        return enriched
 
     @staticmethod
     def _resolve_week_number(subgoal_data: dict) -> int:

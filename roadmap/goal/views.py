@@ -1211,10 +1211,18 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
         """
         # Merge instructions into description if the AI still sends both.
         # AI payloads can return either field as list/text; normalize to string first.
+        how_to_do_it = self._normalize_task_steps(data.get("how_to_do_it"))
         description = self._to_text(data.get("description", ""))
         instructions = self._to_text(data.get("instructions", ""))
         if instructions and instructions not in description:
             description = f"{description}\n\n{instructions}".strip()
+        if not description and how_to_do_it:
+            description = self._steps_to_description(how_to_do_it)
+
+        why_this = self._to_text(data.get("why_this", ""))
+        rationale = self._to_text(data.get("rationale", "")) or why_this
+        how_it_helps_you = self._to_text(data.get("how_it_helps_you", ""))
+        your_log_placeholder = self._to_text(data.get("your_log_placeholder", ""))
 
         goal = subgoal.milestone.goal
         resolved_category = goal.primary_category
@@ -1238,7 +1246,11 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
             trigger_after_days=data.get("trigger_after_days"),
             is_prerequisite=data.get("is_prerequisite", False),
             sequence_position=data.get("sequence_position", index - 1),
-            rationale=self._to_text(data.get("rationale", "")),
+            rationale=rationale,
+            why_this=why_this or None,
+            how_it_helps_you=how_it_helps_you or None,
+            how_to_do_it=how_to_do_it or None,
+            your_log_placeholder=your_log_placeholder or None,
             priority=data.get("priority", "medium"),
             display_order=index - 1,
             estimated_duration_minutes=data.get(
@@ -1293,6 +1305,29 @@ class CreateGoalWithHierarchyAPIView(GoalProductionApiView):
         if isinstance(value, list):
             return "\n".join(f"- {item}" for item in value)
         return str(value) if value else ""
+
+    @staticmethod
+    def _normalize_task_steps(value) -> list[str]:
+        if isinstance(value, list):
+            return [str(step).strip() for step in value if str(step).strip()]
+        if isinstance(value, str):
+            steps: list[str] = []
+            for raw_line in value.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                prefix, separator, remainder = line.partition(". ")
+                if separator and prefix.isdigit():
+                    line = remainder.strip()
+                steps.append(line)
+            return steps
+        return []
+
+    @staticmethod
+    def _steps_to_description(steps: list[str]) -> str:
+        if not steps:
+            return ""
+        return "\n".join(f"{index}. {step}" for index, step in enumerate(steps, 1))
 
 
 

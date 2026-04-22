@@ -84,6 +84,7 @@ IMPORTANT: Return JSON in this EXACT format:
         category = _load_category(resolved_category)
         output_schema = _load("goal_task/output_schema.txt")
         context = _render_context(subgoal_data, milestone_data, goal_data)
+        task_copy_requirements = _task_copy_requirements()
 
         return "\n\n".join(
             [
@@ -92,6 +93,7 @@ IMPORTANT: Return JSON in this EXACT format:
                 system,
                 category,
                 context,
+                task_copy_requirements,
                 output_schema,
             ]
         ).strip()
@@ -201,6 +203,30 @@ Available Daily Time: {available_daily_minutes} min
 Strengths: {_format_list(user_strengths)}
 Blockers: {_format_list(user_blockers)}
 Motivation Style: {motivation_style}
+""".strip()
+
+
+def _task_copy_requirements() -> str:
+    return """
+ROUTINE TAB COPY REQUIREMENTS
+
+For every task, generate these routine-tab fields alongside the standard task fields:
+- why_this: 2-3 sentences. Why this specific action, done today, moves the goal forward.
+- how_it_helps_you: 2-3 sentences. What concretely changes in skill, momentum, or outcome.
+- how_to_do_it: array of 3-5 short execution steps. Specific, practical, and easy to follow.
+- your_log_placeholder: 1 sentence shown before first completion. Tie the future log back to the goal.
+
+Tone requirements:
+- Mix of science-backed credibility and grounded motivation.
+- Never generic or preachy.
+- Write like a smart coach who respects the user's intelligence.
+- Do NOT repeat the task title or goal name verbatim — reframe it as daily practice.
+
+Writing rules:
+- Keep each field distinct. Do not reuse the same wording across tabs.
+- Make the copy sound specific to the user's goal context, time capacity, and current phase.
+- "description" should stay as a short execution overview, while "how_to_do_it" carries the step-by-step guidance.
+- Return "how_to_do_it" as a JSON array of strings, not one combined paragraph.
 """.strip()
 
 

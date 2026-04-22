@@ -517,6 +517,22 @@ def _build_removed_item_snapshot(existing: DailyTaskList) -> list[dict]:
     return snapshots
 
 
+def _description_to_steps(description: str) -> list[str]:
+    normalized = (description or "").strip()
+    if not normalized:
+        return []
+
+    steps: list[str] = []
+    for raw_line in normalized.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        prefix, separator, remainder = line.partition(". ")
+        if separator and prefix.isdigit():
+            steps.append(remainder.strip())
+    return steps
+
+
 def _manual_task_sort_key(snapshot: dict) -> tuple[int, str]:
     return (int(snapshot.get("display_order", 0) or 0), str(snapshot.get("title", "")))
 
@@ -2120,6 +2136,7 @@ def get_or_create_today_task_list(
                     )
                 if tone_note:
                     adjusted_description = _append_adjustment_note(adjusted_description, tone_note)
+                task_steps = task.how_to_do_it if isinstance(task.how_to_do_it, list) else None
                 items_to_create.append(
                     DailyTaskItem(
                         task_list=task_list,
@@ -2138,7 +2155,10 @@ def get_or_create_today_task_list(
                             wake_baseline_minutes=wake_baseline_minutes,
                             use_wake_baseline=task_uses_fallback,
                         ),
-                        why_important=f"Part of: {goal.title}",
+                        why_important=(task.why_this or task.rationale or f"Part of: {goal.title}"),
+                        how_it_helps_you=task.how_it_helps_you or "",
+                        how_to_do_it=task_steps or _description_to_steps(task.description),
+                        your_log_placeholder=task.your_log_placeholder or "",
                         display_order=order,
                     )
                 )

@@ -1,5 +1,122 @@
+import json
+import logging
 import re
 from collections import defaultdict
+
+try:
+    from ai.config import get_model_for_task
+    from ai.providers.router import create_routed_provider
+except ModuleNotFoundError:
+    from roadmap.ai.config import get_model_for_task
+    from roadmap.ai.providers.router import create_routed_provider
+
+
+logger = logging.getLogger(__name__)
+
+VALID_DOMAINS = {"career", "health", "financial", "learning", "personal", "business", "other"}
+
+DOMAIN_CLASSIFICATION_SYSTEM_PROMPT = """
+You are classifying a user's goal into exactly one DayOneGoal intake domain.
+
+Valid domains:
+- career
+- health
+- financial
+- learning
+- personal
+- business
+- other
+
+Return ONLY valid JSON with this exact shape:
+{
+  "domain": "<label>",
+  "confidence": <float between 0.0 and 1.0>,
+  "reasoning": "<one sentence>"
+}
+
+Rules:
+- Choose exactly one domain from the valid domains list.
+- confidence must be a JSON number between 0.0 and 1.0.
+- reasoning must be one concise sentence.
+- Do not include markdown fences.
+- Do not include any keys other than domain, confidence, and reasoning.
+""".strip()
+
+
+def _strip_markdown_fences(value: str) -> str:
+    content = (value or "").strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", content, count=1)
+        content = re.sub(r"\s*```$", "", content, count=1)
+    return content.strip()
+
+
+def _parse_domain_classification_response(raw_content: str) -> dict:
+    payload = json.loads(_strip_markdown_fences(raw_content))
+    if not isinstance(payload, dict):
+        raise ValueError("Domain classification response must be a JSON object.")
+
+    domain = str(payload.get("domain", "")).strip().lower()
+    if domain not in VALID_DOMAINS:
+        raise ValueError(f"Invalid domain '{domain}'.")
+
+    confidence = payload.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        raise ValueError("confidence must be a float between 0.0 and 1.0.")
+    confidence = float(confidence)
+    if confidence < 0.0 or confidence > 1.0:
+        raise ValueError("confidence must be between 0.0 and 1.0.")
+
+    reasoning = str(payload.get("reasoning", "")).strip()
+    if not reasoning:
+        raise ValueError("reasoning is required.")
+
+    return {
+        "domain": domain,
+        "confidence": confidence,
+        "reasoning": reasoning,
+    }
+
+
+def _call_llm_classify_domain(goal_text: str) -> dict:
+    normalized_goal_text = (goal_text or "").strip()
+    if not normalized_goal_text:
+        raise ValueError("goal_text is required for domain classification.")
+
+    provider = create_routed_provider(
+        task_name="goal_category_resolution",
+        model=get_model_for_task("goal_category_resolution"),
+        temperature=0.0,
+        max_tokens=120,
+    )
+    prompt = (
+        "Classify this goal into one valid intake domain.\n\n"
+        f"Goal text:\n{normalized_goal_text}"
+    )
+
+    response = provider.generate_response(
+        prompt=prompt,
+        system_prompt=DOMAIN_CLASSIFICATION_SYSTEM_PROMPT,
+    )
+    try:
+        return _parse_domain_classification_response(response.content)
+    except Exception as first_error:
+        repair_prompt = (
+            f"{prompt}\n\n"
+            "Your previous response could not be parsed or validated. "
+            "Return ONLY valid JSON with exactly these keys: domain, confidence, reasoning. "
+            f"Previous response:\n{response.content}"
+        )
+        repair_response = provider.generate_response(
+            prompt=repair_prompt,
+            system_prompt=DOMAIN_CLASSIFICATION_SYSTEM_PROMPT,
+        )
+        try:
+            return _parse_domain_classification_response(repair_response.content)
+        except Exception as second_error:
+            raise ValueError(
+                "Failed to parse or validate domain classification response after repair retry."
+            ) from second_error
 
 
 class GIEIntakeUnderstandingService:
@@ -8,39 +125,6 @@ class GIEIntakeUnderstandingService:
     - Step 1: Natural-language understanding signal extraction.
     - Step 2: Intent and goal-domain classification.
     """
-
-    DOMAIN_KEYWORDS = {
-        'career': (
-            'career', 'job', 'promotion', 'salary', 'interview', 'resume',
-            'role', 'manager', 'leadership', 'office', 'work',
-        ),
-        'health': (
-            'health', 'fitness', 'workout', 'exercise', 'run', 'running',
-            'marathon', 'sleep', 'diet', 'weight', 'gym', 'injury',
-            'meal', 'meals', 'meal prep', 'nutrition', 'protein',
-            'anxiety', 'stress', 'mental', 'mindfulness', 'meditation',
-            'burnout', 'overwhelm', 'calm', 'mood', 'emotional', 'nervous',
-            'clarity', 'peace',
-        ),
-        'financial': (
-            'financial', 'finance', 'money', 'save', 'savings', 'invest',
-            'investment', 'debt', 'income', 'revenue', 'emergency fund',
-            'budget', 'house', 'home', 'mortgage', 'down payment',
-            'property', 'rent', 'real estate',
-        ),
-        'learning': (
-            'learn', 'learning', 'study', 'course', 'certification', 'skill',
-            'skills', 'book', 'training', 'practice', 'master',
-        ),
-        'personal': (
-            'personal', 'relationship', 'family', 'confidence', 'habit',
-            'discipline', 'mindset', 'balance', 'lifestyle', 'self',
-        ),
-        'business': (
-            'business', 'startup', 'founder', 'company', 'product', 'launch',
-            'customers', 'client', 'market', 'sales', 'profit',
-        ),
-    }
 
     INTENT_SIGNALS = {
         'build_habit': (
@@ -63,7 +147,6 @@ class GIEIntakeUnderstandingService:
         ),
     }
 
-    DOMAIN_ORDER = ['career', 'health', 'financial', 'learning', 'personal', 'business', 'other']
     INTENT_ORDER = ['build_habit', 'achieve_outcome', 'recover_or_reduce', 'maintain_state', 'explore_or_start']
 
     @classmethod
@@ -72,7 +155,7 @@ class GIEIntakeUnderstandingService:
         tokens = cls._tokenize(normalized_text)
 
         nlu = cls._extract_nlu_signals(normalized_text)
-        domain = cls._classify_domain(normalized_text, tokens)
+        domain = cls._classify_domain_llm(goal_text)
         intent = cls._classify_intent(normalized_text, tokens)
 
         return {
@@ -140,42 +223,27 @@ class GIEIntakeUnderstandingService:
         return [{'value': float(value)} for value in matches]
 
     @classmethod
-    def _classify_domain(cls, normalized_text: str, tokens: list[str]) -> dict:
-        scores = defaultdict(int)
-        matched_signals: dict[str, list[str]] = {key: [] for key in cls.DOMAIN_KEYWORDS.keys()}
-
-        token_set = set(tokens)
-        for domain, keywords in cls.DOMAIN_KEYWORDS.items():
-            for keyword in keywords:
-                if ' ' in keyword:
-                    if keyword in normalized_text:
-                        scores[domain] += 2
-                        matched_signals[domain].append(keyword)
-                elif keyword in token_set:
-                    scores[domain] += 1
-                    matched_signals[domain].append(keyword)
-
-        top_domain = 'other'
-        top_score = 0
-        for domain in cls.DOMAIN_ORDER:
-            score = scores.get(domain, 0)
-            if score > top_score:
-                top_domain = domain
-                top_score = score
-
-        total_score = sum(scores.values())
-        if top_domain == 'other':
-            confidence = 0.35 if normalized_text else 0.0
-            matched = []
-        else:
-            confidence = round(min(0.99, 0.45 + (top_score / max(total_score, 1)) * 0.5), 2)
-            matched = sorted(set(matched_signals[top_domain]))
+    def _classify_domain_llm(cls, goal_text: str) -> dict:
+        try:
+            classification = _call_llm_classify_domain(goal_text)
+        except Exception:
+            logger.exception("GIE domain classification failed")
+            return {
+                'value': 'other',
+                'confidence': 0.0,
+                'reasoning': 'Classification failed — LLM unavailable.',
+                'matched_signals': [],
+                'score_breakdown': {},
+                'source': 'fallback',
+            }
 
         return {
-            'value': top_domain,
-            'confidence': confidence,
-            'matched_signals': matched,
-            'score_breakdown': {domain: scores.get(domain, 0) for domain in cls.DOMAIN_ORDER if domain != 'other'},
+            'value': classification['domain'],
+            'confidence': classification['confidence'],
+            'reasoning': classification['reasoning'],
+            'matched_signals': [],
+            'score_breakdown': {},
+            'source': 'llm',
         }
 
     @classmethod

@@ -9,8 +9,12 @@ Start with { and end with }
     {
       "title": "string",
       "item_type": "physical | cognitive | habit | ritual | task",
-      "description": "string — numbered steps explaining how to execute",
+      "description": "string — short execution overview that complements how_to_do_it",
       "rationale": "string — why this task matters for this subgoal",
+      "why_this": "string — 2-3 sentences explaining why this specific action today moves the goal forward",
+      "how_it_helps_you": "string — 2-3 sentences describing the concrete benefit in skill, momentum, or outcome",
+      "how_to_do_it": ["step 1", "step 2", "step 3"],
+      "your_log_placeholder": "string — 1 sentence shown before the first completion log",
       "duration_minutes": "integer",
       "frequency": "daily | weekdays | 3x_per_week | 2x_per_week | weekly | monthly | event_triggered | once",
       "sequence_position": "integer — 0-indexed within this subgoal",
@@ -30,3 +34,5 @@ VALIDATION RULES
 - Do not include milestone-level wrappers.
 - Use only the allowed item_type values.
 - Ensure titles are unique within this array.
+- Every task must include all 4 routine-tab fields.
+- "how_to_do_it" must be an array with 3-5 short, specific steps.

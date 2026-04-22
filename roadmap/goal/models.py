@@ -1166,6 +1166,10 @@ class Task(models.Model):
     is_prerequisite = models.BooleanField(default=False)
     sequence_position = models.PositiveIntegerField(default=0)
     rationale = models.TextField(blank=True, default="")
+    why_this = models.TextField(blank=True, null=True)
+    how_it_helps_you = models.TextField(blank=True, null=True)
+    how_to_do_it = models.JSONField(blank=True, null=True)
+    your_log_placeholder = models.TextField(blank=True, null=True)
 
     # Resources
     # resources = models.JSONField(
