@@ -1,8 +1,7 @@
-from rest_framework import serializers, status
+from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.utils import timezone
 
 from .date_context import get_date_context
 from .engine import (
@@ -15,45 +14,24 @@ from .engine import (
     get_goal_tasks_for_user,
     get_or_create_daily_log,
     get_or_create_ritual_profile,
+    get_ritual_time_context,
     get_task_for_today,
+    clean_message_for_tts,
     mark_morning_completed,
     mark_morning_entry,
     mark_night_completed,
     set_wake_delta_for_log,
 )
-from .models import UserRitualProfile
 
-
-class ToneSerializer(serializers.Serializer):
-    tone = serializers.ChoiceField(choices=[choice[0] for choice in UserRitualProfile.TONE_CHOICES])
-
-
-class MorningEnergySerializer(serializers.Serializer):
-    energy = serializers.ChoiceField(choices=["sleepy", "neutral", "energized", "fired"])
-
-
-class NightReflectionSerializer(serializers.Serializer):
-    status = serializers.ChoiceField(choices=["done", "partial", "missed", "strong", "okay", "rough"])
-
-
-class NightIntentSerializer(serializers.Serializer):
-    task = serializers.CharField(max_length=500)
-    alarm_time = serializers.TimeField(input_formats=["%H:%M", "%H:%M:%S"])
-
-
-class NightCloseSerializer(serializers.Serializer):
-    alarm_time = serializers.TimeField(input_formats=["%H:%M", "%H:%M:%S"])
-    mood = serializers.ChoiceField(choices=["strong", "okay", "rough"])
-
-
-class AlarmTimeSerializer(serializers.Serializer):
-    type = serializers.ChoiceField(choices=["morning", "night"])
-    time = serializers.TimeField(input_formats=["%H:%M", "%H:%M:%S"])
-
-
-class SnoozeCountSerializer(serializers.Serializer):
-    count = serializers.IntegerField(min_value=0)
-
+from .serializers import (
+    ToneSerializer,
+    MorningEnergySerializer,
+    NightReflectionSerializer,
+    NightIntentSerializer,
+    NightCloseSerializer,
+    AlarmTimeSerializer,
+    SnoozeCountSerializer,
+)
 
 class RitualBaseView(APIView):
     permission_classes = [IsAuthenticated]
@@ -63,14 +41,28 @@ class RitualBaseView(APIView):
         return get_or_create_ritual_profile(user)
 
     @staticmethod
-    def _get_today_log(user):
-        return get_or_create_daily_log(user, timezone.localdate())
+    def _wants_plain_message(request):
+        plain = str(request.query_params.get("plain", "")).strip().lower()
+        output_format = str(request.query_params.get("format", "")).strip().lower()
+        return plain in {"1", "true", "yes"} or output_format == "tts"
+
+    @staticmethod
+    def _time_context(request):
+        return get_ritual_time_context(
+            request.user,
+            header_timezone=request.headers.get("X-User-Timezone"),
+        )
+
+    @classmethod
+    def _get_local_today_log(cls, request):
+        return get_or_create_daily_log(request.user, cls._time_context(request)["local_date"])
 
 
 class MorningMessageAPIView(RitualBaseView):
     def get(self, request):
         profile = self._get_profile(request.user)
-        log = self._get_today_log(request.user)
+        time_ctx = self._time_context(request)
+        log = get_or_create_daily_log(request.user, time_ctx["local_date"])
         mark_morning_entry(log, profile.morning_alarm_time)
         payload = build_morning_message(
             request.user,
@@ -82,10 +74,14 @@ class MorningMessageAPIView(RitualBaseView):
                 "current_date": log.date,
             },
         )
+        message = payload["message"]
+        if self._wants_plain_message(request):
+            message = clean_message_for_tts(message)
         return Response(
             {
-                "message": payload["message"],
+                "message": message,
                 "task_today": payload["task_today"],
+                "tone": profile.ritual_tone,
             },
             status=status.HTTP_200_OK,
         )
@@ -96,7 +92,7 @@ class MorningEnergyAPIView(RitualBaseView):
         serializer = MorningEnergySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = self._get_profile(request.user)
-        log = self._get_today_log(request.user)
+        log = self._get_local_today_log(request)
         mark_morning_completed(log, serializer.validated_data["energy"], profile.morning_alarm_time)
         return Response(
             {
@@ -110,12 +106,17 @@ class MorningEnergyAPIView(RitualBaseView):
 class NightOpenAPIView(RitualBaseView):
     def get(self, request):
         profile = self._get_profile(request.user)
-        log = self._get_today_log(request.user)
+        time_ctx = self._time_context(request)
+        log = get_or_create_daily_log(request.user, time_ctx["local_date"])
+        message = build_night_open(request.user, tone=profile.ritual_tone, current_date=log.date)
+        if self._wants_plain_message(request):
+            message = clean_message_for_tts(message)
         return Response(
             {
-                "message": build_night_open(request.user, tone=profile.ritual_tone, current_date=log.date),
+                "message": message,
                 "task_today": get_task_for_today(request.user, current_date=log.date),
                 "alarm_time": profile.morning_alarm_time.strftime("%H:%M"),
+                "tone": profile.ritual_tone,
             },
             status=status.HTTP_200_OK,
         )
@@ -126,7 +127,7 @@ class NightReflectionAPIView(RitualBaseView):
         serializer = NightReflectionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = self._get_profile(request.user)
-        log = self._get_today_log(request.user)
+        log = self._get_local_today_log(request)
         reflection = serializer.validated_data["status"]
         if reflection in {"done", "partial", "missed"}:
             log.yesterday_task_reflection = reflection
@@ -142,7 +143,7 @@ class NightIntentAPIView(RitualBaseView):
         serializer = NightIntentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = self._get_profile(request.user)
-        log = self._get_today_log(request.user)
+        log = self._get_local_today_log(request)
         task = serializer.validated_data["task"].strip()
         log.tomorrow_intent = task
         log.save(update_fields=["tomorrow_intent", "updated_at"])
@@ -157,7 +158,7 @@ class NightCloseAPIView(RitualBaseView):
         serializer = NightCloseSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = self._get_profile(request.user)
-        log = self._get_today_log(request.user)
+        log = self._get_local_today_log(request)
         mark_night_completed(log, serializer.validated_data["mood"])
         goal_day_ctx = _get_goal_day_context(request.user, current_date=log.date)
         return Response(
@@ -174,7 +175,11 @@ class NightCloseAPIView(RitualBaseView):
 
 class GoalTasksAPIView(RitualBaseView):
     def get(self, request):
-        return Response({"tasks": get_goal_tasks_for_user(request.user, limit=6)}, status=status.HTTP_200_OK)
+        time_ctx = self._time_context(request)
+        return Response(
+            {"tasks": get_goal_tasks_for_user(request.user, limit=6, current_date=time_ctx["local_date"])},
+            status=status.HTTP_200_OK,
+        )
 
 
 class ToneAPIView(RitualBaseView):
@@ -183,12 +188,34 @@ class ToneAPIView(RitualBaseView):
         return Response({"tone": profile.ritual_tone}, status=status.HTTP_200_OK)
 
     def post(self, request):
+        return self.patch(request)
+
+    def patch(self, request):
         serializer = ToneSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = self._get_profile(request.user)
         profile.ritual_tone = serializer.validated_data["tone"]
         profile.save(update_fields=["ritual_tone", "updated_at"])
         return Response({"tone": profile.ritual_tone}, status=status.HTTP_200_OK)
+
+
+class RitualStatusAPIView(RitualBaseView):
+    def get(self, request):
+        profile = self._get_profile(request.user)
+        time_ctx = self._time_context(request)
+        log = get_or_create_daily_log(request.user, time_ctx["local_date"])
+        return Response(
+            {
+                "time_segment": time_ctx["time_segment"],
+                "timezone": time_ctx["timezone"],
+                "local_date": time_ctx["local_date"].isoformat(),
+                "local_time": time_ctx["local_time"].strftime("%H:%M"),
+                "tone": profile.ritual_tone,
+                "morning_session_completed": log.morning_session_completed,
+                "night_session_completed": log.night_session_completed,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class AlarmTimeAPIView(RitualBaseView):
@@ -215,7 +242,7 @@ class SnoozeCountAPIView(RitualBaseView):
         serializer = SnoozeCountSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = self._get_profile(request.user)
-        log = self._get_today_log(request.user)
+        log = self._get_local_today_log(request)
         log.snooze_count = serializer.validated_data["count"]
         set_wake_delta_for_log(log, profile.morning_alarm_time)
         log.save(update_fields=["snooze_count", "wake_delta_minutes", "updated_at"])

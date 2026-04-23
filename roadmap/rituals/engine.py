@@ -1,8 +1,12 @@
+import re
 from datetime import timedelta
+from typing import Dict, Tuple
+from zoneinfo import ZoneInfo
 
 from django.db.models import Q
 from django.utils import timezone
 
+from authentication.models import Profile
 from goal.models import Goal, Task
 
 from .date_context import get_date_context, is_birthday
@@ -10,8 +14,8 @@ from .models import DailyRitualLog, UserRitualProfile
 from .templates import DATE_TEMPLATES, MESSAGE_TEMPLATES, MILESTONE_TEMPLATES, get_milestone_key
 
 
-ROUTINE_KEYS = ["water", "coffee", "freshen", "no_phone", "stretch"]
-TASK_RESPONSE_MAP = {
+ROUTINE_KEYS: Tuple[str, ...] = ("water", "coffee", "freshen", "no_phone", "stretch")
+TASK_RESPONSE_MAP: Dict[str, str] = {
     "done": "night_task_done",
     "partial": "night_task_missed",
     "missed": "night_task_missed",
@@ -19,13 +23,36 @@ TASK_RESPONSE_MAP = {
     "okay": "night_task_done",
     "rough": "night_task_missed",
 }
-TODAY_TASK_PHRASES = {
+TODAY_TASK_PHRASES: Dict[str, str] = {
     "bro": "Today's one thing: {task}.",
     "gentle": "Today's one thing is {task}.",
     "soft_girl": "Today's little mission is {task}.",
     "coach": "Primary task today: {task}.",
 }
-
+DEFAULT_TIMEZONE = "Asia/Kathmandu"
+TIME_SEGMENTS: Tuple[Tuple[int, int, str], ...] = (
+    (0, 9, "morning"),
+    (10, 16, "afternoon"),
+    (17, 20, "evening"),
+    (21, 23, "night"),
+)
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001f1e6-\U0001f1ff"
+    "\U0001f300-\U0001f5ff"
+    "\U0001f600-\U0001f64f"
+    "\U0001f680-\U0001f6ff"
+    "\U0001f700-\U0001f77f"
+    "\U0001f780-\U0001f7ff"
+    "\U0001f800-\U0001f8ff"
+    "\U0001f900-\U0001f9ff"
+    "\U0001fa00-\U0001faff"
+    "\u2600-\u27bf"
+    "\ufe0f"
+    "\u200d"
+    "]+",
+    flags=re.UNICODE,
+)
 
 def get_or_create_ritual_profile(user):
     return UserRitualProfile.objects.get_or_create(user=user)[0]
@@ -35,6 +62,53 @@ def get_or_create_daily_log(user, log_date=None):
     log_date = log_date or timezone.localdate()
     log, _ = DailyRitualLog.objects.get_or_create(user=user, date=log_date)
     return log
+
+
+def get_user_timezone(user, header_timezone=None):
+    candidate = (header_timezone or "").strip()
+    if candidate:
+        try:
+            ZoneInfo(candidate)
+            return candidate
+        except Exception:
+            pass
+
+    profile, _ = Profile.objects.get_or_create(user=user)
+    candidate = (profile.timezone or DEFAULT_TIMEZONE).strip()
+    try:
+        ZoneInfo(candidate)
+        return candidate
+    except Exception:
+        profile.timezone = DEFAULT_TIMEZONE
+        profile.save(update_fields=["timezone"])
+        return DEFAULT_TIMEZONE
+
+
+def get_local_now(user, header_timezone=None):
+    timezone_name = get_user_timezone(user, header_timezone=header_timezone)
+    return timezone.now().astimezone(ZoneInfo(timezone_name))
+
+
+def get_time_segment_for_local_hour(hour):
+    for start_hour, end_hour, segment in TIME_SEGMENTS:
+        if start_hour <= hour <= end_hour:
+            return segment
+    return "morning"
+
+
+def get_ritual_time_context(user, header_timezone=None):
+    local_now = get_local_now(user, header_timezone=header_timezone)
+    return {
+        "timezone": str(local_now.tzinfo),
+        "local_date": local_now.date(),
+        "local_time": local_now.time().replace(second=0, microsecond=0),
+        "time_segment": get_time_segment_for_local_hour(local_now.hour),
+    }
+
+
+def clean_message_for_tts(message):
+    cleaned = EMOJI_PATTERN.sub("", message or "")
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def get_wake_status(wake_delta):

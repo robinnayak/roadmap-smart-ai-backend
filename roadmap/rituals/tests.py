@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -132,6 +132,33 @@ class RitualApiTests(APITestCase):
         self.assertEqual(post_response.status_code, status.HTTP_200_OK)
         self.assertEqual(post_response.data["tone"], "coach")
 
+        patch_response = self.client.patch("/api/ritual/tone/", data={"tone": "bro"}, format="json", secure=True)
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data["tone"], "bro")
+
+    def test_morning_message_can_return_plain_tts_string_with_tone(self):
+        tone_response = self.client.patch("/api/ritual/tone/", data={"tone": "coach"}, format="json", secure=True)
+        self.assertEqual(tone_response.status_code, status.HTTP_200_OK)
+
+        response = self.client.get("/api/ritual/morning/message/?plain=true", secure=True)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["tone"], "coach")
+        self.assertIsInstance(response.data["message"], str)
+        self.assertNotIn("\n", response.data["message"])
+
+    @patch("rituals.engine.timezone.now")
+    def test_status_returns_backend_time_segment_from_user_timezone(self, engine_now):
+        engine_now.return_value = datetime(2026, 4, 1, 15, 30, tzinfo=dt_timezone.utc)
+
+        response = self.client.get("/api/ritual/status/", secure=True, HTTP_X_USER_TIMEZONE="UTC")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["time_segment"], "afternoon")
+        self.assertEqual(response.data["local_time"], "15:30")
+        self.assertEqual(response.data["tone"], "gentle")
+        self.assertIn("morning_session_completed", response.data)
+
     def test_goal_tasks_returns_max_six_active_titles(self):
         response = self.client.get("/api/ritual/goal-tasks/", secure=True)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -139,25 +166,23 @@ class RitualApiTests(APITestCase):
         self.assertNotIn("Other secret task", response.data["tasks"])
         self.assertNotIn("Task 7", response.data["tasks"])
 
-    @patch("rituals.views.timezone.localdate")
-    @patch("rituals.engine.timezone.localdate")
-    def test_night_intent_feeds_next_morning_message(self, engine_localdate, views_localdate):
-        day_one = date(2026, 4, 1)
-        day_two = date(2026, 4, 2)
+    @patch("rituals.engine.timezone.now")
+    def test_night_intent_feeds_next_morning_message(self, engine_now):
+        day_one = datetime(2026, 4, 1, 8, 0, tzinfo=dt_timezone.utc)
+        day_two = datetime(2026, 4, 2, 8, 0, tzinfo=dt_timezone.utc)
 
-        engine_localdate.return_value = day_one
-        views_localdate.return_value = day_one
+        engine_now.return_value = day_one
         intent_response = self.client.post(
             "/api/ritual/night/intent/",
             data={"task": "Write the daily ritual tests", "alarm_time": "06:15"},
             format="json",
             secure=True,
+            HTTP_X_USER_TIMEZONE="UTC",
         )
         self.assertEqual(intent_response.status_code, status.HTTP_200_OK)
 
-        engine_localdate.return_value = day_two
-        views_localdate.return_value = day_two
-        morning_response = self.client.get("/api/ritual/morning/message/", secure=True)
+        engine_now.return_value = day_two
+        morning_response = self.client.get("/api/ritual/morning/message/", secure=True, HTTP_X_USER_TIMEZONE="UTC")
         self.assertEqual(morning_response.status_code, status.HTTP_200_OK)
         self.assertEqual(morning_response.data["task_today"], "Write the daily ritual tests")
         self.assertIn("Write the daily ritual tests", morning_response.data["message"])
