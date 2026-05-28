@@ -3,11 +3,13 @@
 # ==============================================================================
 import logging
 from collections import defaultdict
+from datetime import timedelta
 
 from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
 from django.db import transaction, models
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import status as http_status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
@@ -625,8 +627,83 @@ class PointsTransactionListAPIView(APIView):
         queryset = (
             PointsTransaction.objects.filter(wallet=wallet)
             .select_related("reward", "task_item")
-            .order_by("-created_at")
         )
+
+        transaction_type = request.query_params.get("transaction_type")
+        if transaction_type in {PointsTransaction.TYPE_CREDIT, PointsTransaction.TYPE_DEBIT}:
+            queryset = queryset.filter(transaction_type=transaction_type)
+        elif transaction_type not in (None, "", "all"):
+            return Response(
+                {"transaction_type": ["Use credit, debit, or all."]},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        source_type = request.query_params.get("source_type")
+        if source_type in {PointsTransaction.SOURCE_TASK_COMPLETION, PointsTransaction.SOURCE_REDEMPTION}:
+            queryset = queryset.filter(source_type=source_type)
+        elif source_type not in (None, "", "all"):
+            return Response(
+                {"source_type": ["Use task_completion, redemption, or all."]},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        search_query = (request.query_params.get("q") or "").strip()
+        if search_query:
+            queryset = queryset.filter(
+                models.Q(note__icontains=search_query)
+                | models.Q(task_item__title__icontains=search_query)
+                | models.Q(reward__name__icontains=search_query)
+            )
+
+        date_range = request.query_params.get("date_range")
+        if date_range in (None, "", "all"):
+            pass
+        elif date_range == "today":
+            queryset = queryset.filter(created_at__date=timezone.localdate())
+        elif date_range == "7d":
+            queryset = queryset.filter(created_at__gte=timezone.now() - timedelta(days=7))
+        elif date_range == "30d":
+            queryset = queryset.filter(created_at__gte=timezone.now() - timedelta(days=30))
+        else:
+            return Response(
+                {"date_range": ["Use today, 7d, 30d, or all."]},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        date_from = request.query_params.get("date_from")
+        if date_from:
+            parsed_from = parse_date(date_from)
+            if parsed_from is None:
+                return Response(
+                    {"date_from": ["Use YYYY-MM-DD."]},
+                    status=http_status.HTTP_400_BAD_REQUEST,
+                )
+            queryset = queryset.filter(created_at__date__gte=parsed_from)
+
+        date_to = request.query_params.get("date_to")
+        if date_to:
+            parsed_to = parse_date(date_to)
+            if parsed_to is None:
+                return Response(
+                    {"date_to": ["Use YYYY-MM-DD."]},
+                    status=http_status.HTTP_400_BAD_REQUEST,
+                )
+            queryset = queryset.filter(created_at__date__lte=parsed_to)
+
+        ordering = request.query_params.get("ordering") or "newest"
+        ordering_map = {
+            "newest": "-created_at",
+            "oldest": "created_at",
+            "points_high": "-amount",
+            "points_low": "amount",
+        }
+        if ordering not in ordering_map:
+            return Response(
+                {"ordering": ["Use newest, oldest, points_high, or points_low."]},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        queryset = queryset.order_by(ordering_map[ordering], "-created_at")
+
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
         serializer = PointsTransactionSerializer(page, many=True)

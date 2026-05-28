@@ -694,6 +694,39 @@ class PointsWalletRewardAPITests(APITestCase):
         self.assertEqual(response.data["results"][0]["source_type"], "task_completion")
         self.assertEqual(response.data["results"][0]["amount"], "30.0000")
 
+    def test_wallet_transaction_endpoint_supports_filtering_search_and_page_size(self):
+        second_task = DailyTaskItem.objects.create(
+            task_list=self.task_list,
+            item_type="manual_task",
+            title="Read finance chapter",
+            priority="medium",
+            estimated_minutes=20,
+            display_order=1,
+            base_points=Decimal("12.0000"),
+        )
+        self.client.post(
+            f"/routines/tasks/{self.task_item.id}/complete/",
+            data={},
+            format="json",
+            secure=True,
+        )
+        self.client.post(
+            f"/routines/tasks/{second_task.id}/complete/",
+            data={},
+            format="json",
+            secure=True,
+        )
+
+        response = self.client.get(
+            "/routines/wallet/transactions/?transaction_type=credit&source_type=task_completion&q=finance&page_size=1",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertIn("Read finance chapter", response.data["results"][0]["note"])
+
     def test_reward_catalog_lists_seeded_rewards(self):
         response = self.client.get("/routines/rewards/", secure=True)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
