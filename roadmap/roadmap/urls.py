@@ -4,6 +4,7 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from django.http import HttpRequest
+from base.views import HealthCheckAPIView
 from journeybook.views import JourneyBookDemoPreviewAPIView, JourneyBookDemoPreviewPDFAPIView
 
 
@@ -13,6 +14,7 @@ def trigger_error(request: HttpRequest):
 
 def build_urlpatterns(*, debug: bool):
     urlpatterns = [
+        path('health', HealthCheckAPIView.as_view(), name='health-check'),
         path('admin/', admin.site.urls),
         path('sentry-debug/', trigger_error),
         path('auth/', include('authentication.urls')),
@@ -23,6 +25,7 @@ def build_urlpatterns(*, debug: bool):
         path('journal/', include('journal.urls')),
         path('community/', include('community.urls')),
         path('events/', include('events.urls')),
+        path('api/assistant/', include('assistant.urls')),
         path('api/ritual/', include('rituals.urls')),
         path('api/journeybook/', include('journeybook.urls', namespace='journeybook')),
         path('journey-books/demo-preview/', JourneyBookDemoPreviewAPIView.as_view(), name='journeybook-demo-preview'),

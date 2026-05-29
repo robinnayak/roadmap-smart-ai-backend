@@ -1,10 +1,15 @@
 from rest_framework import serializers
 
+from .engine import VALID_TRIGGER_TYPES
 from .models import UserRitualProfile
 
 
 class ToneSerializer(serializers.Serializer):
     tone = serializers.ChoiceField(choices=[choice[0] for choice in UserRitualProfile.TONE_CHOICES])
+
+
+class RitualTriggerSerializer(serializers.Serializer):
+    trigger_type = serializers.ChoiceField(choices=VALID_TRIGGER_TYPES)
 
 
 class MorningEnergySerializer(serializers.Serializer):

@@ -6,12 +6,20 @@ from zoneinfo import ZoneInfo
 from django.db.models import Q
 from django.utils import timezone
 
-from authentication.models import Profile
+from authentication.models import Profile, UserPersonalDetails
 from goal.models import Goal, Task
 
 from .date_context import get_date_context, is_birthday
-from .models import DailyRitualLog, UserRitualProfile
-from .templates import DATE_TEMPLATES, MESSAGE_TEMPLATES, MILESTONE_TEMPLATES, get_milestone_key
+from .models import DailyRitualLog, RitualMessageHistory, UserRitualProfile
+from .templates import (
+    DATE_TEMPLATES,
+    MESSAGE_TEMPLATES,
+    MILESTONE_TEMPLATES,
+    SPECIAL_MESSAGE_TEMPLATES,
+    SPECIAL_PRIORITY,
+    TRIGGER_MESSAGE_TEMPLATES,
+    get_milestone_key,
+)
 
 
 ROUTINE_KEYS: Tuple[str, ...] = ("water", "coffee", "freshen", "no_phone", "stretch")
@@ -30,6 +38,24 @@ TODAY_TASK_PHRASES: Dict[str, str] = {
     "coach": "Primary task today: {task}.",
 }
 DEFAULT_TIMEZONE = "Asia/Kathmandu"
+TRIGGER_WEB_BUTTON_CLICKED = "WEB_BUTTON_CLICKED"
+TRIGGER_MORNING_ALARM_DISMISSED = "MORNING_ALARM_DISMISSED"
+TRIGGER_NIGHT_ALARM_DISMISSED = "NIGHT_ALARM_DISMISSED"
+TRIGGER_MILESTONE_REACHED = "MILESTONE_REACHED"
+TRIGGER_STREAK_RECOVERED = "STREAK_RECOVERED"
+TRIGGER_SPECIAL_DAY = "SPECIAL_DAY_TRIGGER"
+TRIGGER_WEB_MORNING_BUTTON_CLICKED = "WEB_MORNING_BUTTON_CLICKED"
+TRIGGER_WEB_NIGHT_BUTTON_CLICKED = "WEB_NIGHT_BUTTON_CLICKED"
+VALID_TRIGGER_TYPES: Tuple[str, ...] = (
+    TRIGGER_WEB_BUTTON_CLICKED,
+    TRIGGER_MORNING_ALARM_DISMISSED,
+    TRIGGER_NIGHT_ALARM_DISMISSED,
+    TRIGGER_MILESTONE_REACHED,
+    TRIGGER_STREAK_RECOVERED,
+    TRIGGER_SPECIAL_DAY,
+    TRIGGER_WEB_MORNING_BUTTON_CLICKED,
+    TRIGGER_WEB_NIGHT_BUTTON_CLICKED,
+)
 TIME_SEGMENTS: Tuple[Tuple[int, int, str], ...] = (
     (0, 9, "morning"),
     (10, 16, "afternoon"),
@@ -109,6 +135,141 @@ def get_ritual_time_context(user, header_timezone=None):
 def clean_message_for_tts(message):
     cleaned = EMOJI_PATTERN.sub("", message or "")
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _is_user_birthday(user, profile, current_date):
+    if profile.date_of_birth and profile.date_of_birth.month == current_date.month and profile.date_of_birth.day == current_date.day:
+        return True
+    personal_details = UserPersonalDetails.objects.filter(user=user).only("date_of_birth").first()
+    if not personal_details:
+        return False
+    return (
+        personal_details.date_of_birth.month == current_date.month
+        and personal_details.date_of_birth.day == current_date.day
+    )
+
+
+def _get_trigger_day_number(user, current_date):
+    goal_day_ctx = _get_goal_day_context(user, current_date)
+    if goal_day_ctx["day_number"]:
+        return goal_day_ctx["day_number"], goal_day_ctx["total_days"]
+
+    previous_days = (
+        RitualMessageHistory.objects.filter(user=user, shown_on__lt=current_date)
+        .values("shown_on")
+        .distinct()
+        .count()
+    )
+    return previous_days + 1, None
+
+
+def _has_missed_day(user, current_date):
+    previous = RitualMessageHistory.objects.filter(user=user, shown_on__lt=current_date).order_by("-shown_on").first()
+    if not previous:
+        return False
+    return (current_date - previous.shown_on).days > 1
+
+
+def _get_special_template_key(user, profile, trigger_type, current_date):
+    day_number, total_days = _get_trigger_day_number(user, current_date)
+    checks = {
+        "birthday": _is_user_birthday(user, profile, current_date),
+        "new_year": current_date.month == 1 and current_date.day == 1,
+        "milestone": trigger_type == TRIGGER_MILESTONE_REACHED
+        or (total_days is not None and day_number == max(total_days // 2, 1)),
+        "day_30": day_number == 30,
+        "day_21": day_number == 21,
+        "day_7": day_number == 7,
+        "missed_day": trigger_type == TRIGGER_STREAK_RECOVERED or _has_missed_day(user, current_date),
+        "monday": current_date.weekday() == 0,
+    }
+    for key in SPECIAL_PRIORITY:
+        if checks[key]:
+            return key
+    return None
+
+
+def _get_previous_day_template_id(user, current_date):
+    previous = RitualMessageHistory.objects.filter(user=user, shown_on__lt=current_date).order_by("-shown_on").first()
+    return previous.template_id if previous else None
+
+
+def _pick_template_from_pool(user, trigger_type, candidates, current_date):
+    previous_day_template_id = _get_previous_day_template_id(user, current_date)
+    used_template_ids = set(
+        RitualMessageHistory.objects.filter(user=user, trigger_type=trigger_type)
+        .values_list("template_id", flat=True)
+    )
+    candidate_ids = [candidate["id"] for candidate in candidates]
+
+    available = [
+        candidate
+        for candidate in candidates
+        if candidate["id"] not in used_template_ids and candidate["id"] != previous_day_template_id
+    ]
+    if available:
+        return available[0]
+
+    reset_available = [candidate for candidate in candidates if candidate["id"] != previous_day_template_id]
+    if reset_available:
+        return reset_available[0]
+
+    return candidates[0]
+
+
+def build_trigger_message(user, trigger_type, header_timezone=None):
+    profile = get_or_create_ritual_profile(user)
+    time_ctx = get_ritual_time_context(user, header_timezone=header_timezone)
+    current_date = time_ctx["local_date"]
+    time_segment = time_ctx["time_segment"]
+    special_key = _get_special_template_key(user, profile, trigger_type, current_date)
+
+    if special_key:
+        special_template = SPECIAL_MESSAGE_TEMPLATES[special_key]
+        candidates = [
+            {
+                "id": special_template["id"],
+                "message": special_template["message"],
+            }
+        ]
+    else:
+        candidates = [
+            template
+            for template in TRIGGER_MESSAGE_TEMPLATES[time_segment]
+            if template["tone"] == profile.ritual_tone
+        ]
+
+    template = _pick_template_from_pool(user, trigger_type, candidates, current_date)
+    return {
+        "message": template["message"],
+        "tone": profile.ritual_tone,
+        "voice_enabled": profile.ritual_active,
+        "template_id": template["id"],
+        "trigger_type": trigger_type,
+        "time_segment": time_segment,
+        "shown_on": current_date,
+    }
+
+
+def trigger_ritual_message(user, trigger_type, header_timezone=None):
+    payload = build_trigger_message(user, trigger_type, header_timezone=header_timezone)
+    RitualMessageHistory.objects.create(
+        user=user,
+        trigger_type=trigger_type,
+        template_id=payload["template_id"],
+        message=payload["message"],
+        tone=payload["tone"],
+        shown_on=payload["shown_on"],
+    )
+    get_or_create_daily_log(user, payload["shown_on"])
+    return {
+        "message": payload["message"],
+        "tone": payload["tone"],
+        "voice_enabled": payload["voice_enabled"],
+        "template_id": payload["template_id"],
+        "time_segment": payload["time_segment"],
+        "trigger_type": payload["trigger_type"],
+    }
 
 
 def get_wake_status(wake_delta):

@@ -9,6 +9,7 @@ from .views import (
     NightIntentAPIView,
     NightOpenAPIView,
     NightReflectionAPIView,
+    RitualTriggerAPIView,
     RitualStatusAPIView,
     SnoozeCountAPIView,
     ToneAPIView,
@@ -19,6 +20,7 @@ app_name = "rituals"
 
 
 urlpatterns = [
+    path("trigger/", RitualTriggerAPIView.as_view(), name="trigger"),
     path("status/", RitualStatusAPIView.as_view(), name="status"),
     path("morning/message/", MorningMessageAPIView.as_view(), name="morning-message"),
     path("morning/energy/", MorningEnergyAPIView.as_view(), name="morning-energy"),

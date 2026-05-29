@@ -110,3 +110,27 @@ class DailyRitualLog(models.Model):
 
     def __str__(self):
         return f"{self.user} ritual log {self.date.isoformat()}"
+
+
+class RitualMessageHistory(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="ritual_message_history",
+    )
+    trigger_type = models.CharField(max_length=40)
+    template_id = models.CharField(max_length=80)
+    message = models.TextField()
+    tone = models.CharField(max_length=20, choices=UserRitualProfile.TONE_CHOICES)
+    shown_on = models.DateField(default=timezone.localdate, db_index=True)
+    shown_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-shown_at"]
+        indexes = [
+            models.Index(fields=["user", "trigger_type", "shown_at"]),
+            models.Index(fields=["user", "template_id"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user} {self.trigger_type} {self.template_id}"

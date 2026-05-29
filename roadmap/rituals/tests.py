@@ -10,7 +10,7 @@ from authentication.models import CustomUser
 from goal.models import Goal, Milestone, SubGoal, Task
 
 from .engine import build_morning_message, get_or_create_daily_log, smart_pick
-from .models import DailyRitualLog
+from .models import DailyRitualLog, RitualMessageHistory
 
 
 class RitualEngineTests(TestCase):
@@ -122,6 +122,93 @@ class RitualApiTests(APITestCase):
         self.client.force_authenticate(user=None)
         response = self.client.get("/api/ritual/morning/message/", secure=True)
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_trigger_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+        response = self.client.post(
+            "/api/ritual/trigger/",
+            data={"trigger_type": "WEB_BUTTON_CLICKED"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_trigger_returns_deterministic_message_and_stores_history(self):
+        tone_response = self.client.patch("/api/ritual/tone/", data={"tone": "coach"}, format="json", secure=True)
+        self.assertEqual(tone_response.status_code, status.HTTP_200_OK)
+
+        response = self.client.post(
+            "/api/ritual/trigger/",
+            data={"trigger_type": "WEB_BUTTON_CLICKED"},
+            format="json",
+            secure=True,
+            HTTP_X_USER_TIMEZONE="UTC",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["tone"], "coach")
+        self.assertIn("message", response.data)
+        self.assertIn("template_id", response.data)
+        self.assertIn("voice_enabled", response.data)
+        self.assertEqual(response.data["trigger_type"], "WEB_BUTTON_CLICKED")
+        self.assertIn(response.data["time_segment"], {"morning", "afternoon", "evening", "night"})
+        self.assertEqual(RitualMessageHistory.objects.filter(user=self.user).count(), 1)
+
+    def test_trigger_uses_backend_time_segment_for_template_pool(self):
+        self.client.patch("/api/ritual/tone/", data={"tone": "gentle"}, format="json", secure=True)
+        cases = [
+            ("morning", datetime(2026, 4, 1, 2, 35, tzinfo=dt_timezone.utc)),
+            ("afternoon", datetime(2026, 4, 1, 9, 35, tzinfo=dt_timezone.utc)),
+            ("evening", datetime(2026, 4, 1, 12, 35, tzinfo=dt_timezone.utc)),
+            ("night", datetime(2026, 4, 1, 16, 35, tzinfo=dt_timezone.utc)),
+        ]
+
+        with patch("rituals.engine.timezone.now") as engine_now:
+            for expected_segment, now_value in cases:
+                with self.subTest(expected_segment=expected_segment):
+                    engine_now.return_value = now_value
+                    response = self.client.post(
+                        "/api/ritual/trigger/",
+                        data={"trigger_type": "WEB_BUTTON_CLICKED"},
+                        format="json",
+                        secure=True,
+                        HTTP_X_USER_TIMEZONE="Asia/Kathmandu",
+                    )
+
+                    self.assertEqual(response.status_code, status.HTTP_200_OK)
+                    self.assertEqual(response.data["time_segment"], expected_segment)
+                    self.assertEqual(response.data["trigger_type"], "WEB_BUTTON_CLICKED")
+                    self.assertTrue(response.data["template_id"].startswith(f"{expected_segment}_gentle_"))
+
+    def test_trigger_rejects_unknown_trigger_type(self):
+        response = self.client.post(
+            "/api/ritual/trigger/",
+            data={"trigger_type": "MORNING_ENERGY_SUBMITTED"},
+            format="json",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_trigger_avoids_immediate_repeat_when_variants_available(self):
+        self.client.patch("/api/ritual/tone/", data={"tone": "coach"}, format="json", secure=True)
+
+        first_response = self.client.post(
+            "/api/ritual/trigger/",
+            data={"trigger_type": "WEB_BUTTON_CLICKED"},
+            format="json",
+            secure=True,
+        )
+        second_response = self.client.post(
+            "/api/ritual/trigger/",
+            data={"trigger_type": "WEB_BUTTON_CLICKED"},
+            format="json",
+            secure=True,
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertNotEqual(first_response.data["template_id"], second_response.data["template_id"])
 
     def test_tone_get_and_post_round_trip(self):
         get_response = self.client.get("/api/ritual/tone/", secure=True)

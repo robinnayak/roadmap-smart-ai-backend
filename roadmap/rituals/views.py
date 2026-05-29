@@ -21,9 +21,11 @@ from .engine import (
     mark_morning_entry,
     mark_night_completed,
     set_wake_delta_for_log,
+    trigger_ritual_message,
 )
 
 from .serializers import (
+    RitualTriggerSerializer,
     ToneSerializer,
     MorningEnergySerializer,
     NightReflectionSerializer,
@@ -56,6 +58,18 @@ class RitualBaseView(APIView):
     @classmethod
     def _get_local_today_log(cls, request):
         return get_or_create_daily_log(request.user, cls._time_context(request)["local_date"])
+
+
+class RitualTriggerAPIView(RitualBaseView):
+    def post(self, request):
+        serializer = RitualTriggerSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = trigger_ritual_message(
+            request.user,
+            serializer.validated_data["trigger_type"],
+            header_timezone=request.headers.get("X-User-Timezone"),
+        )
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class MorningMessageAPIView(RitualBaseView):

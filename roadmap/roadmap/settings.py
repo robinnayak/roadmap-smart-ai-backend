@@ -170,6 +170,7 @@ INSTALLED_APPS = [
     'events',
     'gie.apps.GieConfig',
     'rituals.apps.RitualsConfig',
+    'assistant.apps.AssistantConfig',
 ]
 
 MIDDLEWARE = [

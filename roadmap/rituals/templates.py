@@ -10,6 +10,98 @@ def _tones(*, bro, gentle, soft_girl, coach):
     }
 
 
+TRIGGER_MESSAGE_TEMPLATES = {
+    "morning": [
+        {"id": "morning_bro_01", "tone": "bro", "message": "Ayo boss, up early today. That's different. Let's go."},
+        {"id": "morning_bro_02", "tone": "bro", "message": "Morning window is open. Take the first clean rep before the day gets loud."},
+        {"id": "morning_gentle_01", "tone": "gentle", "message": "You're up early. That's really nice to see. Good morning."},
+        {"id": "morning_gentle_02", "tone": "gentle", "message": "Morning is here. Start gently, then choose one clear thing."},
+        {"id": "morning_soft_girl_01", "tone": "soft_girl", "message": "You woke up early today. That made my morning."},
+        {"id": "morning_soft_girl_02", "tone": "soft_girl", "message": "Good morning, lovely. Start soft and keep one tiny promise."},
+        {"id": "morning_coach_01", "tone": "coach", "message": "Early. Good. Use it."},
+        {"id": "morning_coach_02", "tone": "coach", "message": "Morning block. Set the standard now."},
+    ],
+    "afternoon": [
+        {"id": "afternoon_bro_01", "tone": "bro", "message": "Afternoon reset, boss. Pick the highest-value move and get back in control."},
+        {"id": "afternoon_bro_02", "tone": "bro", "message": "Midday check. The day is still yours if you tighten up now."},
+        {"id": "afternoon_gentle_01", "tone": "gentle", "message": "It's afternoon. Take a steady breath and return to one useful step."},
+        {"id": "afternoon_gentle_02", "tone": "gentle", "message": "The day is halfway open. You can still make it kind and focused."},
+        {"id": "afternoon_soft_girl_01", "tone": "soft_girl", "message": "Afternoon reset. Tiny sip of focus, then one pretty little move."},
+        {"id": "afternoon_soft_girl_02", "tone": "soft_girl", "message": "Midday softness counts too. Come back to yourself and keep going."},
+        {"id": "afternoon_coach_01", "tone": "coach", "message": "Afternoon. Reset focus. Execute the highest-value task."},
+        {"id": "afternoon_coach_02", "tone": "coach", "message": "Midday checkpoint. Cut drift. Continue."},
+    ],
+    "evening": [
+        {"id": "evening_bro_01", "tone": "bro", "message": "Evening window. Finish one thing clean before the day closes."},
+        {"id": "evening_bro_02", "tone": "bro", "message": "Evening check, bro. No spiral. Just land the next move."},
+        {"id": "evening_gentle_01", "tone": "gentle", "message": "It's evening. Close one loop gently and let the day settle."},
+        {"id": "evening_gentle_02", "tone": "gentle", "message": "Evening is here. Choose one small close and give yourself peace."},
+        {"id": "evening_soft_girl_01", "tone": "soft_girl", "message": "Evening reset. Tuck one task in nicely before you exhale."},
+        {"id": "evening_soft_girl_02", "tone": "soft_girl", "message": "Soft evening check. Close one little loop and feel the day calm down."},
+        {"id": "evening_coach_01", "tone": "coach", "message": "Evening. Close the loop. Finish one action."},
+        {"id": "evening_coach_02", "tone": "coach", "message": "Day is narrowing. Complete what matters."},
+    ],
+    "night": [
+        {"id": "night_bro_01", "tone": "bro", "message": "Night check. Land the day, protect tomorrow, and shut it down clean."},
+        {"id": "night_bro_02", "tone": "bro", "message": "Night mode, boss. Reset the board and let tomorrow inherit a cleaner plan."},
+        {"id": "night_gentle_01", "tone": "gentle", "message": "It's night. Let today land gently and make tomorrow a little lighter."},
+        {"id": "night_gentle_02", "tone": "gentle", "message": "Night is here. Close softly, release what is done, and rest."},
+        {"id": "night_soft_girl_01", "tone": "soft_girl", "message": "Night reset, lovely. Tuck the day in and let tomorrow feel cared for."},
+        {"id": "night_soft_girl_02", "tone": "soft_girl", "message": "The day is closing. Be soft with yourself and set down what you can."},
+        {"id": "night_coach_01", "tone": "coach", "message": "Night. Close today. Prepare tomorrow. Recover."},
+        {"id": "night_coach_02", "tone": "coach", "message": "Shutdown window. Review, reset, rest."},
+    ],
+}
+
+
+SPECIAL_MESSAGE_TEMPLATES = {
+    "birthday": {
+        "id": "special_birthday_01",
+        "message": "Happy birthday. What a year to be building something real.",
+    },
+    "new_year": {
+        "id": "special_new_year_01",
+        "message": "You didn't wait for today to start. You've been building since Day 1.",
+    },
+    "milestone": {
+        "id": "special_milestone_01",
+        "message": "You're halfway. The second half is where most people stop. You won't.",
+    },
+    "day_30": {
+        "id": "special_day_30_01",
+        "message": "A month ago you started with a goal. Today you have 30 days of proof.",
+    },
+    "day_21": {
+        "id": "special_day_21_01",
+        "message": "21 days. The habit is forming. You've done the hard part.",
+    },
+    "day_7": {
+        "id": "special_day_7_01",
+        "message": "Seven days. Most people don't make it here. You did.",
+    },
+    "missed_day": {
+        "id": "special_missed_day_01",
+        "message": "You're back. That's the move - not the miss.",
+    },
+    "monday": {
+        "id": "special_monday_01",
+        "message": "Clean slate. Everything you build this week compounds.",
+    },
+}
+
+
+SPECIAL_PRIORITY = (
+    "birthday",
+    "new_year",
+    "milestone",
+    "day_30",
+    "day_21",
+    "day_7",
+    "missed_day",
+    "monday",
+)
+
+
 MESSAGE_TEMPLATES = {
     "wake": {
         "early": _tones(
